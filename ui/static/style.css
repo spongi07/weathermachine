@@ -83,9 +83,9 @@ b, .strong { font-weight: 600; }
 .banner.info { color: #a9cdfa; background: var(--info-bg); border-color: rgba(78, 161, 255, 0.35); font-weight: 500; }
 
 /* KPI strip ---------------------------------------------------------------- */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+/* Eight cards: one row on desktop, 4 × 2 on tablets, 2 × 4 on phones — never a lone card. */
+.kpis { display: grid; grid-template-columns: minmax(0, 2fr) repeat(7, minmax(0, 1fr)); gap: 8px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; min-width: 0; }
-.kpi.wide { grid-column: span 2; }
 .kpi label, .stats label { display: block; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .kpi b { display: block; font-size: 18px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi small, .stats small { display: block; color: var(--dim); font-size: 11px; }
@@ -146,6 +146,9 @@ table.alerts td:last-child { text-align: left; white-space: normal; }
 .chart .win.met text { fill: var(--good); }
 .chart .cur-label { fill: #fff; font: 700 11px var(--mono); }
 .chart .empty { fill: var(--muted); font: 12px var(--mono); }
+td.empty { color: var(--muted); text-align: center; padding: 14px 8px; font-style: italic; }
+table.providers tr.prov td { border-bottom: none; padding-bottom: 2px; }
+table.providers tr.prov-detail td { padding-top: 0; text-align: left; white-space: normal; overflow-wrap: break-word; }
 
 /* Peak panel */
 .peak { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
@@ -173,7 +176,7 @@ th { position: sticky; top: 0; background: var(--panel2); color: var(--muted); f
 td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; vertical-align: top; }
 th:first-child, td:first-child { text-align: left; }
 tbody tr:hover td { background: rgba(78, 161, 255, 0.05); }
-td.why, td.wrap, table.decisions td:last-child, table.checks td:last-child, table.providers td:last-child { text-align: left; white-space: normal; }
+td.why, td.wrap, table.decisions td:last-child, table.checks td:last-child { text-align: left; white-space: normal; }
 td.bid { color: var(--bid); }
 td.ask { color: var(--ask); }
 .ladder td.bucket { font-family: var(--mono); font-weight: 600; }
@@ -210,11 +213,17 @@ footer { text-align: center; padding: 10px; }
   .grid-3 { grid-template-columns: 1fr 1fr; }
   .grid-3 > :last-child { grid-column: span 2; }
 }
+@media (max-width: 1100px) {
+  .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
 @media (max-width: 980px) {
   .loc-grid, .grid-2, .grid-3 { grid-template-columns: minmax(0, 1fr); }
   .grid-3 > :last-child { grid-column: auto; }
-  .kpi.wide { grid-column: span 1; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi b { font-size: 15px; }
 }
 
 /* Long identifiers (model cell keys, slugs, hashes) must never widen the page. */

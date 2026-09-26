@@ -25,7 +25,8 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   inputs, orders and fills, and a replayable journal of every engine input.
 * **Decides deterministically.** The same kernel runs in backtest, demo and
   paper. The chain is: temperature state → peak detection per resolution view
-  → probability model trained on history → strategies (A: buy YES of the
+  → probability model trained on real EHAM history (downloaded from IEM and
+  trained automatically on first start) → strategies (A: buy YES of the
   final-high bucket, B: buy NO above it, C: split/unwind research) → risk
   engine → simulated venue.
 * **Fails closed.** A throttled or unhealthy provider, stale data, gaps in the
@@ -65,7 +66,8 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine run` | Paper-trading service (default) |
 | `weather-machine demo [--speed 60]` | Synthetic accelerated demo |
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
-| `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs; trains the model |
+| `weather-machine model train` | Download METAR history from IEM (rate-limited, cached) and train the model; `run` does this automatically when no model exists |
+| `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules (read-only) |
 | `weather-machine rules approve --sha256 … --reviewer …` | Human approval of a rules text |
@@ -84,7 +86,9 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_CONTACT` / `WM_USER_AGENT` | Contact for the NOAA User-Agent (required) |
 | `WM_ADMIN_TOKEN` | Operator token (kill switch) |
 | `WM_DASHBOARD_USER` / `WM_DASHBOARD_PASSWORD` | Optional Basic auth |
-| `WM_MODEL_PATH` | Trained model; without one, no weather trades |
+| `WM_MODEL_PATH` | Model file (default `/data/models/<station>.json`); without a model, no weather trades |
+| `WM_MODEL_AUTO_TRAIN` | `false` stops automatic training from IEM history (default `true`) |
+| `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
 | `WM_MODE`, `WM_HTTP_BIND`, `WM_UI_DIR`, `WM_LOG_FORMAT`, `WM_CONFIG` | Overrides |
 
 ## Development

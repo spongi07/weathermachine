@@ -28,6 +28,9 @@ pub struct DashboardSnapshot {
     pub instance: String,
     pub run_id: String,
     pub model_id: String,
+    /// Probability model status (no model ⇒ no weather trades).
+    #[serde(default)]
+    pub model: ModelDto,
     pub kill_switch: Option<String>,
     pub storage_ok: bool,
     pub execution_ok: bool,
@@ -42,6 +45,22 @@ pub struct DashboardSnapshot {
     pub decisions: Vec<DecisionDto>,
     pub alerts: Vec<AlertDto>,
     pub break_even: Vec<BreakEvenDto>,
+}
+
+/// Probability model status.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelDto {
+    /// `loaded` | `training` | `missing` | `failed` | `invalid` | `disabled`.
+    pub state: String,
+    pub detail: String,
+    /// Training progress in station-years: (done, total).
+    pub progress: Option<(u32, u32)>,
+}
+
+impl ModelDto {
+    pub fn loaded(&self) -> bool {
+        self.state == "loaded"
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

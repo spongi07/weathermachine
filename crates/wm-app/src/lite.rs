@@ -208,13 +208,24 @@ pub fn render(s: &DashboardSnapshot) -> String {
         esc(&ms_to_utc(s.engine_time_ms)),
         class_for(s.storage_ok),
         if s.storage_ok { "ok" } else { "DOWN" },
-        class_for(s.model_id != "no-edge"),
-        esc(&s.model_id),
+        class_for(s.model.loaded() && s.model_id != "no-edge"),
+        esc(&if s.model.loaded() || s.model.state.is_empty() {
+            s.model_id.clone()
+        } else {
+            s.model.state.clone()
+        }),
         esc(&s.run_id),
         esc(&s.version),
     );
     if s.demo {
         out.push_str("<div class=\"banner\">DEMO — synthetic data in accelerated time. Nothing here is real market or weather data.</div>");
+    }
+    if !s.demo && !s.model.loaded() && !s.model.detail.is_empty() {
+        let _ = write!(
+            out,
+            "<div class=\"banner\">No probability model yet, so no weather trades: {}</div>",
+            esc(&s.model.detail)
+        );
     }
     if let Some(k) = &s.kill_switch {
         let _ = write!(
@@ -264,6 +275,7 @@ pub fn render(s: &DashboardSnapshot) -> String {
         let class = match p.state.as_str() {
             "healthy" => "ok",
             "degraded" | "stale" => "warn",
+            "standby" => "muted",
             _ => "bad",
         };
         let _ = write!(

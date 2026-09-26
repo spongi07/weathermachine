@@ -159,6 +159,32 @@ politeness_factor = 2
 politeness_decay_secs = 3600.0
 max_body_bytes = 8388608
 
+# Iowa Environmental Mesonet ASOS/METAR archive: history for model training
+# only (never live or resolution data). IEM throttles each IP to one request
+# per second and allows at most 1,000 station-years per request; we fetch one
+# station-year per request, one at a time, 15 s apart, and cache finished years.
+[providers.iem]
+enabled = true
+base_url = "https://mesonet.agron.iastate.edu"
+[providers.iem.policy]
+class = "public_data"
+min_interval_secs = 15.0
+max_concurrency = 1
+timeout_secs = 180.0
+connect_timeout_secs = 20.0
+backoff_base_secs = 60.0
+backoff_max_secs = 3600.0
+throttle_backoff_base_secs = 600.0
+respect_retry_after = true
+max_retry_after_secs = 21600.0
+circuit_failure_threshold = 3
+circuit_open_base_secs = 1800.0
+circuit_open_max_secs = 21600.0
+daily_budget = 200
+politeness_factor = 2
+politeness_decay_secs = 86400.0
+max_body_bytes = 16777216
+
 # ---------------------------------------------------------------------------
 # Adaptive polling (engineering starting points — NOT optimized parameters).
 # Fast intervals apply only inside the arrival window after an expected report.
@@ -247,6 +273,18 @@ exit_below_probability = 0.5
 style = "best_bid"
 
 [model]
-# Trained EmpiricalPeakModel JSON (weather-machine research peak-survival --model-out ...).
-# Without a model the engine uses the no-edge model: no weather-dependent trades.
-# path = "/data/models/eham-empirical.json"
+# Trained EmpiricalPeakModel JSON. Unset: <auto_train.data_dir>/models/<station>.json
+# (e.g. /data/models/eham.json). Until a model exists the engine uses the
+# no-edge model: no weather-dependent trades (fail closed).
+# path = "/data/models/eham.json"
+
+# When the model file is missing, `run` downloads the station's METAR history
+# from IEM (cached per year under data_dir/research/iem), trains the model,
+# writes it and the survival report, and restarts once to load it.
+# Disable with WM_MODEL_AUTO_TRAIN=false. Manual: `weather-machine model train`.
+[model.auto_train]
+enabled = true
+data_dir = "/data"
+from_year = 2005
+min_days = 730                    # refuse a model built from fewer usable days
+retry_after_secs = 21600          # after a failed attempt

@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (241 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (252 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -33,7 +33,8 @@ Provider behaviours required by the brief:
 | Failover | `fails_over_to_secondary_when_primary_is_throttled` |
 | One collector per station | `second_collector_for_same_station_is_refused`; PostgreSQL lease test |
 | Request budget | `run_loop_request_budget_over_six_virtual_hours`, `gate_invariants` |
-| **Outage can never trade** | `provider_outage_never_produces_a_trade`, `outages_never_approve_weather_positions`, `no_approval_without_healthy_fresh_complete_data` (plus its non-vacuity check), `paper_runtime_end_to_end_without_storage_fails_closed` |
+| **Outage can never trade** | `provider_outage_never_produces_a_trade`, `outages_never_approve_weather_positions`, `no_approval_without_healthy_fresh_complete_data` (plus its non-vacuity check), `untried_fallback_never_masks_a_throttled_primary`, `paper_runtime_end_to_end_without_storage_fails_closed` |
+| Model training | `one_station_year_per_request_with_routine_and_specials`, `throttling_closes_the_gate_instead_of_retrying`, `an_error_page_is_not_mistaken_for_an_empty_year`, `trains_from_history_and_downloads_each_finished_year_once`, `a_failed_download_installs_nothing_but_keeps_finished_years`, `too_little_history_is_refused`, `missing_model_is_trained_from_history_and_loaded_after_restart` |
 
 ## 39. Observability
 
@@ -91,8 +92,13 @@ collectors, market discovery, WebSocket books and the same kernel, with the
 `SimulatedExchange` as venue. Fills are simulated against live books with
 latency, depth, fees and no mid fills. Settlement is from observed data
 (labelled as such). Everything is persisted and visible on the dashboard.
-Paper trading is Phase 13. It needs a trained model (`WM_MODEL_PATH`),
-recorded books and the Phase 0 filter confirmation to be meaningful.
+Paper trading is Phase 13. It needs a trained model, recorded books and
+the Phase 0 filter confirmation to be meaningful. The model is trained on
+the host automatically when none exists: IEM history (one station-year per
+request, 15 s apart, finished years cached on the data volume) → the
+peak-survival study → at least 730 usable days → model and report written
+atomically → one restart (exit code 75) to load it. Until then the MODEL
+badge shows the progress and the engine does not trade weather.
 
 ## 42. Live trading
 

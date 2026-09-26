@@ -142,6 +142,8 @@ async fn mock_env(tag: &str) -> MockEnv {
     p.polymarket_gamma.base_url = server.uri();
     p.polymarket_clob.base_url = server.uri();
     p.polymarket_ws.enabled = false;
+    // Tests never contact the real IEM archive.
+    p.iem.enabled = false;
     cfg.locations[0].observation_sources.secondary.clear();
     cfg.file.app.snapshot_interval_ms = 100;
     cfg.file.app.heartbeat_secs = 5;
@@ -449,5 +451,80 @@ async fn paper_runtime_with_postgres_persists_and_warm_starts() {
     )))
     .execute(admin.pool())
     .await;
+    let _ = std::fs::remove_dir_all(&env.tmp);
+}
+
+/// No model file: the service keeps running without one (no weather trades),
+/// trains from the (mock) IEM archive, installs the model and asks to be
+/// restarted; the next start loads it. CSV rows are synthetic fixtures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_model_is_trained_from_history_and_loaded_after_restart() {
+    use chrono::Datelike;
+    let mut env = mock_env("train").await;
+    let st = StationId::new("EHAM").unwrap();
+    let today = Utc::now().date_naive();
+    let from = today - Duration::days(200);
+    let mut by_year: std::collections::BTreeMap<i32, String> = Default::default();
+    for o in synthetic_history(&st, from, 200, 5, Duration::minutes(4)) {
+        by_year
+            .entry(o.key.observed_at.year())
+            .or_insert_with(|| "station,valid,metar\n".to_owned())
+            .push_str(&format!(
+                "EHAM,{},{}\n",
+                o.key.observed_at.format("%Y-%m-%d %H:%M"),
+                o.raw_text
+            ));
+    }
+    for (y, body) in by_year {
+        Mock::given(method("GET"))
+            .and(path("/cgi-bin/request/asos.py"))
+            .and(query_param("year1", y.to_string().as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&env.server)
+            .await;
+    }
+    let data = env.tmp.join("data");
+    env.cfg.file.model.path = None;
+    env.cfg.file.model.auto_train = wm_app::config::AutoTrainSection {
+        enabled: true,
+        data_dir: data.to_string_lossy().into_owned(),
+        from_year: from.year(),
+        min_days: 30,
+        retry_after_secs: 3600,
+    };
+    let iem = &mut env.cfg.file.providers.iem;
+    iem.enabled = true;
+    iem.base_url = env.server.uri();
+    iem.policy = wm_net::RateLimitPolicy::local_test();
+    iem.policy.max_body_bytes = 16 * 1024 * 1024;
+
+    let run = start(env.cfg.clone());
+    let res = tokio::time::timeout(std::time::Duration::from_secs(90), run.handle)
+        .await
+        .expect("training finishes")
+        .unwrap();
+    let err = res.expect_err("the runtime stops to load the new model");
+    assert!(
+        err.downcast_ref::<runtime::RestartRequested>().is_some(),
+        "{err:#}"
+    );
+    let model_file = data.join("models").join("eham.json");
+    assert!(model_file.is_file());
+    assert!(data.join("research").join("eham-survival.md").is_file());
+
+    // Restart: the model is loaded and the probability gate passes.
+    let mut run = start(env.cfg.clone());
+    let snap = run
+        .until("model loaded", 30, |s| s.model.state == "loaded")
+        .await;
+    assert!(snap.snapshot.model_id.starts_with("empirical-EHAM-all-"));
+    assert!(
+        snap.snapshot
+            .risk
+            .checks
+            .iter()
+            .any(|c| c.name == "Probability model" && c.ok)
+    );
+    run.stop().await;
     let _ = std::fs::remove_dir_all(&env.tmp);
 }

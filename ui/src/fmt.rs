@@ -14,6 +14,22 @@ pub fn pct(v: Option<f64>) -> String {
     v.map_or_else(|| DASH.to_owned(), |x| format!("{:.1}%", x * 100.0))
 }
 
+/// Capitalise the first letter of a log-style message.
+pub fn sentence(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+/// Break-even probability; at or above 100 % no probability can profit.
+pub fn break_even(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x >= 1.0 => "n/a".to_owned(),
+        _ => pct(v),
+    }
+}
+
 pub fn pp(v: Option<f64>) -> String {
     v.map_or_else(|| DASH.to_owned(), |x| format!("{:+.1}", x * 100.0))
 }
@@ -114,5 +130,15 @@ mod tests {
         assert_eq!(age(3700), "61 min");
         assert_eq!(usd(-1.5), "−$1.50");
         assert_eq!(pp(Some(0.0123)), "+1.2");
+    }
+
+    #[test]
+    fn break_even_above_one_is_not_a_percentage() {
+        assert_eq!(break_even(Some(0.00605)), "0.6%");
+        assert_eq!(break_even(Some(1.004)), "n/a");
+        assert_eq!(break_even(Some(1.0)), "n/a");
+        assert_eq!(break_even(None), DASH);
+        assert_eq!(sentence("model training failed"), "Model training failed");
+        assert_eq!(sentence(""), "");
     }
 }

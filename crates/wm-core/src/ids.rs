@@ -152,6 +152,10 @@ impl ProviderId {
     pub fn awc() -> Self {
         Self("awc".to_owned())
     }
+    /// Iowa Environmental Mesonet ASOS/METAR archive (history for model training).
+    pub fn iem() -> Self {
+        Self("iem".to_owned())
+    }
     /// NWS Telecommunication Gateway file server (official product files).
     pub fn tgftp() -> Self {
         Self("tgftp".to_owned())

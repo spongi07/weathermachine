@@ -117,9 +117,10 @@ pub fn temperature_chart(loc: &LocationDto) -> AnyView {
                 .map(|w| {
                     let x = s.x(h0 + f64::from(*w));
                     let ok = met.contains(w);
-                    // Label every 30 minutes; the 15-minute steps are ticks only.
-                    let label = if w % 30 == 0 {
-                        format!("{w}")
+                    // Label every hour (30-minute labels collide at day scale);
+                    // the other windows are ticks only.
+                    let label = if w % 60 == 0 {
+                        format!("{w}′")
                     } else {
                         String::new()
                     };

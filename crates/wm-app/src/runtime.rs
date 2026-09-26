@@ -17,7 +17,8 @@
 use crate::config::AppConfig;
 use crate::dto::{self, DtoInputs};
 use crate::http::Publisher;
-use crate::setup::{self, Providers};
+use crate::setup::{self, ModelLoad, Providers};
+use crate::training::{self, Progress, TrainPlan};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -37,7 +38,7 @@ use wm_core::resolution::{ObservationFilter, SpecReviewStatus};
 use wm_core::time::{Clock, SystemClock, local_date};
 use wm_core::trading::{DecisionRecord, Fill, RunMode};
 use wm_core::weather::DedupClass;
-use wm_dashboard_api::AlertDto;
+use wm_dashboard_api::{AlertDto, ModelDto};
 use wm_execution::{OrderRecord, SimConfig};
 use wm_net::ProviderGate;
 use wm_polymarket::{
@@ -46,9 +47,38 @@ use wm_polymarket::{
 };
 use wm_storage::PgStore;
 use wm_storage::wm_execution_record::OrderRow;
+use wm_strategy::{NoEdgeModel, ProbabilityModel};
 use wm_weather::{
-    CollectorConfig, CollectorRegistry, CollectorStatus, PollingHints, StationCollector,
+    CollectorConfig, CollectorRegistry, CollectorStatus, IemArchive, PollingHints, StationCollector,
 };
+
+/// The runtime stopped so that the process restarts and loads a newly trained
+/// probability model (the container's restart policy brings it back).
+#[derive(Debug)]
+pub struct RestartRequested;
+
+impl std::fmt::Display for RestartRequested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("restart requested to load the newly trained probability model")
+    }
+}
+
+impl std::error::Error for RestartRequested {}
+
+/// Process exit code for [`RestartRequested`] (EX_TEMPFAIL): any restart
+/// policy, including `on-failure`, brings the service back.
+pub const RESTART_EXIT_CODE: u8 = 75;
+
+type SharedModel = Arc<Mutex<ModelDto>>;
+
+fn set_model(status: &SharedModel, state: &str, detail: String, progress: Option<(u32, u32)>) {
+    let mut g = status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.state = state.to_owned();
+    g.detail = detail;
+    g.progress = progress;
+}
 
 /// Handles the runtime shares with the HTTP server.
 pub struct RuntimeContext {
@@ -152,13 +182,14 @@ fn gate_snapshot(gate: &ProviderGate, now: DateTime<Utc>) -> ProviderHealthSnaps
     s.state = match st.circuit {
         CircuitState::Open => ProviderHealthState::Unavailable,
         CircuitState::HalfOpen => ProviderHealthState::Degraded,
-        CircuitState::Closed if st.requests_total == 0 => ProviderHealthState::Unavailable,
+        // Never used yet, e.g. the REST book fallback while the stream is live.
+        CircuitState::Closed if st.requests_total == 0 => ProviderHealthState::Standby,
         CircuitState::Closed if st.politeness_multiplier > 1 => ProviderHealthState::Throttled,
         CircuitState::Closed if st.consecutive_failures > 0 => ProviderHealthState::Degraded,
         CircuitState::Closed => ProviderHealthState::Healthy,
     };
     s.reason = if st.requests_total == 0 {
-        "no requests yet".into()
+        "standby: no requests yet".into()
     } else {
         format!(
             "{} ok / {} failed / {} throttled",
@@ -392,8 +423,27 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         mut publisher,
         mut commands,
         ready,
-        shutdown,
+        shutdown: external_shutdown,
     } = ctx;
+    // Every task stops on this: the external shutdown signal, or the runtime's
+    // own decision to stop (restart to load a new model).
+    let (stop_tx, shutdown) = watch::channel(false);
+    {
+        let mut ext = external_shutdown;
+        let stop_tx = stop_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                if *ext.borrow() {
+                    let _ = stop_tx.send(true);
+                    return;
+                }
+                if ext.changed().await.is_err() {
+                    let _ = stop_tx.send(true);
+                    return;
+                }
+            }
+        });
+    }
     match cfg.file.app.mode {
         RunMode::Paper => {}
         RunMode::Live => bail!(
@@ -427,7 +477,64 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     };
     let run_id = RunId::new_v7();
     let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, run_id)?;
-    let model = setup::load_model(&cfg)?;
+    let model_status: SharedModel = Arc::new(Mutex::new(ModelDto::default()));
+    let mut invalid_model: Option<String> = None;
+    let mut train_into: Option<std::path::PathBuf> = None;
+    let model: Arc<dyn ProbabilityModel> = match setup::find_model(&cfg) {
+        ModelLoad::Loaded(m) => {
+            set_model(
+                &model_status,
+                "loaded",
+                format!(
+                    "{} · {} samples · {} → {}",
+                    m.id,
+                    m.total_samples(),
+                    m.trained_from,
+                    m.trained_to
+                ),
+                None,
+            );
+            m
+        }
+        ModelLoad::Missing(path) if cfg.file.model.auto_train.enabled => {
+            set_model(
+                &model_status,
+                "training",
+                "starting: training from IEM METAR history".into(),
+                None,
+            );
+            train_into = Some(path);
+            Arc::new(NoEdgeModel)
+        }
+        ModelLoad::Missing(path) => {
+            set_model(
+                &model_status,
+                "missing",
+                format!(
+                    "no model at {} and auto-training is off — no weather trades",
+                    path.display()
+                ),
+                None,
+            );
+            Arc::new(NoEdgeModel)
+        }
+        ModelLoad::NotConfigured => {
+            set_model(
+                &model_status,
+                "disabled",
+                "no model configured and auto-training is off — no weather trades".into(),
+                None,
+            );
+            Arc::new(NoEdgeModel)
+        }
+        ModelLoad::Invalid(path, e) => {
+            tracing::error!(path = %path.display(), error = %e, "probability model unusable — running without one (no weather trades)");
+            let msg = format!("model {} unusable: {e} — fix or delete it", path.display());
+            set_model(&model_status, "invalid", msg.clone(), None);
+            invalid_model = Some(msg);
+            Arc::new(NoEdgeModel)
+        }
+    };
     if let Some(s) = &store {
         let cfg_json = serde_json::json!({ "app": cfg.file.app, "risk": cfg.file.risk, "strategies": cfg.file.strategies, "polling": cfg.file.polling, "locations": cfg.locations });
         s.record_run(&run_id, RunMode::Paper, model.id(), &cfg_json, clock.now())
@@ -448,6 +555,46 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     let side: SharedSide = Arc::new(Mutex::new(SideState::default()));
     let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(16_384);
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+    if let Some(msg) = invalid_model {
+        with_side(&side, |st| st.alert("critical", msg));
+    }
+
+    // -- Probability model training (only while no model file exists) ------------------
+    let (model_ready_tx, mut model_ready_rx) = watch::channel(false);
+    let mut model_ready_open = true;
+    let mut keep_model_ready_tx = Some(model_ready_tx);
+    if let Some(path) = train_into {
+        match providers.fetcher("iem") {
+            Some(f) => {
+                let archive = IemArchive::new(Arc::clone(f), &cfg.file.providers.iem.base_url);
+                let plan = TrainPlan::from_config(&cfg, path, clock.now().date_naive())?;
+                let audit: Option<Arc<dyn wm_core::ingest::IngestSink>> = store
+                    .as_ref()
+                    .map(|s| Arc::new(s.clone()) as Arc<dyn wm_core::ingest::IngestSink>);
+                tasks.push(tokio::spawn(auto_train_loop(
+                    archive,
+                    plan,
+                    std::time::Duration::from_secs(
+                        cfg.file.model.auto_train.retry_after_secs.max(60),
+                    ),
+                    audit,
+                    Arc::clone(&model_status),
+                    Arc::clone(&side),
+                    keep_model_ready_tx
+                        .take()
+                        .unwrap_or_else(|| watch::channel(false).0),
+                    Arc::clone(&clock),
+                    shutdown.clone(),
+                )));
+            }
+            None => set_model(
+                &model_status,
+                "missing",
+                "no model and the IEM provider is disabled — no weather trades".into(),
+                None,
+            ),
+        }
+    }
 
     // -- Station collectors (one per station, cross-process lease) -------------------
     let registry = CollectorRegistry::new();
@@ -610,11 +757,15 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     loop_state.absorb(&session, warm, &persist_tx, &storage_ok, &hint_txs, &side);
     last_knowledge = last_knowledge.max(session.last_time().unwrap_or(last_knowledge));
 
-    let gates_for_ui: Vec<Arc<ProviderGate>> =
-        ["polymarket_gamma", "polymarket_clob", "polymarket_ws"]
-            .iter()
-            .filter_map(|n| providers.gate(n).cloned())
-            .collect();
+    let gates_for_ui: Vec<Arc<ProviderGate>> = [
+        "polymarket_gamma",
+        "polymarket_clob",
+        "polymarket_ws",
+        "iem",
+    ]
+    .iter()
+    .filter_map(|n| providers.gate(n).cloned())
+    .collect();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(
         cfg.file.app.heartbeat_secs.max(5),
     ));
@@ -623,6 +774,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     ));
     publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut shutdown_rx = shutdown.clone();
+    let mut restart = false;
     ready.store(true, Ordering::Release);
     tracing::info!("paper runtime ready");
 
@@ -637,7 +789,12 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                     env.recorded_at = now;
                     session.push(env);
                 }
-                None => { tracing::warn!("all event producers stopped"); break; }
+                None => {
+                    if !*shutdown_rx.borrow() {
+                        tracing::warn!("all event producers stopped");
+                    }
+                    break;
+                }
             },
             cmd = commands.recv() => if let Some(c) = cmd {
                 let now = clock.now();
@@ -650,6 +807,15 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 session.push(EventEnvelope::new(last_knowledge, EventSource::Live, WeatherMachineEvent::Timer(TimerEvent { due_at: last_knowledge, kind: TimerKind::Heartbeat })));
             }
             _ = publish_tick.tick() => publish = true,
+            r = model_ready_rx.changed(), if model_ready_open => match r {
+                Ok(()) if *model_ready_rx.borrow() => {
+                    tracing::info!("new probability model installed: restarting to load it");
+                    restart = true;
+                    break;
+                }
+                Ok(()) => {}
+                Err(_) => model_ready_open = false,
+            },
             r = shutdown_rx.changed() => if r.is_err() || *shutdown_rx.borrow() { break; },
         }
         let ok = storage_ok.load(Ordering::Acquire);
@@ -679,6 +845,10 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                     st.rules_review.clone(),
                 )
             });
+            let model_now = model_status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let inputs = DtoInputs {
                 demo: false,
                 instance: &cfg.file.app.instance,
@@ -688,6 +858,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 confirmed_filters: &confirmed_filters,
                 extra_providers: &extra,
                 rules_review: &reviews,
+                model: &model_now,
             };
             publisher.publish(dto::build(&snap, &inputs, now));
         }
@@ -695,6 +866,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
 
     // -- Shutdown --------------------------------------------------------------------------
     tracing::info!("shutting down");
+    let _ = stop_tx.send(true);
     ready.store(false, Ordering::Release);
     drop(persist_tx);
     for t in tasks {
@@ -708,12 +880,93 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             .record_system_event(
                 "info",
                 "shutdown",
-                "weather machine stopped",
+                if restart {
+                    "weather machine restarting to load a new model"
+                } else {
+                    "weather machine stopped"
+                },
                 &serde_json::json!({ "run_id": run_id.to_string() }),
             )
             .await;
     }
+    drop(keep_model_ready_tx);
+    if restart {
+        return Err(RestartRequested.into());
+    }
     Ok(())
+}
+
+/// Train until a model is installed, retrying after failures. Stops on
+/// shutdown; signals `ready` once the model file is in place.
+#[allow(clippy::too_many_arguments)]
+async fn auto_train_loop(
+    archive: IemArchive,
+    mut plan: TrainPlan,
+    retry_after: std::time::Duration,
+    audit: Option<Arc<dyn wm_core::ingest::IngestSink>>,
+    status: SharedModel,
+    side: SharedSide,
+    ready: watch::Sender<bool>,
+    clock: Arc<dyn Clock>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        plan.today = clock.now().date_naive();
+        let st = Arc::clone(&status);
+        let progress = move |p: Progress| match p {
+            Progress::Downloading { year, done, total } => set_model(
+                &st,
+                "training",
+                format!("downloading METAR history from IEM: {year} ({done}/{total} years)"),
+                Some((done, total)),
+            ),
+            Progress::Training { observations } => set_model(
+                &st,
+                "training",
+                format!("training on {observations} historical reports"),
+                None,
+            ),
+        };
+        tracing::info!(station = %plan.station, from = plan.from_year, "training the probability model from IEM history");
+        match training::train(&archive, &plan, audit.as_ref(), &progress, &mut shutdown).await {
+            Ok(o) => {
+                let msg = format!(
+                    "model {} trained on {} days ({} → {}), {} samples; restarting to load it",
+                    o.model_id,
+                    o.days,
+                    o.from.map(|d| d.to_string()).unwrap_or_default(),
+                    o.to.map(|d| d.to_string()).unwrap_or_default(),
+                    o.samples
+                );
+                tracing::info!(
+                    years_downloaded = o.years_downloaded,
+                    years_cached = o.years_cached,
+                    observations = o.observations,
+                    "{msg}"
+                );
+                set_model(&status, "training", msg.clone(), None);
+                with_side(&side, |s| s.alert("info", msg));
+                let _ = ready.send(true);
+                return;
+            }
+            Err(_) if *shutdown.borrow() => return,
+            Err(e) => {
+                let retry_at = clock.now()
+                    + Duration::from_std(retry_after).unwrap_or_else(|_| Duration::hours(6));
+                let msg = format!(
+                    "model training failed: {e:#}; next attempt {} UTC — no weather trades until then",
+                    retry_at.format("%Y-%m-%d %H:%M")
+                );
+                tracing::warn!("{msg}");
+                set_model(&status, "failed", msg.clone(), None);
+                with_side(&side, |s| s.alert("warning", msg));
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_after) => {}
+                    r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+                }
+            }
+        }
+    }
 }
 
 /// Book-keeping around the kernel's outputs.

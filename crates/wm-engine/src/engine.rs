@@ -9,7 +9,7 @@ use std::sync::Arc;
 use wm_core::event::{
     EventEnvelope, OperatorCommand, OrderUpdateEvent, TimerKind, WeatherMachineEvent,
 };
-use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
+use wm_core::health::{ProviderHealthSnapshot, station_state};
 use wm_core::ids::{
     DecisionId, EventSlug, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId,
 };
@@ -460,13 +460,12 @@ impl Engine {
     }
 
     fn weather_status(&self, station: &StationId) -> WeatherStatus {
-        let health = self
-            .health
-            .values()
-            .filter(|h| h.scope.as_ref() == Some(station))
-            .map(|h| h.state)
-            .min_by_key(|s| s.severity())
-            .unwrap_or(ProviderHealthState::Unavailable);
+        let health = station_state(
+            self.health
+                .values()
+                .filter(|h| h.scope.as_ref() == Some(station))
+                .map(|h| h.state),
+        );
         let tz = self.temps.timezone(station).unwrap_or(chrono_tz::UTC);
         let today = local_date(self.now, tz);
         let today_state = self

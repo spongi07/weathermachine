@@ -111,8 +111,12 @@ from high, retest count, trajectory class, forecast remaining maximum (Phase
 11), YES price threshold (0.90…0.99), NO price, outcome distance (+1/+2/+3),
 split timing, unwind style/timing, exit price.
 
-**First strategy experiment (brief §38).**
+**First strategy experiment (brief §38).** Runs automatically when the
+service first starts without a model (report:
+`/data/research/eham-survival.md`, with the SHA-256 of every downloaded
+year). Manual equivalents:
 ```text
+weather-machine model train                      # download (cached) + train
 weather-machine research peak-survival --csv eham_iem.csv --station EHAM \
     [--filter all|hourly-nws-faa|hourly-other] --model-out eham.json --report-out survival.md
 ```

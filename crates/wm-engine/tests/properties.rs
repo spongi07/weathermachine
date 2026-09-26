@@ -147,6 +147,7 @@ fn step() -> impl Strategy<Value = Step> {
             Just(ProviderHealthState::Throttled),
             Just(ProviderHealthState::Stale),
             Just(ProviderHealthState::Unavailable),
+            Just(ProviderHealthState::Standby),
         ].prop_map(Step::Health),
         3 => (1i64..600).prop_map(|secs| Step::Books { secs }),
     ]

@@ -100,30 +100,84 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
     })
 }
 
-/// Load the configured probability model. No model ⇒ [`NoEdgeModel`], which
-/// never produces a probability and therefore never a weather trade.
-pub fn load_model(cfg: &AppConfig) -> Result<Arc<dyn ProbabilityModel>> {
-    let Some(path) = cfg.file.model.path.as_deref() else {
-        tracing::warn!(
-            "no probability model configured: strategies A/B stay silent (no-edge model)"
-        );
-        return Ok(Arc::new(NoEdgeModel));
+/// Where the model lives: the configured path, else (while auto-training is
+/// on) `<data_dir>/models/<station>.json` for the first location.
+pub fn model_path(cfg: &AppConfig) -> Option<std::path::PathBuf> {
+    if let Some(p) = cfg.file.model.path.as_deref() {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let at = &cfg.file.model.auto_train;
+    if !at.enabled {
+        return None;
+    }
+    let station = cfg.locations.first()?.station.id.to_ascii_lowercase();
+    Some(
+        std::path::Path::new(&at.data_dir)
+            .join("models")
+            .join(format!("{station}.json")),
+    )
+}
+
+/// What startup found for the probability model.
+pub enum ModelLoad {
+    Loaded(Arc<EmpiricalPeakModel>),
+    /// No file yet; auto-training may create it.
+    Missing(std::path::PathBuf),
+    /// No model path and auto-training disabled.
+    NotConfigured,
+    /// A file exists but is unusable. The service stays up without a model
+    /// (fail closed) and the operator must fix or delete the file.
+    Invalid(std::path::PathBuf, String),
+}
+
+/// Look for the model without failing the service.
+pub fn find_model(cfg: &AppConfig) -> ModelLoad {
+    let Some(path) = model_path(cfg) else {
+        return ModelLoad::NotConfigured;
     };
-    let model = read_model(std::path::Path::new(path))?;
+    if !path.exists() {
+        return ModelLoad::Missing(path);
+    }
+    let model = match read_model(&path) {
+        Ok(m) => m,
+        Err(e) => return ModelLoad::Invalid(path, format!("{e:#}")),
+    };
     let stations: Vec<&str> = cfg
         .locations
         .iter()
         .map(|l| l.station.id.as_str())
         .collect();
     if !stations.contains(&model.station.as_str()) {
-        bail!(
-            "model {} was trained for station {} but the configured stations are {stations:?}",
-            model.id,
-            model.station
+        return ModelLoad::Invalid(
+            path,
+            format!(
+                "model {} was trained for station {} but the configured stations are {stations:?}",
+                model.id, model.station
+            ),
         );
     }
     tracing::info!(model = %model.id, station = %model.station, view = %model.view, samples = model.total_samples(), from = %model.trained_from, to = %model.trained_to, "probability model loaded");
-    Ok(Arc::new(model))
+    ModelLoad::Loaded(Arc::new(model))
+}
+
+/// Load the configured probability model for batch commands. A missing file
+/// ⇒ [`NoEdgeModel`], which never produces a probability and therefore never
+/// a weather trade; an unusable file is an error.
+pub fn load_model(cfg: &AppConfig) -> Result<Arc<dyn ProbabilityModel>> {
+    match find_model(cfg) {
+        ModelLoad::Loaded(m) => Ok(m),
+        ModelLoad::Missing(p) => {
+            tracing::warn!(path = %p.display(), "model file not found: no-edge model (no weather trades)");
+            Ok(Arc::new(NoEdgeModel))
+        }
+        ModelLoad::NotConfigured => {
+            tracing::warn!(
+                "no probability model configured: strategies A/B stay silent (no-edge model)"
+            );
+            Ok(Arc::new(NoEdgeModel))
+        }
+        ModelLoad::Invalid(p, e) => bail!("model {}: {e}", p.display()),
+    }
 }
 
 pub fn read_model(path: &std::path::Path) -> Result<EmpiricalPeakModel> {
@@ -149,6 +203,7 @@ fn provider_id(name: &str) -> ProviderId {
         "nws_api" => ProviderId::nws_api(),
         "polymarket_gamma" => ProviderId::polymarket_gamma(),
         "polymarket_clob" => ProviderId::polymarket_clob(),
+        "iem" => ProviderId::iem(),
         _ => ProviderId::polymarket_ws(),
     }
 }
@@ -156,13 +211,14 @@ fn provider_id(name: &str) -> ProviderId {
 impl Providers {
     pub fn build(cfg: &AppConfig, clock: Arc<dyn Clock>, user_agent: &str) -> Result<Self> {
         let p = &cfg.file.providers;
-        let sections: [(&'static str, &ProviderSection); 6] = [
+        let sections: [(&'static str, &ProviderSection); 7] = [
             ("awc", &p.awc),
             ("tgftp", &p.tgftp),
             ("nws_api", &p.nws_api),
             ("polymarket_gamma", &p.polymarket_gamma),
             ("polymarket_clob", &p.polymarket_clob),
             ("polymarket_ws", &p.polymarket_ws),
+            ("iem", &p.iem),
         ];
         let mut fetchers = HashMap::new();
         let mut gates = HashMap::new();

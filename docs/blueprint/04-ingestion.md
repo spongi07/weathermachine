@@ -202,7 +202,8 @@ the PostgreSQL runtime test.
 **PURPOSE.** A single, explainable answer to "may we trust this station's data right now?"
 
 `ProviderHealthState` precedence: **Unavailable > Throttled > Stale >
-Degraded > Healthy**. Only **Healthy** allows new weather-dependent positions.
+Degraded > Standby > Healthy**. Only **Healthy** allows new weather-dependent
+positions.
 
 | State | Trigger (defaults) |
 |---|---|
@@ -210,7 +211,13 @@ Degraded > Healthy**. Only **Healthy** allows new weather-dependent positions.
 | Throttled | a 429 within the last 30 min |
 | Stale | no observation yet, or newest observation older than 45 min |
 | Degraded | any recent failure or malformed payload, or latency EWMA > 5 s |
+| Standby | no successful request **of this source** within 45 min: never contacted, or an idle fallback. No evidence either way. |
 | Healthy | otherwise |
+
+Health is evidence from a source's own requests. The newest observation is
+shared by the station, but it never makes an untested fallback Healthy: the
+active source is polled at least every 20 minutes, so only an idle fallback
+reaches Standby.
 
 A spent daily budget closes the gate: no requests are made, and the station
 turns Stale as its data ages.
@@ -220,10 +227,16 @@ observation, newest observation time, last HTTP status, last error,
 consecutive failures, current backoff, blocked-until, latency (last and
 EWMA), throttle events, requests today and daily budget, circuit state.
 Transitions become `ProviderHealthChanged` events; the engine takes the
-healthiest source per station (failover-aware).
+best-evidenced source per station (`station_state`, failover-aware). Standby
+ranks last, so a fallback that was never contacted cannot mask a throttled
+or failing primary: trading stays blocked until the fallback has actually
+delivered.
 
-**TESTING.** Health tracker unit tests; outage, throttle and recovery
-collector scenarios; the kernel property test (no approval unless Healthy).
+**TESTING.** Health tracker unit tests
+(`a_source_is_healthy_only_on_its_own_recent_success`); outage, throttle and
+recovery collector scenarios, including
+`untried_fallback_never_masks_a_throttled_primary`; the kernel property test
+(no approval unless Healthy, Standby included).
 
 ## 17. TemperatureStateEngine
 

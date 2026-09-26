@@ -5,6 +5,8 @@ use crate::config::AppConfig;
 use crate::demo::{self, DemoOptions};
 use crate::http::{self, BasicAuth, Publisher, Shared};
 use crate::runtime::{self, RuntimeContext};
+use crate::setup::Providers;
+use crate::training::{self, Progress, TrainPlan};
 use crate::{healthcheck, setup, telemetry};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, NaiveDate, Utc};
@@ -28,7 +30,9 @@ use wm_execution::SimConfig;
 use wm_polymarket::{GammaClient, build_market, event_slug};
 use wm_storage::PgStore;
 use wm_strategy::ev::{break_even_table, research_price_grid};
-use wm_weather::{CollectorConfig, CollectorRegistry, PollOutcome, PollingHints, StationCollector};
+use wm_weather::{
+    CollectorConfig, CollectorRegistry, IemArchive, PollOutcome, PollingHints, StationCollector,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -74,6 +78,11 @@ pub enum Command {
     Research {
         #[command(subcommand)]
         command: ResearchCommand,
+    },
+    /// Probability model: train from real METAR history (IEM archive).
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
     },
     /// Backtest the configured strategies (synthetic days or a recorded run journal).
     Backtest {
@@ -162,6 +171,20 @@ impl FilterArg {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ModelCommand {
+    /// Download the first location's METAR history from IEM (rate-limited,
+    /// finished years cached) and train the model. Restart `run` to load it.
+    Train {
+        /// Model file (default: WM_MODEL_PATH, else <data_dir>/models/<station>.json).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// First year of history (default: [model.auto_train].from_year).
+        #[arg(long)]
+        from_year: Option<i32>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum MarketsCommand {
     /// Fetch and parse the configured locations' markets for a date (read-only).
     Discover {
@@ -225,16 +248,37 @@ pub async fn execute(cli: Cli) -> Result<()> {
                     "not configured (trading blocked)"
                 }
             );
-            println!(
-                "model: {}",
-                cfg.file
-                    .model
-                    .path
-                    .as_deref()
-                    .unwrap_or("none (no-edge: no weather trades)")
-            );
+            let auto = if cfg.file.model.auto_train.enabled {
+                "auto-train on"
+            } else {
+                "auto-train off"
+            };
+            match setup::find_model(&cfg) {
+                setup::ModelLoad::Loaded(m) => println!(
+                    "model: {} ({} samples, {} → {})",
+                    m.id,
+                    m.total_samples(),
+                    m.trained_from,
+                    m.trained_to
+                ),
+                setup::ModelLoad::Missing(p) => {
+                    println!(
+                        "model: not yet at {} ({auto}; no weather trades until then)",
+                        p.display()
+                    );
+                }
+                setup::ModelLoad::NotConfigured => {
+                    println!("model: none ({auto}; no-edge: no weather trades)");
+                }
+                setup::ModelLoad::Invalid(p, e) => {
+                    println!("model: UNUSABLE {} — {e}", p.display())
+                }
+            }
             Ok(())
         }
+        Command::Model {
+            command: ModelCommand::Train { out, from_year },
+        } => model_train(cli.config, out, from_year).await,
         Command::Run => serve(cli.config, Mode::Run).await,
         Command::Demo {
             speed,
@@ -343,6 +387,62 @@ async fn shutdown_signal() {
     }
 }
 
+/// `model train`: foreground training with progress on stdout.
+async fn model_train(
+    config: Option<PathBuf>,
+    out: Option<PathBuf>,
+    from_year: Option<i32>,
+) -> Result<()> {
+    let mut cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    if let Some(y) = from_year {
+        cfg.file.model.auto_train.from_year = y;
+    }
+    let path = out
+        .or_else(|| {
+            let mut c = cfg.clone();
+            c.file.model.auto_train.enabled = true;
+            setup::model_path(&c)
+        })
+        .context("no model path: pass --out or set WM_MODEL_PATH")?;
+    let user_agent = cfg
+        .user_agent()
+        .context("set WM_CONTACT so requests identify Weather Machine")?;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let providers = Providers::build(&cfg, Arc::clone(&clock), &user_agent)?;
+    let fetcher = providers
+        .fetcher("iem")
+        .context("the IEM provider is disabled in the configuration")?;
+    let archive = IemArchive::new(Arc::clone(fetcher), &cfg.file.providers.iem.base_url);
+    let plan = TrainPlan::from_config(&cfg, path, clock.now().date_naive())?;
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let progress = |p: Progress| match p {
+        Progress::Downloading { year, done, total } => {
+            println!(
+                "[{done}/{total}] {year}: cached or downloading from IEM (one request at a time)"
+            );
+        }
+        Progress::Training { observations } => {
+            println!("training on {observations} historical reports…");
+        }
+    };
+    let o = training::train(&archive, &plan, None, &progress, &mut stop_rx).await?;
+    println!(
+        "model {} written to {} — {} days ({} → {}), {} samples; {} years downloaded, {} cached",
+        o.model_id,
+        plan.model_out.display(),
+        o.days,
+        o.from.map(|d| d.to_string()).unwrap_or_default(),
+        o.to.map(|d| d.to_string()).unwrap_or_default(),
+        o.samples,
+        o.years_downloaded,
+        o.years_cached
+    );
+    println!("survival report: {}", plan.report_out.display());
+    println!("restart the service to load the model");
+    Ok(())
+}
+
 /// `run` and `demo`: HTTP server + runtime, graceful shutdown on SIGTERM/SIGINT.
 async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
     let cfg = AppConfig::load(config.as_deref())?;
@@ -420,7 +520,9 @@ async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
         Ok(Err(e)) => tracing::error!(error = %e, "HTTP server task failed"),
         _ => {}
     }
-    if let Err(e) = &result {
+    if let Err(e) = &result
+        && e.downcast_ref::<runtime::RestartRequested>().is_none()
+    {
         tracing::error!(error = %format!("{e:#}"), "runtime stopped with an error");
     }
     result

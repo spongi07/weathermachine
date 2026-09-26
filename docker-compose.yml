@@ -68,8 +68,10 @@ services:
       # Optional HTTP Basic auth for the dashboard/API (set both or neither).
       WM_DASHBOARD_USER: ${WM_DASHBOARD_USER:-}
       WM_DASHBOARD_PASSWORD: ${WM_DASHBOARD_PASSWORD:-}
-      # Trained model (e.g. /data/models/eham.json); unset = no-edge model (no trades).
+      # Model file; unset = /data/models/eham.json, trained automatically on
+      # first start from IEM METAR history (then one restart to load it).
       WM_MODEL_PATH: ${WM_MODEL_PATH:-}
+      WM_MODEL_AUTO_TRAIN: ${WM_MODEL_AUTO_TRAIN:-true}
       WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn,hyper=warn,reqwest=warn,tungstenite=warn}
     ports:

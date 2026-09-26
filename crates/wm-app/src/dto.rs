@@ -26,6 +26,7 @@ pub struct DtoInputs<'a> {
     pub confirmed_filters: &'a HashMap<StationId, ObservationFilter>,
     pub extra_providers: &'a [ProviderHealthSnapshot],
     pub rules_review: &'a HashMap<String, String>,
+    pub model: &'a ModelDto,
 }
 
 fn ms(t: DateTime<Utc>) -> i64 {
@@ -492,8 +493,12 @@ pub fn build(
         },
         CheckDto {
             name: "Probability model".into(),
-            ok: snap.model_id != "no-edge",
-            detail: snap.model_id.clone(),
+            ok: inp.model.loaded() && snap.model_id != "no-edge",
+            detail: if inp.model.loaded() {
+                snap.model_id.clone()
+            } else {
+                inp.model.detail.clone()
+            },
         },
         CheckDto {
             name: "Live trading".into(),
@@ -589,6 +594,7 @@ pub fn build(
         instance: inp.instance.to_owned(),
         run_id: snap.run_id.to_string(),
         model_id: snap.model_id.clone(),
+        model: inp.model.clone(),
         kill_switch: snap.kill_switch.clone(),
         storage_ok: snap.storage_ok,
         execution_ok: snap.execution_ok,

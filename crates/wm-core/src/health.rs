@@ -19,6 +19,9 @@ pub enum ProviderHealthState {
     Stale,
     /// Circuit open / repeated failures / unreachable.
     Unavailable,
+    /// No successful request yet (a standby or fallback source): no evidence
+    /// either way, so it never counts as healthy.
+    Standby,
 }
 
 impl ProviderHealthState {
@@ -35,10 +38,13 @@ impl ProviderHealthState {
             ProviderHealthState::Throttled => "throttled",
             ProviderHealthState::Stale => "stale",
             ProviderHealthState::Unavailable => "unavailable",
+            ProviderHealthState::Standby => "standby",
         }
     }
 
-    /// 0 = best … 4 = worst (for aggregation and colouring).
+    /// 0 = best … 5, used to pick the best-evidenced state among a station's
+    /// sources. `Standby` ranks last: a source that was never contacted must
+    /// not mask what the contacted ones report.
     pub fn severity(self) -> u8 {
         match self {
             ProviderHealthState::Healthy => 0,
@@ -46,8 +52,19 @@ impl ProviderHealthState {
             ProviderHealthState::Stale => 2,
             ProviderHealthState::Throttled => 3,
             ProviderHealthState::Unavailable => 4,
+            ProviderHealthState::Standby => 5,
         }
     }
+}
+
+/// The state a station's trading gate sees: the best-evidenced state among its
+/// sources, or `Unavailable` when none has reported. A `Standby` source never
+/// outranks one that was actually contacted.
+pub fn station_state(states: impl IntoIterator<Item = ProviderHealthState>) -> ProviderHealthState {
+    states
+        .into_iter()
+        .min_by_key(|s| s.severity())
+        .unwrap_or(ProviderHealthState::Unavailable)
 }
 
 impl fmt::Display for ProviderHealthState {
@@ -98,7 +115,7 @@ impl ProviderHealthSnapshot {
         Self {
             provider,
             scope,
-            state: ProviderHealthState::Unavailable,
+            state: ProviderHealthState::Standby,
             reason: "no requests yet".to_owned(),
             last_request_at: None,
             last_success_at: None,

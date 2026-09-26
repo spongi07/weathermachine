@@ -34,7 +34,7 @@ use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_start};
 use wm_core::trading::RunMode;
 use wm_core::weather::ReportType;
-use wm_dashboard_api::AlertDto;
+use wm_dashboard_api::{AlertDto, ModelDto};
 use wm_execution::SimConfig;
 use wm_strategy::ProbabilityModel;
 use wm_weather::polling::{PollDecision, PollReason, PollingMode};
@@ -371,6 +371,11 @@ pub async fn run(
     let model = tokio::task::spawn_blocking(move || train_model(&ids2, peak, today, days, seed))
         .await
         .context("model training task")?;
+    let model_status = ModelDto {
+        state: "loaded".into(),
+        detail: format!("synthetic demo model ({days} synthetic days)"),
+        progress: None,
+    };
 
     let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, RunId::new_v7())?;
     let mut session =
@@ -498,6 +503,7 @@ pub async fn run(
                 confirmed_filters: &empty_filters,
                 extra_providers: &[],
                 rules_review: &empty_reviews,
+                model: &model_status,
             };
             publisher.publish(dto::build(&snap, &inputs, Utc::now()));
         }

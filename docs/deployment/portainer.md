@@ -16,7 +16,7 @@ configuration. The Portainer stack (`docker-compose.yml`) adds PostgreSQL 18
 |---|---|
 | Portainer CE/BE ≥ 2.19 on a Docker standalone environment | Swarm also works; resource limits then come from `deploy.resources`. |
 | x86-64 host (amd64) | arm64 images: run the CI workflow manually with `platforms = linux/amd64,linux/arm64`. |
-| Outbound HTTPS | `aviationweather.gov` (NOAA AWC), `tgftp.nws.noaa.gov`, `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`. |
+| Outbound HTTPS | `aviationweather.gov` (NOAA AWC), `tgftp.nws.noaa.gov`, `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`, and `mesonet.agron.iastate.edu` (IEM METAR history, used once to train the model). |
 | Image access | The package `ghcr.io/spongi07/weathermachine` is public: anonymous pulls work, so no registry credentials are needed. If the package is ever made private, add a registry in Portainer: *Registries → Add registry → Custom*, URL `ghcr.io`, username = GitHub user, password = a token with `read:packages`. |
 
 The image is built and pushed by `.github/workflows/ci.yml` on every push after
@@ -56,7 +56,8 @@ shown. Optional variables: `WM_DEMO_SPEED` (default 60 = one day in 24 min),
 | `WM_DASHBOARD_USER` / `WM_DASHBOARD_PASSWORD` | recommended if exposed | HTTP Basic auth for dashboard, API and metrics. |
 | `WM_IMAGE_TAG` | no | Pin a tag (e.g. `sha-1a2b3c4`) for reproducible deploys and rollbacks. |
 | `WM_HTTP_PORT` | no | Host port (default 8080). |
-| `WM_MODEL_PATH` | no | Trained model on the data volume, e.g. `/data/models/eham.json`. Without a model the engine never trades weather (fail closed). |
+| `WM_MODEL_PATH` | no | Model file. Default `/data/models/eham.json`, trained automatically on first start (see §4). Without a model the engine never trades weather (fail closed). |
+| `WM_MODEL_AUTO_TRAIN` | no | `true` (default): train the model from IEM history when the file is missing. `false`: never download history. |
 
 Optionally enable **GitOps updates** (polling, or the webhook Portainer shows
 after creation; store it as the repository secret `PORTAINER_WEBHOOK_URL` and
@@ -83,26 +84,44 @@ state as JSON.
 * The kill switch (top-right button or
   `curl -X POST -H "X-WM-Admin-Token: $TOKEN" -H 'content-type: application/json' -d '{"engaged":true,"reason":"manual"}' http://<host>:8080/api/v1/kill-switch`)
   blocks every new order immediately; it is journaled like any other event.
-* Expect **no trades** until (a) a trained model is configured, (b) the
-  day's market is discovered and machine-tradable, (c) the day's observation
-  series is complete, and (d) every pre-trade gate on the dashboard passes.
+* Expect **no trades** until (a) the model is trained (automatic, below),
+  (b) the day's market is discovered and machine-tradable, (c) the day's
+  observation series is complete, and (d) every pre-trade gate on the
+  dashboard passes.
 
-### Training and installing a model
+### The probability model (automatic)
 
-The image has no shell (distroless), so run one-off commands as their own
-container with the stack's data volume (Portainer: *Containers → Add
-container*, or the Docker CLI on the host):
+On the first start there is no model, so the dashboard shows **MODEL
+TRAINING** and a banner, and the engine trades nothing. In the background
+the service:
+
+1. downloads EHAM METARs from the IEM archive, 2005 to today, one year per
+   request, 15 s apart (IEM allows one request per second per IP), and
+   caches finished years in `/data/research/iem/EHAM/`;
+2. parses them with its own METAR parser and runs the peak-survival study;
+3. refuses to install a model built from fewer than 730 usable days;
+4. writes `/data/models/eham.json` and the survival report
+   `/data/research/eham-survival.md` (with the SHA-256 of every year it used);
+5. **restarts once** (exit code 75; the stack's restart policy brings it
+   back within seconds) and loads the model: the badge turns green.
+
+This takes a few minutes. If IEM is unreachable the badge shows **MODEL
+ERROR** with the reason, and training is retried every 6 hours. Later
+restarts load the saved model directly.
+
+Retrain by hand (for example once a year) with a one-off container on the
+stack's data volume. The image has no shell (distroless), so run it as its
+own container (Portainer: *Containers → Add container*, or the Docker CLI):
 
 ```sh
-# 1. Put an IEM ASOS CSV export (columns station,valid,metar) on the data volume.
-docker run --rm -v weather-machine_wmdata:/data -v "$PWD":/in:ro alpine \
-  sh -c 'cp /in/eham.csv /data/research/ && chown 65532:65532 /data/research/eham.csv'
-# 2. Run the peak-survival study; it prints P(high is final | N minutes) and writes the model.
-docker run --rm -v weather-machine_wmdata:/data ghcr.io/spongi07/weathermachine:latest \
-  research peak-survival --csv /data/research/eham.csv --station EHAM \
-  --model-out /data/models/eham.json --report-out /data/research/eham-report.md
-# 3. Set WM_MODEL_PATH=/data/models/eham.json on the stack and redeploy.
+docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
+  ghcr.io/spongi07/weathermachine:latest model train
+# then restart the weather-machine container
 ```
+
+Deleting `/data/models/eham.json` and restarting also retrains; only the
+current year is downloaded again. To use a model you trained elsewhere, put
+it on the volume and set `WM_MODEL_PATH`.
 
 Volume and network names are prefixed with the Portainer stack name
 (`weather-machine_…` above). If you named the stack differently, adjust the
@@ -150,6 +169,9 @@ path prefix.
 | `failed to bind host port 0.0.0.0:8080/tcp: address already in use` | Another service already uses host port 8080. Set `WM_HTTP_PORT` to a free port (e.g. `8090`) and redeploy; the dashboard is then at `http://<host>:8090/`. The demo stack uses `WM_DEMO_PORT` (default 8081) the same way. |
 | Image pull `denied` | Make the GHCR package public or add GHCR credentials under *Registries*. |
 | Container unhealthy, logs show `database not reachable yet` | PostgreSQL still initialising (first start) — it retries for 90 s; check the `postgres` service logs. |
+| **MODEL TRAINING** / banner "No probability model yet" | Normal on the first start: the history download and training take a few minutes, then the service restarts once. |
+| **MODEL ERROR**: `model training failed: … connection failed` | The host cannot reach `mesonet.agron.iastate.edu`. Allow outbound HTTPS to it; the service retries every 6 h (or restart it). |
+| Container restarted once with exit code 75 | Expected: it restarts to load the newly trained model. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
 | Providers *throttled* / *unavailable* | The rate limiter backs off (Retry-After honoured, circuit breaker); trading of that station stays blocked until data is healthy and fresh. Do not lower the polling floors. |
 | `collector lease held by another instance` | Another Weather Machine is running against the same database; stop it. |

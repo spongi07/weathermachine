@@ -14,6 +14,8 @@
 //! | `WM_ADMIN_TOKEN`    | bearer token for operator endpoints (kill switch)  |
 //! | `WM_UI_DIR`         | directory of the built dashboard assets            |
 //! | `WM_MODEL_PATH`     | trained probability model JSON                     |
+//! | `WM_MODEL_AUTO_TRAIN` | `false` disables training from IEM history       |
+//! | `WM_DATA_DIR`       | writable data directory (models, history cache)    |
 //! | `WM_LOG_FORMAT`     | `json` \| `pretty`                                   |
 
 use anyhow::{Context, Result, bail};
@@ -73,6 +75,32 @@ pub struct ProvidersSection {
     pub polymarket_gamma: ProviderSection,
     pub polymarket_clob: ProviderSection,
     pub polymarket_ws: ProviderSection,
+    /// IEM ASOS/METAR archive: history for model training only.
+    #[serde(default = "default_iem_provider")]
+    pub iem: ProviderSection,
+}
+
+/// IEM throttles each IP to one request per second; we space requests 15 s
+/// apart, one at a time, with a small daily cap.
+fn default_iem_provider() -> ProviderSection {
+    ProviderSection {
+        enabled: true,
+        base_url: "https://mesonet.agron.iastate.edu".into(),
+        policy: RateLimitPolicy {
+            min_interval: std::time::Duration::from_secs(15),
+            timeout: std::time::Duration::from_secs(180),
+            connect_timeout: std::time::Duration::from_secs(20),
+            backoff_base: std::time::Duration::from_secs(60),
+            backoff_max: std::time::Duration::from_secs(3600),
+            throttle_backoff_base: std::time::Duration::from_secs(600),
+            circuit_failure_threshold: 3,
+            circuit_open_base: std::time::Duration::from_secs(1800),
+            circuit_open_max: std::time::Duration::from_secs(6 * 3600),
+            daily_budget: Some(200),
+            max_body_bytes: 16 * 1024 * 1024,
+            ..RateLimitPolicy::public_data_conservative()
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,8 +162,39 @@ pub struct SplitUnwindConfigToml {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSection {
-    /// Trained model JSON; absent ⇒ no-edge model (no weather trades).
+    /// Trained model JSON. Unset: `<auto_train.data_dir>/models/<station>.json`
+    /// while auto-training is enabled, otherwise the no-edge model (no trades).
     pub path: Option<String>,
+    #[serde(default)]
+    pub auto_train: AutoTrainSection,
+}
+
+/// Train the model on the host from IEM history when no model file exists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AutoTrainSection {
+    pub enabled: bool,
+    /// Writable directory: `models/` (the model) and `research/` (cached
+    /// history per year and the survival report).
+    pub data_dir: String,
+    /// First year of history to download.
+    pub from_year: i32,
+    /// Refuse to install a model built from fewer usable days.
+    pub min_days: u64,
+    /// Wait before retrying after a failed attempt.
+    pub retry_after_secs: u64,
+}
+
+impl Default for AutoTrainSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            data_dir: "/data".into(),
+            from_year: 2005,
+            min_days: 730,
+            retry_after_secs: 6 * 3600,
+        }
+    }
 }
 
 /// Main configuration file.
@@ -318,6 +377,16 @@ impl AppConfig {
         if let Some(v) = env_nonempty("WM_MODEL_PATH") {
             file.model.path = Some(v);
         }
+        if let Some(v) = env_nonempty("WM_DATA_DIR") {
+            file.model.auto_train.data_dir = v;
+        }
+        if let Some(v) = env_nonempty("WM_MODEL_AUTO_TRAIN") {
+            file.model.auto_train.enabled = match v.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => true,
+                "false" | "0" | "no" | "off" => false,
+                other => bail!("WM_MODEL_AUTO_TRAIN must be true or false, got '{other}'"),
+            };
+        }
         let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let loc_dir = {
             let p = PathBuf::from(&file.app.locations_dir);
@@ -369,6 +438,7 @@ impl AppConfig {
             ("polymarket_gamma", &p.polymarket_gamma),
             ("polymarket_clob", &p.polymarket_clob),
             ("polymarket_ws", &p.polymarket_ws),
+            ("iem", &p.iem),
         ] {
             s.policy
                 .validate()

@@ -1,4 +1,5 @@
-//! Provider health tracking (Healthy / Degraded / Throttled / Stale / Unavailable).
+//! Provider health tracking (Healthy / Degraded / Throttled / Stale / Unavailable /
+//! Standby).
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,9 @@ use wm_net::GateStats;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthConfig {
     /// No observation newer than this ⇒ `Stale` (30-min cadence + 15-min allowance for EHAM).
+    /// A source whose own last success is older than this is `Standby`: the
+    /// active source is polled at least every 20 minutes, so only an idle
+    /// fallback reaches it.
     pub stale_after_secs: i64,
     /// Latency EWMA above this ⇒ `Degraded`.
     pub degraded_latency_ms: u64,
@@ -48,8 +52,8 @@ impl HealthTracker {
         now: DateTime<Utc>,
     ) -> Self {
         let mut snapshot = ProviderHealthSnapshot::new(provider, Some(station), now);
-        snapshot.state = ProviderHealthState::Stale;
-        snapshot.reason = "no observations yet".into();
+        snapshot.state = ProviderHealthState::Standby;
+        snapshot.reason = "standby: not contacted yet".into();
         Self {
             cfg,
             snapshot,
@@ -198,6 +202,23 @@ impl HealthTracker {
                 "recent request failures".into(),
             );
         }
+        // Health is evidence from this source's own requests. Fresh data from
+        // another source says nothing about a fallback that was never asked.
+        match s.last_success_at {
+            None => {
+                return (
+                    ProviderHealthState::Standby,
+                    "standby: not contacted yet".into(),
+                );
+            }
+            Some(t) if now - t > Duration::seconds(self.cfg.stale_after_secs) => {
+                return (
+                    ProviderHealthState::Standby,
+                    format!("standby: last success {} min ago", (now - t).num_minutes()),
+                );
+            }
+            _ => {}
+        }
         if s.latency_ms_ewma
             .is_some_and(|l| l > self.cfg.degraded_latency_ms as f64)
         {
@@ -291,6 +312,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ev.snapshot.state, ProviderHealthState::Healthy);
+    }
+
+    #[test]
+    fn a_source_is_healthy_only_on_its_own_recent_success() {
+        let mut t = tracker();
+        // Fresh data delivered by another source says nothing about this one.
+        let ev = t.on_tick(
+            utc("2026-09-26T12:58:00Z"),
+            Some(utc("2026-09-26T12:55:00Z")),
+            &gate(),
+            None,
+        );
+        assert!(ev.is_none());
+        assert_eq!(t.state(), ProviderHealthState::Standby);
+        t.on_success(
+            utc("2026-09-26T13:00:00Z"),
+            200,
+            100,
+            Some(utc("2026-09-26T12:55:00Z")),
+            0,
+            &gate(),
+            None,
+        );
+        assert_eq!(t.state(), ProviderHealthState::Healthy);
+        // Idle for 50 minutes while another source keeps the data fresh.
+        let ev = t
+            .on_tick(
+                utc("2026-09-26T13:50:00Z"),
+                Some(utc("2026-09-26T13:25:00Z")),
+                &gate(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(ev.snapshot.state, ProviderHealthState::Standby);
+        assert_eq!(ev.snapshot.reason, "standby: last success 50 min ago");
+        assert!(!ev.snapshot.state.allows_new_weather_positions());
     }
 
     #[test]

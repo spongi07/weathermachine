@@ -100,6 +100,8 @@ fn state_class(state: &str) -> &'static str {
     match state {
         "healthy" => "good",
         "degraded" | "stale" => "warn",
+        // Not contacted yet (fallback source): neutral, not an alarm.
+        "standby" => "",
         _ => "bad",
     }
 }
@@ -180,20 +182,31 @@ fn StatusBar(
         let (class, text) = match link.get() {
             Link::Connecting => ("pill warn", "CONNECTING".to_owned()),
             Link::Reconnecting => ("pill bad", "RECONNECTING".to_owned()),
-            Link::Live if age > 5.0 => ("pill warn", format!("STALE {age:.0}s")),
-            Link::Live => ("pill good", "LIVE".to_owned()),
+            Link::Live if age > 5.0 => ("pill warn", format!("STREAM STALE {age:.0}s")),
+            Link::Live => ("pill good", "STREAM".to_owned()),
         };
-        view! { <span class=class title="Server-Sent Events snapshot stream">{text}</span> }
+        view! { <span class=class title="Dashboard connection to the server (live snapshot stream). Trading mode is the PAPER badge.">{text}</span> }
     };
     let flags = move || {
         snap.with(|s| {
             s.as_ref().map(|s| {
-                let pill = |ok: bool, label: String, title: &'static str| view! { <span class={if ok { "pill good" } else { "pill bad" }} title=title>{label}</span> };
+                let pill = |ok: bool, label: String, title: String| view! { <span class={if ok { "pill good" } else { "pill bad" }} title=title>{label}</span> };
+                let model = {
+                    let m = &s.model;
+                    let (class, label) = match m.state.as_str() {
+                        "loaded" => ("pill good", "MODEL".to_owned()),
+                        "training" => ("pill warn", m.progress.map_or_else(|| "MODEL TRAINING".to_owned(), |(d, t)| format!("MODEL TRAINING {d}/{t}"))),
+                        "failed" | "invalid" => ("pill bad", "MODEL ERROR".to_owned()),
+                        _ => ("pill warn", "NO MODEL".to_owned()),
+                    };
+                    let title = if m.detail.is_empty() { s.model_id.clone() } else { m.detail.clone() };
+                    view! { <span class=class title=title>{label}</span> }
+                };
                 vec![
-                    pill(s.storage_ok, "STORAGE".into(), "Audit storage (PostgreSQL); required for trading"),
-                    pill(s.execution_ok, "EXECUTION".into(), "Simulated paper venue"),
-                    pill(s.model_id != "no-edge", "MODEL".into(), "Probability model loaded"),
-                    pill(s.market_stream.as_ref().is_none_or(|m| m.connected), "MARKET DATA".into(), "Polymarket market stream"),
+                    pill(s.storage_ok, "STORAGE".into(), "Audit storage (PostgreSQL); required for trading".into()).into_any(),
+                    pill(s.execution_ok, "EXECUTION".into(), "Simulated paper venue".into()).into_any(),
+                    model.into_any(),
+                    pill(s.market_stream.as_ref().is_none_or(|m| m.connected), "MARKET DATA".into(), "Polymarket market stream".into()).into_any(),
                 ]
             })
         })
@@ -231,6 +244,14 @@ fn Banners(snap: Snap) -> impl IntoView {
             }
             if !s.live_trading_enabled {
                 v.push(view! { <div class="banner info">"Paper trading — live order placement is disabled in this build."</div> }.into_any());
+            }
+            if !s.demo && !s.model.loaded() {
+                let (class, text) = match s.model.state.as_str() {
+                    "training" => ("banner info", format!("No probability model yet, so no weather trades (by design). Training automatically from real METAR history — {}. The service restarts once to load it.", s.model.detail)),
+                    "failed" | "invalid" => ("banner bad", fmt::sentence(&s.model.detail)),
+                    _ => ("banner info", format!("No probability model, so no weather trades (by design): {}", s.model.detail)),
+                };
+                v.push(view! { <div class=class>{text}</div> }.into_any());
             }
             Some(v)
         })
@@ -319,7 +340,7 @@ fn LocationSection(snap: Snap, id: String) -> impl IntoView {
                         <span class="big">{l.current_temp_c.map_or_else(|| DASH.to_owned(), |t| format!("{t:.0} °C"))}</span>
                         <span class="muted">{format!("last report {age}")}</span>
                         <span class={if l.peak_watch { "pill warn" } else { "pill" }}>{if l.peak_watch { "PEAK WATCH" } else { "peak watch off" }}</span>
-                        <span class={if l.has_exposure { "pill info" } else { "pill" }}>{if l.has_exposure { "EXPOSED" } else { "flat" }}</span>
+                        <span class={if l.has_exposure { "pill info" } else { "pill" }} title="open paper position in this location's market">{if l.has_exposure { "POSITION OPEN" } else { "no position" }}</span>
                     </div>
                     {l.last_raw.clone().map(|r| view! { <div class="raw" title="latest raw report">{r}</div> })}
                 }
@@ -428,12 +449,16 @@ fn Ladder(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                             <td class="num">{fmt::opt(r.yes_spread, 3)}</td>
                             <td class="prob">
                                 <div class="pbar"><span class="implied" style=implied_w></span><span class="model" style=model_w></span></div>
-                                <span class="num">{fmt::pct(r.implied_p)}</span>" → "<span class="num strong">{fmt::pct(r.model_p)}</span>
+                                {match (r.implied_p, r.model_p) {
+                                    (i, Some(m)) => view! { <span class="num">{fmt::pct(i)}</span>" → "<span class="num strong">{fmt::pct(Some(m))}</span> }.into_any(),
+                                    (Some(i), None) => view! { <span class="num">{fmt::pct(Some(i))}</span> }.into_any(),
+                                    (None, None) => view! { <span class="num muted">{DASH}</span> }.into_any(),
+                                }}
                             </td>
                             <td class=edge_class>{fmt::pp(r.edge)}</td>
                             <td class=ev_class(r.yes_ev)>{fmt::signed(r.yes_ev, 4)}</td>
                             <td class=ev_class(r.no_ev)>{fmt::signed(r.no_ev, 4)}</td>
-                            <td class="num">{fmt::pct(r.yes_break_even)}</td>
+                            <td class="num" title="break-even probability for buying YES at the ask, after fee and slippage allowance">{fmt::break_even(r.yes_break_even)}</td>
                             <td class="num">{if r.position_shares.abs() > 0.0 { format!("{:+.1}", r.position_shares) } else { DASH.to_owned() }}</td>
                             <td class="num muted">{r.book_age_ms.map_or_else(|| DASH.to_owned(), |a| fmt::age(a / 1000))}</td>
                             <td class="why">{chips}<span class="muted">{blocker}</span></td>
@@ -456,7 +481,7 @@ fn Ladder(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                             <tbody>{rows}</tbody>
                         </table>
                     </div>
-                    <div class="muted small">"EV per share after fee and slippage allowance. Highlighted row contains the current high. Bars: grey = market-implied, blue = model."</div>
+                    <div class="muted small">"EV per share after fee and slippage allowance. B/E: probability needed to profit buying YES at the ask (n/a = impossible at that price). Highlighted row contains the current high. Bars: grey = market-implied, blue = model."</div>
                 </div>
             }
             .into_any()
@@ -575,7 +600,11 @@ fn RiskPanel(snap: Snap) -> impl IntoView {
                     }
                 })
                 .collect::<Vec<_>>();
-            let events = r.per_event.iter().map(|(e, u)| view! { <tr><td class="small">{e.clone()}</td><td class="num">{fmt::usd(*u)}</td></tr> }).collect::<Vec<_>>();
+            let events = if r.per_event.is_empty() {
+                view! { <tr><td colspan="2" class="empty">"No open exposure."</td></tr> }.into_any()
+            } else {
+                r.per_event.iter().map(|(e, u)| view! { <tr><td class="small">{e.clone()}</td><td class="num">{fmt::usd(*u)}</td></tr> }).collect::<Vec<_>>().into_any()
+            };
             let blocked = r.checks.iter().filter(|c| !c.ok).count();
             view! {
                 <section class="panel">
@@ -609,8 +638,11 @@ fn ProvidersPanel(snap: Snap) -> impl IntoView {
                     let budget = p.daily_budget.map(|b| (f64::from(p.requests_today) / f64::from(b.max(1))).clamp(0.0, 1.0));
                     let bar = budget.map(|u| format!("width:{:.1}%", u * 100.0));
                     let blocked = p.blocked_until_ms.map(fmt::utc_time).unwrap_or_default();
+                    // The detail gets its own full-width line: squeezed into a
+                    // seventh column it wrapped mid-word.
+                    let detail = p.last_error.clone().unwrap_or_else(|| p.reason.clone());
                     view! {
-                        <tr>
+                        <tr class="prov">
                             <td><b>{p.provider.clone()}</b><div class="muted small">{p.scope.clone().unwrap_or_else(|| "global".into())}</div></td>
                             <td><span class=format!("pill {}", state_class(&p.state))>{p.state.to_uppercase()}</span><div class="muted small">{format!("circuit {}", p.circuit)}</div></td>
                             <td class="num">
@@ -620,8 +652,8 @@ fn ProvidersPanel(snap: Snap) -> impl IntoView {
                             <td class="num">{p.throttle_events}</td>
                             <td class="num">{fmt::opt(p.latency_ms_ewma, 0)}</td>
                             <td class="num">{if p.backoff_s > 0.0 { format!("{:.0}s", p.backoff_s) } else { DASH.to_owned() }}<div class="muted small">{blocked}</div></td>
-                            <td class="small muted wrap">{p.last_error.clone().unwrap_or_else(|| p.reason.clone())}</td>
                         </tr>
+                        <tr class="prov-detail"><td colspan="6" class="small muted wrap">{detail}</td></tr>
                     }
                 })
                 .collect::<Vec<_>>();
@@ -637,7 +669,7 @@ fn ProvidersPanel(snap: Snap) -> impl IntoView {
                     <div class="panel-title"><span>"DATA PROVIDERS · RATE LIMITS"</span><span class="muted">"one gate per provider · 429 ⇒ back off, never retry-spin"</span></div>
                     <div class="table-wrap">
                         <table class="providers">
-                            <thead><tr><th>"Provider"</th><th>"State"</th><th>"Req today"</th><th>"429s"</th><th>"ms"</th><th>"Backoff"</th><th>"Detail"</th></tr></thead>
+                            <thead><tr><th>"Provider"</th><th>"State"</th><th>"Req today"</th><th>"429s"</th><th>"ms"</th><th>"Backoff"</th></tr></thead>
                             <tbody>{rows}</tbody>
                         </table>
                     </div>
@@ -707,14 +739,14 @@ fn Blotter(snap: Snap) -> impl IntoView {
                             <div class="panel-title"><span>"POSITIONS"</span><span class="muted">"marked at best bid · closed positions keep realized PnL"</span></div>
                             <div class="table-wrap"><table>
                                 <thead><tr><th>"Event"</th><th>"Bucket"</th><th>"Side"</th><th>"Shares"</th><th>"Avg"</th><th>"Mark"</th><th>"Cost"</th><th>"Unreal."</th><th>"Real."</th></tr></thead>
-                                <tbody>{prow}</tbody>
+                                <tbody>{if prow.is_empty() { view! { <tr><td colspan="9" class="empty">"No positions yet. They appear once a signal passes every pre-trade gate."</td></tr> }.into_any() } else { prow.into_any() }}</tbody>
                             </table></div>
                         </div>
                         <div>
                             <div class="panel-title"><span>"ORDERS"</span><span class="muted">"simulated venue (paper)"</span></div>
                             <div class="table-wrap"><table>
                                 <thead><tr><th>"Order"</th><th>"Strategy"</th><th>"Instrument"</th><th>"Limit"</th><th>"Filled"</th><th>"Avg"</th><th>"Fees"</th><th>"Status"</th><th>"Updated"</th></tr></thead>
-                                <tbody>{orow}</tbody>
+                                <tbody>{if orow.is_empty() { view! { <tr><td colspan="9" class="empty">"No orders yet."</td></tr> }.into_any() } else { orow.into_any() }}</tbody>
                             </table></div>
                         </div>
                     </div>
@@ -733,7 +765,8 @@ fn DecisionLog(snap: Snap) -> impl IntoView {
     let rows = move || {
         let all = show_evaluations.get();
         decisions.with(|ds| {
-            ds.iter()
+            let hidden = if all { 0 } else { ds.iter().filter(|d| d.strategy == "evaluation").count() };
+            let rows = ds.iter()
                 .filter(|d| all || d.strategy != "evaluation")
                 .take(40)
                 .map(|d| {
@@ -756,7 +789,17 @@ fn DecisionLog(snap: Snap) -> impl IntoView {
                         </tr>
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if rows.is_empty() {
+                let text = if hidden > 0 {
+                    format!("No trade decisions yet ({hidden} routine evaluations hidden — tick “show evaluations”).")
+                } else {
+                    "No decisions yet.".to_owned()
+                };
+                view! { <tr><td colspan="4" class="empty">{text}</td></tr> }.into_any()
+            } else {
+                rows.into_any()
+            }
         })
     };
     view! {
@@ -792,7 +835,7 @@ fn AlertsPanel(snap: Snap) -> impl IntoView {
         view! {
             <section class="panel">
                 <div class="panel-title"><span>"ALERTS & EVENTS"</span></div>
-                <div class="table-wrap tall"><table class="alerts"><tbody>{rows}</tbody></table></div>
+                <div class="table-wrap tall"><table class="alerts"><tbody>{if rows.is_empty() { view! { <tr><td colspan="3" class="empty">"No alerts."</td></tr> }.into_any() } else { rows.into_any() }}</tbody></table></div>
             </section>
         }
     }

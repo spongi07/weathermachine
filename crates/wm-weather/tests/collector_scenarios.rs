@@ -606,6 +606,108 @@ async fn fails_over_to_secondary_when_primary_is_throttled() {
     );
 }
 
+/// A fallback that was never contacted must not make the station look healthy:
+/// when the primary is throttled, trading stays blocked until the fallback has
+/// actually delivered.
+#[tokio::test]
+async fn untried_fallback_never_masks_a_throttled_primary() {
+    use std::collections::HashMap;
+    use wm_core::health::station_state;
+
+    let primary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG",
+            T1255,
+            "METAR",
+        )])))
+        .up_to_n_times(1)
+        .mount(&primary)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "3600"))
+        .mount(&primary)
+        .await;
+    let secondary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/data/observations/metar/stations/EHAM.TXT"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "2026/09/26 12:55\nEHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG\n",
+        ))
+        .mount(&secondary)
+        .await;
+    let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
+    let tg_gate = ProviderGate::new(ProviderId::tgftp(), policy(), Arc::new(clock.clone()), 12);
+    let tg_fetcher = Arc::new(
+        HttpFetcher::new(tg_gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap(),
+    );
+    let tg: Arc<dyn ObservationSource> =
+        Arc::new(TgftpMetarSource::new(tg_fetcher, secondary.uri()));
+    let mut h = harness(vec![awc_source(&primary.uri(), &clock, "awc"), tg], clock);
+
+    // What the engine sees: the latest reported state per source.
+    let mut seen: HashMap<ProviderId, ProviderHealthState> = HashMap::new();
+    let mut station = |events: Vec<WeatherMachineEvent>| {
+        for e in events {
+            if let WeatherMachineEvent::ProviderHealthChanged(ev) = e {
+                seen.insert(ev.snapshot.provider.clone(), ev.snapshot.state);
+            }
+        }
+        station_state(seen.values().copied())
+    };
+    let state_of = |h: &Harness, p: &ProviderId| {
+        h.collector
+            .status()
+            .borrow()
+            .providers
+            .iter()
+            .find(|s| &s.provider == p)
+            .map(|s| s.state)
+    };
+
+    // 1. Primary delivers: healthy. The fallback was never asked: standby.
+    assert!(matches!(
+        h.collector.poll_once().await,
+        PollOutcome::Fetched { new: 1, .. }
+    ));
+    assert_eq!(station(drain(&mut h.events)), ProviderHealthState::Healthy);
+    assert_eq!(
+        state_of(&h, &ProviderId::tgftp()),
+        Some(ProviderHealthState::Standby)
+    );
+
+    // 2. Primary throttles. The observation is still fresh, but no contacted
+    //    source is healthy, so the station must not be either.
+    h.clock.advance(Duration::from_secs(60));
+    assert!(matches!(
+        h.collector.poll_once().await,
+        PollOutcome::Failed {
+            throttled: true,
+            ..
+        }
+    ));
+    let during = station(drain(&mut h.events));
+    assert_eq!(during, ProviderHealthState::Throttled);
+    assert!(!during.allows_new_weather_positions());
+    assert_eq!(
+        primary.received_requests().await.unwrap().len(),
+        2,
+        "no retry storm against the throttled primary"
+    );
+
+    // 3. The fallback is contacted and delivers: now it is evidence.
+    h.clock.advance(Duration::from_secs(60));
+    match h.collector.poll_once().await {
+        PollOutcome::Fetched { provider, .. } => assert_eq!(provider, ProviderId::tgftp()),
+        o => panic!("unexpected {o:?}"),
+    }
+    assert_eq!(station(drain(&mut h.events)), ProviderHealthState::Healthy);
+    assert_eq!(
+        state_of(&h, &ProviderId::tgftp()),
+        Some(ProviderHealthState::Healthy)
+    );
+}
+
 #[test]
 fn second_collector_for_same_station_is_refused() {
     let registry = CollectorRegistry::new();

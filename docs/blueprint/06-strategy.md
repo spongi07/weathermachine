@@ -72,12 +72,18 @@ pub struct IncrementDistribution { probs: Vec<f64>, support: u32, source: String
   and towards a NO bucket's loss if it contains *any* (upper bound).
   Property test: for any distribution and bucket partition, each lower ≤
   upper and Σ lower ≤ 1 ≤ Σ upper.
-* Training: `weather-machine research peak-survival --csv <IEM export>
-  --model-out model.json`. The model is JSON, versioned by id, station and
-  view, with training dates.
+* Training: automatic on the host. When the model file is missing, `run`
+  downloads the station's METAR history from IEM (rate-limited, finished
+  years cached), runs the peak-survival study, refuses fewer than 730
+  usable days, writes the model and report atomically and restarts once to
+  load it. Manual: `weather-machine model train`, or
+  `research peak-survival --csv <IEM export> --model-out model.json`. The
+  model is JSON, versioned by id (with training date), station and view.
 
-**FAILURE MODES.** No model or no distribution → no signal.
-Station/model mismatch → startup error.
+**FAILURE MODES.** No model or no distribution → no signal. Training
+failure (e.g. IEM unreachable) → still no model, retried after 6 h.
+Unusable model file or station/model mismatch → the service runs without a
+model (no weather trades) and raises a critical alert.
 **TESTING.** Smoothing shrinks sparse cells, tail handling, serialisation,
 and the bucket-bounds property test.
 

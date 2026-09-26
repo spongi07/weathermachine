@@ -12,7 +12,7 @@ live run · ⏳ not started · ⛔ deliberately blocked.
 | 4 | Polymarket market-data ingestion | ✅ Gamma, rules capture, CLOB, WS, book recorder | Books recorded continuously for today's/tomorrow's markets |
 | 5 | Historical market database | 🟡 recorder running from deployment; price/trade history importers | ≥ 60 days of recorded books; price history imported with fidelity label |
 | 6 | ReplayEngine | ✅ knowledge-time session, prefix stability, journal replay | — |
-| 7 | Peak-detection research | 🟡 `research peak-survival` ready | Survival table with Wilson CIs on EHAM history, per view (all and hourly), reviewed |
+| 7 | Peak-detection research | 🟡 automatic: the service trains from IEM history on first start and writes the survival report; review pending | Survival table with Wilson CIs on EHAM history, per view (all and hourly), reviewed |
 | 8 | YES backtest | 🟡 engine ready | Walk-forward EV per threshold 0.90…0.99 with CIs, stable neighbourhood |
 | 9 | NO backtest | 🟡 engine ready | Same, per distance +1/+2/+3 |
 | 10 | Split/unwind backtest | 🟡 strategy C (research-only) and unwind styles ready | C vs wait-and-confirm on identical data, net of all costs |
@@ -36,20 +36,24 @@ health, conservative polling, back off, zero trades.
 
 ## First strategy experiment (brief §38) — how to run it
 
-1. Export EHAM METARs from the IEM archive (network `NL__ASOS`, station
-   `EHAM`, CSV with `station,valid,metar`) for as many years as available.
-2. `weather-machine research peak-survival --csv eham.csv --station EHAM --report-out survival.md --model-out eham.json`,
-   repeated with `--filter hourly-nws-faa` for the hourly view.
-3. Review P(final | N minutes) per season, hour, drop and trajectory, with
+1. Automatic: on first start the service downloads EHAM METARs from the IEM
+   archive (2005 → today, one station-year per request, 15 s apart), trains
+   the model and writes `/data/research/eham-survival.md`. Manual:
+   `weather-machine model train`, or `research peak-survival --csv …`
+   (repeat with `--filter hourly-nws-faa` for the hourly view).
+2. Review P(final | N minutes) per season, hour, drop and trajectory, with
    CIs. Only then: forecasts (Phase 11), then prices (Phases 8–10).
 
 ## Immediate next steps
 
 1. Deploy the stack in Portainer ([deployment guide](../deployment/portainer.md)).
    CI publishes the image `ghcr.io/spongi07/weathermachine` on every push.
+   The model trains itself on first start (a few minutes).
 2. Run the first data experiment; record the results in
    `docs/blueprint/phase0-results.md`.
-3. Leave the paper stack running *without a model*: it collects, records
-   books and journals everything while trading nothing (fail closed).
-4. Run the first strategy experiment; install the model only if the survival
-   table supports it.
+3. Let the paper stack run: it collects, records books and journals
+   everything, and paper-trades (simulated fills only) once the model is
+   loaded and every pre-trade gate passes.
+4. Review the survival report (`/data/research/eham-survival.md`). If it
+   does not support the strategy, set `WM_MODEL_AUTO_TRAIN=false` and delete
+   `/data/models/eham.json`: the engine returns to trading nothing.
