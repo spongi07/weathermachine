@@ -1,0 +1,10 @@
+/target/
+/ui/target/
+/ui/dist/
+**/*.rs.bk
+.env
+stack.env
+*.local.toml
+/data/
+/research-output/
+.DS_Store

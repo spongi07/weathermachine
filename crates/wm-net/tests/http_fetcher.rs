@@ -1,0 +1,234 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Provider-behaviour integration tests against a local mock server.
+
+use std::sync::Arc;
+use std::time::Duration;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+use wm_core::ids::ProviderId;
+use wm_core::ingest::CacheOutcome;
+use wm_core::time::SystemClock;
+use wm_net::{FetchError, FetchRequest, HttpFetcher, ProviderGate, RateLimitPolicy, WaitReason};
+
+fn fetcher(policy: RateLimitPolicy) -> HttpFetcher {
+    let gate = ProviderGate::new(ProviderId::new("mock").unwrap(), policy, Arc::new(SystemClock::new()), 7);
+    HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap()
+}
+
+fn req(server: &MockServer, p: &str) -> FetchRequest {
+    FetchRequest::get(format!("{}{}", server.uri(), p), p.to_owned()).max_gate_wait(Duration::from_secs(2))
+}
+
+#[tokio::test]
+async fn http_200_is_audited_and_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/obs"))
+        .and(header("user-agent", "WeatherMachine-test/0 (test@example.invalid)"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("EHAM 261255Z 18/12 Q1016").insert_header("etag", "\"v1\""))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let r = f.get(&req(&server, "/obs")).await.unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(r.cache, CacheOutcome::Miss);
+    assert_eq!(&r.body[..], b"EHAM 261255Z 18/12 Q1016");
+    assert_eq!(r.record.status, Some(200));
+    assert_eq!(r.record.bytes, 24);
+    assert!(r.record.payload_sha256.is_some());
+    assert!(f.cached(&format!("{}/obs", server.uri())).is_some());
+}
+
+#[tokio::test]
+async fn conditional_get_uses_etag_and_304_reuses_cached_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/obs"))
+        .and(header("if-none-match", "\"v1\""))
+        .respond_with(ResponseTemplate::new(304))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/obs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("body-v1").insert_header("etag", "\"v1\""))
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let first = f.get(&req(&server, "/obs")).await.unwrap();
+    assert_eq!(first.cache, CacheOutcome::Miss);
+    let second = f.get(&req(&server, "/obs")).await.unwrap();
+    assert_eq!(second.cache, CacheOutcome::NotModified);
+    assert_eq!(&second.body[..], b"body-v1");
+    assert_eq!(second.record.cache, CacheOutcome::NotModified);
+}
+
+#[tokio::test]
+async fn http_429_with_retry_after_closes_the_gate() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "3"))
+        .expect(1) // exactly one request: no retry storm
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let err = f.get(&req(&server, "/obs")).await.unwrap_err();
+    match &err {
+        FetchError::Throttled { retry_after, record } => {
+            assert_eq!(*retry_after, Some(Duration::from_secs(3)));
+            assert!(record.throttled);
+            assert_eq!(record.status, Some(429));
+        }
+        e => panic!("unexpected {e:?}"),
+    }
+    // An immediate second attempt is refused locally without touching the server.
+    let err = f.get(&req(&server, "/obs").max_gate_wait(Duration::ZERO)).await.unwrap_err();
+    match err {
+        FetchError::GateClosed(w) => {
+            assert_eq!(w.reason, WaitReason::RetryAfter);
+            assert!(w.retry_in >= Duration::from_millis(2500));
+        }
+        e => panic!("unexpected {e:?}"),
+    }
+    assert_eq!(f.gate().stats().throttled_total, 1);
+}
+
+#[tokio::test]
+async fn http_500_backs_off() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(500)).expect(1).mount(&server).await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let err = f.get(&req(&server, "/obs")).await.unwrap_err();
+    assert!(matches!(err, FetchError::Status { status: 500, .. }));
+    let err = f.get(&req(&server, "/obs").max_gate_wait(Duration::ZERO)).await.unwrap_err();
+    match err {
+        FetchError::GateClosed(w) => assert_eq!(w.reason, WaitReason::Backoff),
+        e => panic!("unexpected {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn timeout_is_classified() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let mut policy = RateLimitPolicy::local_test();
+    policy.timeout = Duration::from_millis(300);
+    let f = fetcher(policy);
+    let err = f.get(&req(&server, "/slow")).await.unwrap_err();
+    assert!(matches!(err, FetchError::Timeout { .. }), "{err:?}");
+    assert_eq!(err.record().unwrap().error_class.as_deref(), Some("timeout"));
+}
+
+#[tokio::test]
+async fn connection_refused_is_classified() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let f = fetcher(RateLimitPolicy::local_test());
+    let r = FetchRequest::get(format!("http://127.0.0.1:{port}/x"), "/x").max_gate_wait(Duration::from_secs(1));
+    let err = f.get(&r).await.unwrap_err();
+    assert!(matches!(err, FetchError::Connect { .. } | FetchError::Transport { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn oversized_body_is_rejected() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 70_000]))
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test()); // 64 KiB cap
+    let err = f.get(&req(&server, "/big")).await.unwrap_err();
+    assert!(matches!(err, FetchError::BodyTooLarge { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn circuit_opens_after_repeated_failures_and_recovers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_string("ok")).mount(&server).await;
+    let mut policy = RateLimitPolicy::local_test();
+    policy.backoff_base = Duration::from_millis(20);
+    policy.backoff_max = Duration::from_millis(40);
+    let f = fetcher(policy);
+    for _ in 0..3 {
+        let err = f.get(&req(&server, "/flaky")).await.unwrap_err();
+        assert!(matches!(err, FetchError::Status { status: 503, .. }));
+    }
+    let err = f.get(&req(&server, "/flaky").max_gate_wait(Duration::ZERO)).await.unwrap_err();
+    match err {
+        FetchError::GateClosed(w) => assert_eq!(w.reason, WaitReason::CircuitOpen),
+        e => panic!("unexpected {e:?}"),
+    }
+    // After the open period a single half-open probe succeeds and closes the circuit.
+    let ok = f.get(&req(&server, "/flaky").max_gate_wait(Duration::from_secs(3))).await.unwrap();
+    assert_eq!(&ok.body[..], b"ok");
+    assert_eq!(f.gate().stats().circuit, wm_core::health::CircuitState::Closed);
+}
+
+#[tokio::test]
+async fn min_interval_is_enforced_between_requests() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_string("a")).mount(&server).await;
+    let mut policy = RateLimitPolicy::local_test();
+    policy.min_interval = Duration::from_millis(400);
+    let f = fetcher(policy);
+    f.get(&req(&server, "/a").unconditional()).await.unwrap();
+    let err = f.get(&req(&server, "/a").unconditional().max_gate_wait(Duration::ZERO)).await.unwrap_err();
+    match err {
+        FetchError::GateClosed(w) => assert_eq!(w.reason, WaitReason::MinInterval),
+        e => panic!("unexpected {e:?}"),
+    }
+    let started = std::time::Instant::now();
+    f.get(&req(&server, "/a").unconditional()).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(300));
+}
+
+#[tokio::test]
+async fn retry_after_http_date_is_parsed() {
+    let server = MockServer::start().await;
+    let when = (chrono::Utc::now() + chrono::Duration::seconds(120)).format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", when.as_str()))
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    match f.get(&req(&server, "/x")).await.unwrap_err() {
+        FetchError::Throttled { retry_after: Some(d), .. } => {
+            assert!(d > Duration::from_secs(100) && d <= Duration::from_secs(121), "{d:?}");
+        }
+        e => panic!("unexpected {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_callers_share_one_gate() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("x").set_delay(Duration::from_millis(100)))
+        .mount(&server)
+        .await;
+    let mut policy = RateLimitPolicy::local_test();
+    policy.min_interval = Duration::from_millis(150);
+    let f = Arc::new(fetcher(policy));
+    let started = std::time::Instant::now();
+    let mut handles = Vec::new();
+    for _ in 0..3 {
+        let f = Arc::clone(&f);
+        let r = req(&server, "/c").unconditional();
+        handles.push(tokio::spawn(async move { f.get(&r).await }));
+    }
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+    // Three requests with ≥150 ms spacing take at least 300 ms in total.
+    assert!(started.elapsed() >= Duration::from_millis(290), "{:?}", started.elapsed());
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}

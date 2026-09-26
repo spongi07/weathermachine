@@ -1,0 +1,107 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wm-core",
+    "crates/wm-net",
+    "crates/wm-weather",
+    "crates/wm-polymarket",
+    "crates/wm-strategy",
+    "crates/wm-risk",
+    "crates/wm-execution",
+    "crates/wm-engine",
+    "crates/wm-storage",
+    "crates/wm-backtest",
+    "crates/wm-dashboard-api",
+    "crates/wm-app",
+]
+# The dashboard UI targets wasm32 and is its own workspace (see ui/Cargo.toml).
+exclude = ["ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/spongi07/weathermachine"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+wm-core = { path = "crates/wm-core" }
+wm-net = { path = "crates/wm-net" }
+wm-weather = { path = "crates/wm-weather" }
+wm-polymarket = { path = "crates/wm-polymarket" }
+wm-strategy = { path = "crates/wm-strategy" }
+wm-risk = { path = "crates/wm-risk" }
+wm-execution = { path = "crates/wm-execution" }
+wm-engine = { path = "crates/wm-engine" }
+wm-storage = { path = "crates/wm-storage" }
+wm-backtest = { path = "crates/wm-backtest" }
+wm-dashboard-api = { path = "crates/wm-dashboard-api" }
+
+# External crates (versions verified against crates.io index, 2026-09)
+anyhow = "1.0.104"
+axum = "0.8.9"
+bytes = "1.12.1"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+chrono-tz = { version = "0.10.4", features = ["serde"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+csv = "1.4.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
+hex = "0.4.3"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+reqwest = { version = "0.13.5", features = ["json", "gzip", "query"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-aws-lc-rs",
+    "postgres",
+    "macros",
+    "migrate",
+    "chrono",
+    "uuid",
+    "json",
+] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+toml = "1.1.6"
+tower-http = { version = "0.7.1", features = ["fs", "trace", "compression-gzip", "set-header", "timeout"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
+url = "2.5.8"
+uuid = { version = "1.26.1", features = ["v7", "serde"] }
+
+# Dev / test
+proptest = "1.11.0"
+wiremock = "0.6.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+large_enum_variant = "allow"
+module_inception = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Crash-only design: a panic terminates the process, the container restarts it,
+# and state is rebuilt from the durable event journal (see docs/blueprint/16-operations.md).
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
