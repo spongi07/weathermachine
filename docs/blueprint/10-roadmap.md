@@ -45,8 +45,8 @@ health, conservative polling, back off, zero trades.
 
 ## Immediate next steps
 
-1. Fix repository access (push), let CI build the image, deploy the stack in
-   Portainer ([deployment guide](../deployment/portainer.md)).
+1. Deploy the stack in Portainer ([deployment guide](../deployment/portainer.md)).
+   CI publishes the image `ghcr.io/spongi07/weathermachine` on every push.
 2. Run the first data experiment; record the results in
    `docs/blueprint/phase0-results.md`.
 3. Leave the paper stack running *without a model*: it collects, records

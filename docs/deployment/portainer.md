@@ -17,7 +17,7 @@ configuration. The Portainer stack (`docker-compose.yml`) adds PostgreSQL 18
 | Portainer CE/BE ≥ 2.19 on a Docker standalone environment | Swarm also works; resource limits then come from `deploy.resources`. |
 | x86-64 host (amd64) | arm64 images: run the CI workflow manually with `platforms = linux/amd64,linux/arm64`. |
 | Outbound HTTPS | `aviationweather.gov` (NOAA AWC), `tgftp.nws.noaa.gov`, `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`. |
-| Image access | GHCR packages are private by default. Either make the package public (GitHub → Packages → weathermachine → Package settings → visibility), or add a registry in Portainer: *Registries → Add registry → Custom*, URL `ghcr.io`, username = GitHub user, password = a token with `read:packages`. |
+| Image access | The package `ghcr.io/spongi07/weathermachine` is public: anonymous pulls work, so no registry credentials are needed. If the package is ever made private, add a registry in Portainer: *Registries → Add registry → Custom*, URL `ghcr.io`, username = GitHub user, password = a token with `read:packages`. |
 
 The image is built and pushed by `.github/workflows/ci.yml` on every push after
 formatting, lint and tests pass. Tags: `latest` (default branch), the branch
@@ -28,7 +28,7 @@ name, `sha-<short>` for every commit, and semantic versions for `v*` tags.
 *Stacks → Add stack → name `weather-machine-demo` → Repository*
 
 * Repository URL: `https://github.com/spongi07/weathermachine`
-* Repository reference: `refs/heads/main`
+* Repository reference: `refs/heads/claude/great-wright-xvo6io` (the repository's default branch)
 * Compose path: `deploy/portainer/demo-stack.yml`
 
 Deploy, then open `http://<host>:8081/`. The demo drives the real engine,
@@ -43,7 +43,8 @@ shown. Optional variables: `WM_DEMO_SPEED` (default 60 = one day in 24 min),
 *Stacks → Add stack → name `weather-machine` → Repository*
 
 * Repository URL: `https://github.com/spongi07/weathermachine`
-* Repository reference: `refs/heads/main` (or a release tag)
+* Repository reference: `refs/heads/claude/great-wright-xvo6io` (the default branch), or a release tag.
+  If the code later moves to another branch such as `main`, change this reference.
 * Compose path: `docker-compose.yml`
 * **Environment variables** (see `stack.env.example` for all):
 
@@ -143,6 +144,7 @@ path prefix.
 | Symptom | Cause / fix |
 |---|---|
 | Stack fails: `required variable WM_DB_PASSWORD is missing` | Set the required variables in the stack's environment section. |
+| Stack fails to clone: reference not found | The repository reference must be an existing branch or tag: `refs/heads/claude/great-wright-xvo6io`. |
 | Image pull `denied` | Make the GHCR package public or add GHCR credentials under *Registries*. |
 | Container unhealthy, logs show `database not reachable yet` | PostgreSQL still initialising (first start) — it retries for 90 s; check the `postgres` service logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
