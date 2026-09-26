@@ -1,5 +1,6 @@
 [package]
 name = "wm-backtest"
+description = "Weather Machine replay/backtest engine, historical import, peak-survival research, walk-forward tooling."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +9,18 @@ publish.workspace = true
 
 [dependencies]
 wm-core.workspace = true
+wm-engine.workspace = true
+wm-execution.workspace = true
+wm-strategy.workspace = true
+wm-weather.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+csv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+wm-risk.workspace = true
 
 [lints]
 workspace = true

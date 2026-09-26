@@ -1,5 +1,6 @@
 [package]
 name = "wm-storage"
+description = "Weather Machine PostgreSQL persistence: ingest, event journal, markets, decisions, orders, leases."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +9,16 @@ publish.workspace = true
 
 [dependencies]
 wm-core.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+chrono-tz.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
