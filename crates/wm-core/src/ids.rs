@@ -42,15 +42,33 @@ macro_rules! string_id {
     };
 }
 
-string_id!(StationId, "Observation station identifier, e.g. ICAO `EHAM`.");
-string_id!(LocationId, "Weather Machine location slug, e.g. `amsterdam`.");
-string_id!(ProviderId, "External provider identifier, e.g. `awc`, `tgftp`, `polymarket_clob`.");
+string_id!(
+    StationId,
+    "Observation station identifier, e.g. ICAO `EHAM`."
+);
+string_id!(
+    LocationId,
+    "Weather Machine location slug, e.g. `amsterdam`."
+);
+string_id!(
+    ProviderId,
+    "External provider identifier, e.g. `awc`, `tgftp`, `polymarket_clob`."
+);
 string_id!(ConditionId, "Polymarket/CTF condition id (hex string).");
-string_id!(TokenId, "Polymarket CLOB token (ERC-1155 position) id (decimal string).");
+string_id!(
+    TokenId,
+    "Polymarket CLOB token (ERC-1155 position) id (decimal string)."
+);
 string_id!(QuestionId, "Polymarket question id (hex string).");
 string_id!(EventSlug, "Polymarket event slug.");
-string_id!(StrategyId, "Strategy identifier, e.g. `buy_yes_final_high`.");
-string_id!(ClientOrderId, "Deterministic client order id assigned by Weather Machine.");
+string_id!(
+    StrategyId,
+    "Strategy identifier, e.g. `buy_yes_final_high`."
+);
+string_id!(
+    ClientOrderId,
+    "Deterministic client order id assigned by Weather Machine."
+);
 
 impl StationId {
     /// Station ids are 3–8 upper-case ASCII alphanumerics (ICAO `EHAM`, WRH `FHMC1`).
@@ -60,7 +78,10 @@ impl StationId {
         if ok {
             Ok(Self(value))
         } else {
-            Err(IdError { kind: "station", value })
+            Err(IdError {
+                kind: "station",
+                value,
+            })
         }
     }
 }
@@ -70,11 +91,16 @@ impl LocationId {
     pub fn new(value: impl Into<String>) -> Result<Self, IdError> {
         let value: String = value.into();
         let ok = (2..=48).contains(&value.len())
-            && value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         if ok {
             Ok(Self(value))
         } else {
-            Err(IdError { kind: "location", value })
+            Err(IdError {
+                kind: "location",
+                value,
+            })
         }
     }
 }
@@ -84,13 +110,19 @@ macro_rules! simple_new {
         impl $name {
             /// Construct from a compile-time literal (validated in debug builds).
             pub fn from_static(value: &'static str) -> Self {
-                debug_assert!(!value.is_empty() && !value.chars().any(char::is_whitespace), "invalid static id");
+                debug_assert!(
+                    !value.is_empty() && !value.chars().any(char::is_whitespace),
+                    "invalid static id"
+                );
                 Self(value.to_owned())
             }
 
             /// Construct from a string built by trusted code (validated in debug builds).
             pub fn from_static_string(value: String) -> Self {
-                debug_assert!(!value.is_empty() && !value.chars().any(char::is_whitespace), "invalid id");
+                debug_assert!(
+                    !value.is_empty() && !value.chars().any(char::is_whitespace),
+                    "invalid id"
+                );
                 Self(value)
             }
 

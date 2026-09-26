@@ -1,0 +1,252 @@
+# Weather Machine — main configuration.
+#
+# Deployment-specific and secret values come from the environment, never from
+# this file: WM_DATABASE_URL, WM_CONTACT (NWS User-Agent contact), WM_ADMIN_TOKEN,
+# optional WM_MODE / WM_HTTP_BIND / WM_UI_DIR / WM_MODEL_PATH / WM_LOG_FORMAT.
+
+[app]
+mode = "paper"                    # paper | backtest | live (live is refused by this build)
+instance = "wm-1"
+http_bind = "0.0.0.0:8080"
+ui_dir = "ui/dist"                # built Rust/WASM dashboard (Docker: /app/ui)
+log_format = "pretty"             # pretty | json
+locations_dir = "configs/locations"
+auto_migrate = true
+journal = true                    # durable event journal (crash recovery / exact replay)
+record_orderbooks = true          # historical books are not available from the venue: record them
+heartbeat_secs = 60
+snapshot_interval_ms = 500        # dashboard push cadence (never affects trading)
+
+[identity]
+user_agent_template = "WeatherMachine/{version} ({contact})"
+
+[database]
+max_connections = 10
+
+# ---------------------------------------------------------------------------
+# Providers. Each has its OWN rate-limit policy; NOAA-class floors (30 s,
+# concurrency 1, Retry-After mandatory) are compiled in and cannot be lowered.
+# ---------------------------------------------------------------------------
+[providers.awc]
+enabled = true
+base_url = "https://aviationweather.gov"
+[providers.awc.policy]
+class = "noaa_nws"
+min_interval_secs = 30.0
+max_concurrency = 1
+timeout_secs = 20.0
+connect_timeout_secs = 10.0
+backoff_base_secs = 60.0
+backoff_max_secs = 1800.0
+throttle_backoff_base_secs = 300.0
+respect_retry_after = true
+max_retry_after_secs = 21600.0
+circuit_failure_threshold = 5
+circuit_open_base_secs = 600.0
+circuit_open_max_secs = 7200.0
+daily_budget = 2000
+politeness_factor = 2
+politeness_decay_secs = 86400.0
+max_body_bytes = 2097152
+
+[providers.tgftp]
+enabled = true
+base_url = "https://tgftp.nws.noaa.gov"
+[providers.tgftp.policy]
+class = "noaa_nws"
+min_interval_secs = 60.0
+max_concurrency = 1
+timeout_secs = 20.0
+connect_timeout_secs = 10.0
+backoff_base_secs = 120.0
+backoff_max_secs = 1800.0
+throttle_backoff_base_secs = 600.0
+respect_retry_after = true
+max_retry_after_secs = 21600.0
+circuit_failure_threshold = 5
+circuit_open_base_secs = 600.0
+circuit_open_max_secs = 7200.0
+daily_budget = 1000
+politeness_factor = 2
+politeness_decay_secs = 86400.0
+max_body_bytes = 65536
+
+[providers.nws_api]
+enabled = false                   # enable only after Phase 0 confirms EHAM coverage on api.weather.gov
+base_url = "https://api.weather.gov"
+[providers.nws_api.policy]
+class = "noaa_nws"
+min_interval_secs = 60.0
+max_concurrency = 1
+timeout_secs = 20.0
+connect_timeout_secs = 10.0
+backoff_base_secs = 120.0
+backoff_max_secs = 1800.0
+throttle_backoff_base_secs = 600.0
+respect_retry_after = true
+max_retry_after_secs = 21600.0
+circuit_failure_threshold = 5
+circuit_open_base_secs = 600.0
+circuit_open_max_secs = 7200.0
+daily_budget = 1000
+politeness_factor = 2
+politeness_decay_secs = 86400.0
+max_body_bytes = 2097152
+
+[providers.polymarket_gamma]
+enabled = true
+base_url = "https://gamma-api.polymarket.com"
+[providers.polymarket_gamma.policy]
+class = "exchange"
+min_interval_secs = 1.0
+max_concurrency = 1
+timeout_secs = 10.0
+connect_timeout_secs = 5.0
+backoff_base_secs = 5.0
+backoff_max_secs = 600.0
+throttle_backoff_base_secs = 60.0
+respect_retry_after = true
+max_retry_after_secs = 3600.0
+circuit_failure_threshold = 8
+circuit_open_base_secs = 120.0
+circuit_open_max_secs = 1800.0
+daily_budget = 20000
+politeness_factor = 2
+politeness_decay_secs = 3600.0
+max_body_bytes = 8388608
+
+[providers.polymarket_clob]
+enabled = true
+base_url = "https://clob.polymarket.com"
+[providers.polymarket_clob.policy]
+class = "exchange"
+min_interval_secs = 0.25
+max_concurrency = 2
+timeout_secs = 10.0
+connect_timeout_secs = 5.0
+backoff_base_secs = 2.0
+backoff_max_secs = 300.0
+throttle_backoff_base_secs = 30.0
+respect_retry_after = true
+max_retry_after_secs = 3600.0
+circuit_failure_threshold = 8
+circuit_open_base_secs = 60.0
+circuit_open_max_secs = 1800.0
+daily_budget = 200000
+politeness_factor = 2
+politeness_decay_secs = 3600.0
+max_body_bytes = 8388608
+
+[providers.polymarket_ws]
+enabled = true
+base_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+[providers.polymarket_ws.policy]
+class = "exchange"
+min_interval_secs = 5.0           # minimum spacing between (re)connect attempts
+max_concurrency = 1
+timeout_secs = 15.0
+connect_timeout_secs = 10.0
+backoff_base_secs = 5.0
+backoff_max_secs = 600.0
+throttle_backoff_base_secs = 60.0
+respect_retry_after = true
+max_retry_after_secs = 3600.0
+circuit_failure_threshold = 6
+circuit_open_base_secs = 60.0
+circuit_open_max_secs = 1800.0
+daily_budget = 2000
+politeness_factor = 2
+politeness_decay_secs = 3600.0
+max_body_bytes = 8388608
+
+# ---------------------------------------------------------------------------
+# Adaptive polling (engineering starting points — NOT optimized parameters).
+# Fast intervals apply only inside the arrival window after an expected report.
+# ---------------------------------------------------------------------------
+[polling]
+night_start_minute = 1320         # 22:00 local
+night_end_minute = 300            # 05:00 local
+stale_slowdown_after_secs = 7200
+stale_interval_secs = 1200
+[polling.low]
+window_interval_secs = 120
+background_interval_secs = 900
+max_polls_per_window = 3
+[polling.normal]
+window_interval_secs = 60
+background_interval_secs = 600
+max_polls_per_window = 6
+[polling.peak]
+window_interval_secs = 30
+background_interval_secs = 300
+max_polls_per_window = 10
+
+[health]
+stale_after_secs = 2700           # 30-min cadence + 15-min allowance
+degraded_latency_ms = 5000
+unavailable_after_failures = 3
+throttle_memory_secs = 1800
+
+# ---------------------------------------------------------------------------
+# Risk ($10 per position, $100 global worst-case exposure). FAIL CLOSED.
+# ---------------------------------------------------------------------------
+[risk]
+position_size_usd = "10.00"
+global_max_exposure_usd = "100.00"
+max_market_exposure_usd = "30.00"
+max_location_exposure_usd = "50.00"
+max_strategy_exposure_usd = "60.00"
+max_daily_new_exposure_usd = "60.00"
+max_daily_loss_usd = "30.00"
+max_spread = "0.05"
+max_price = "0.99"
+min_price = "0.01"
+max_weather_age_minutes = 40
+max_book_age_ms = 15000
+correction_cooldown_minutes = 10
+max_orders_per_minute = 6
+require_approved_resolution_spec = false   # set true before any live consideration
+
+# ---------------------------------------------------------------------------
+# Strategies (research parameters; see docs/blueprint/14-research-methodology.md)
+# ---------------------------------------------------------------------------
+[strategies.buy_yes]
+enabled = true
+min_price = "0.90"
+max_price = "0.99"
+min_confirmation_minutes = 60
+min_edge = 0.01
+min_model_support = 50
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.005"
+
+[strategies.buy_no]
+enabled = true
+distances = [1, 2, 3]
+min_price = "0.90"
+max_price = "0.99"
+min_confirmation_minutes = 60
+min_edge = 0.01
+min_model_support = 50
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.005"
+
+[strategies.split_unwind]
+enabled = false                   # research only; risk rejects outside backtests
+max_confirmation_minutes = 30
+min_combined_p = 0.90
+max_combined_price = "0.95"
+max_data_age_minutes = 40
+
+[strategies.unwind]
+enabled = true
+exit_below_probability = 0.5
+[strategies.unwind.style]
+style = "best_bid"
+
+[model]
+# Trained EmpiricalPeakModel JSON (weather-machine research peak-survival --model-out ...).
+# Without a model the engine uses the no-edge model: no weather-dependent trades.
+# path = "/data/models/eham-empirical.json"

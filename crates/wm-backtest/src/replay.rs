@@ -8,14 +8,16 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::Arc;
 use wm_core::event::{EventEnvelope, EventSource, TimerEvent, TimerKind, WeatherMachineEvent};
-use wm_core::ids::{ClientOrderId, EventSlug, StrategyId};
+use wm_core::ids::{ClientOrderId, EventSlug, StationId, StrategyId};
 use wm_core::market::Side;
+use wm_core::trading::DecisionRecord;
 use wm_core::units::{Rounding, Usd, notional};
-use wm_engine::{Engine, EngineConfig};
+use wm_engine::{Engine, EngineConfig, StationHint};
 use wm_execution::{SimConfig, SimulatedExchange};
+use wm_risk::ApprovedIntent;
 use wm_strategy::ProbabilityModel;
 
 /// How realistic the market data is (always reported with results).
@@ -104,7 +106,11 @@ impl PartialOrd for Queued {
 impl Ord for Queued {
     // Min-heap on (available_at, priority, insertion order).
     fn cmp(&self, o: &Self) -> Ordering {
-        (o.env.available_at, o.priority, o.order).cmp(&(self.env.available_at, self.priority, self.order))
+        (o.env.available_at, o.priority, o.order).cmp(&(
+            self.env.available_at,
+            self.priority,
+            self.order,
+        ))
     }
 }
 
@@ -114,7 +120,9 @@ fn priority(e: &WeatherMachineEvent) -> u8 {
         WeatherMachineEvent::MarketSnapshot(_) => 1,
         WeatherMachineEvent::OrderUpdate(_) => 2,
         WeatherMachineEvent::OrderBookUpdate(_) | WeatherMachineEvent::MarketTrade(_) => 3,
-        WeatherMachineEvent::WeatherObservation(_) | WeatherMachineEvent::WeatherCorrection(_) | WeatherMachineEvent::ForecastUpdate(_) => 4,
+        WeatherMachineEvent::WeatherObservation(_)
+        | WeatherMachineEvent::WeatherCorrection(_)
+        | WeatherMachineEvent::ForecastUpdate(_) => 4,
         WeatherMachineEvent::Timer(_) => 5,
     }
 }
@@ -128,13 +136,21 @@ struct ReplayQueue {
 
 impl ReplayQueue {
     fn new() -> Self {
-        Self { heap: BinaryHeap::new(), counter: 0, seq: 0 }
+        Self {
+            heap: BinaryHeap::new(),
+            counter: 0,
+            seq: 0,
+        }
     }
 
     fn push(&mut self, env: EventEnvelope) {
         self.counter += 1;
         let p = priority(&env.event);
-        self.heap.push(Queued { env, priority: p, order: self.counter });
+        self.heap.push(Queued {
+            env,
+            priority: p,
+            order: self.counter,
+        });
     }
 
     fn pop(&mut self) -> Option<EventEnvelope> {
@@ -160,28 +176,299 @@ pub fn bootstrap_mean_ci(xs: &[f64], iterations: usize, seed: u64) -> (f64, f64)
     }
     let mut rng = wm_core::rng::SplitMix64::new(seed);
     let mut means: Vec<f64> = (0..iterations)
-        .map(|_| (0..xs.len()).map(|_| xs[rng.next_below(xs.len() as u64) as usize]).sum::<f64>() / xs.len() as f64)
+        .map(|_| {
+            (0..xs.len())
+                .map(|_| xs[rng.next_below(xs.len() as u64) as usize])
+                .sum::<f64>()
+                / xs.len() as f64
+        })
         .collect();
     means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     (percentile(&means, 0.025), percentile(&means, 0.975))
 }
 
+/// A settled market.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Settlement {
+    pub event_slug: EventSlug,
+    pub local_date: NaiveDate,
+    pub final_value: i32,
+    pub pnl: Usd,
+    pub at: DateTime<Utc>,
+}
+
+/// Everything one [`SimulationSession::run_until`] call produced.
+#[derive(Debug, Default)]
+pub struct SessionOutput {
+    /// Engine inputs processed (only when event capture is on).
+    pub processed: Vec<EventEnvelope>,
+    /// Number of engine inputs processed (always counted).
+    pub events: u64,
+    pub decisions: Vec<DecisionRecord>,
+    pub approved: Vec<ApprovedIntent>,
+    pub alerts: Vec<String>,
+    pub hints: Vec<(StationId, StationHint)>,
+    pub trades: Vec<TradeRecord>,
+    pub settlements: Vec<Settlement>,
+}
+
+impl SessionOutput {
+    pub fn is_empty(&self) -> bool {
+        self.events == 0 && self.settlements.is_empty()
+    }
+}
+
+/// Engine + simulated venue + knowledge-time queue: the single loop shared by
+/// backtests, demo mode and paper trading. Live paper runs push events as they
+/// arrive and call [`run_until`](Self::run_until) with the wall clock; replays
+/// push everything up front and drain the queue.
+pub struct SimulationSession {
+    engine: Engine,
+    exchange: SimulatedExchange,
+    queue: ReplayQueue,
+    latency: Duration,
+    settle_grace: Duration,
+    strategy_of: BTreeMap<ClientOrderId, StrategyId>,
+    settlement_timers: BTreeSet<EventSlug>,
+    capture_events: bool,
+    last_time: Option<DateTime<Utc>>,
+}
+
+impl SimulationSession {
+    pub fn new(
+        engine: EngineConfig,
+        sim: SimConfig,
+        settle_grace: Duration,
+        model: Arc<dyn ProbabilityModel>,
+    ) -> Self {
+        let latency = Duration::milliseconds(sim.latency_ms.max(0));
+        Self {
+            engine: Engine::new(engine, model),
+            exchange: SimulatedExchange::new(sim),
+            queue: ReplayQueue::new(),
+            latency,
+            settle_grace,
+            strategy_of: BTreeMap::new(),
+            settlement_timers: BTreeSet::new(),
+            capture_events: false,
+            last_time: None,
+        }
+    }
+
+    /// Keep processed envelopes in [`SessionOutput::processed`] (event journal).
+    pub fn with_event_capture(mut self, on: bool) -> Self {
+        self.capture_events = on;
+        self
+    }
+
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    pub fn engine_mut(&mut self) -> &mut Engine {
+        &mut self.engine
+    }
+
+    pub fn into_engine(self) -> Engine {
+        self.engine
+    }
+
+    /// Queued (not yet processed) events.
+    pub fn pending(&self) -> usize {
+        self.queue.heap.len()
+    }
+
+    /// Knowledge time of the next queued event.
+    pub fn next_due(&self) -> Option<DateTime<Utc>> {
+        self.queue.heap.peek().map(|q| q.env.available_at)
+    }
+
+    /// Knowledge time of the last processed event.
+    pub fn last_time(&self) -> Option<DateTime<Utc>> {
+        self.last_time
+    }
+
+    /// Enqueue an input. A market snapshot also schedules one settlement check
+    /// after its local day (+ grace), so every market settles without relying
+    /// on later traffic.
+    pub fn push(&mut self, env: EventEnvelope) {
+        if let WeatherMachineEvent::MarketSnapshot(m) = &env.event
+            && self.settlement_timers.insert(m.market.event_slug.clone())
+        {
+            let (_, end) = wm_core::time::local_day_bounds(m.market.local_date, m.market.timezone);
+            let at = end + self.settle_grace + Duration::seconds(1);
+            self.queue.push(EventEnvelope::new(
+                at,
+                env.source,
+                WeatherMachineEvent::Timer(TimerEvent {
+                    due_at: at,
+                    kind: TimerKind::Heartbeat,
+                }),
+            ));
+        }
+        self.queue.push(env);
+    }
+
+    /// Process every queued event with `available_at ≤ until`.
+    pub fn run_until(&mut self, until: DateTime<Utc>) -> SessionOutput {
+        let mut out = SessionOutput::default();
+        while self.next_due().is_some_and(|t| t <= until) {
+            let Some(env) = self.queue.pop() else { break };
+            self.step(env, &mut out);
+        }
+        out
+    }
+
+    /// Drain the queue completely (replays).
+    pub fn run_all(&mut self) -> SessionOutput {
+        let mut out = SessionOutput::default();
+        while let Some(env) = self.queue.pop() {
+            self.step(env, &mut out);
+        }
+        out
+    }
+
+    fn step(&mut self, env: EventEnvelope, out: &mut SessionOutput) {
+        if let Some(t) = self.last_time {
+            debug_assert!(env.available_at >= t, "replay clock went backwards");
+        }
+        self.last_time = Some(env.available_at);
+        let now = env.available_at;
+        let source = env.source;
+        out.events += 1;
+
+        // The exchange sees market data first (knowledge-consistent).
+        match &env.event {
+            WeatherMachineEvent::OrderBookUpdate(b) => {
+                for u in self.exchange.on_book(&b.book, now) {
+                    self.queue.push(EventEnvelope::new(
+                        now,
+                        source,
+                        WeatherMachineEvent::OrderUpdate(u),
+                    ));
+                }
+            }
+            WeatherMachineEvent::MarketTrade(t) => {
+                for u in self.exchange.on_trade(&t.trade, now) {
+                    self.queue.push(EventEnvelope::new(
+                        now,
+                        source,
+                        WeatherMachineEvent::OrderUpdate(u),
+                    ));
+                }
+            }
+            WeatherMachineEvent::OrderUpdate(u) => {
+                if let Some(f) = &u.fill {
+                    let strategy = self
+                        .strategy_of
+                        .get(&f.client_order_id)
+                        .cloned()
+                        .unwrap_or_else(|| StrategyId::from_static("unknown"));
+                    let order = self.engine.orders().get(&f.client_order_id);
+                    let slug = order.map(|o| o.event_slug.clone());
+                    let label = order.map(|o| o.bucket.label()).unwrap_or_default();
+                    let rounding = if f.side == Side::Buy {
+                        Rounding::Up
+                    } else {
+                        Rounding::Down
+                    };
+                    out.trades.push(TradeRecord {
+                        client_order_id: f.client_order_id.clone(),
+                        strategy,
+                        event_slug: slug.unwrap_or_else(|| EventSlug::from_static("unknown")),
+                        bucket_label: label,
+                        side: if f.side == Side::Buy {
+                            "BUY".into()
+                        } else {
+                            "SELL".into()
+                        },
+                        price: f.price.to_string(),
+                        shares: f.shares.to_string(),
+                        fee: f.fee,
+                        cost_or_proceeds: notional(f.price, f.shares, rounding),
+                        at: f.ts,
+                    });
+                }
+            }
+            _ => {}
+        }
+        for u in self.exchange.process_due(now) {
+            self.queue.push(EventEnvelope::new(
+                now,
+                source,
+                WeatherMachineEvent::OrderUpdate(u),
+            ));
+        }
+
+        let result = self.engine.handle(&env);
+        if self.capture_events {
+            out.processed.push(env);
+        }
+        for a in &result.approved {
+            self.strategy_of
+                .insert(a.client_order_id().clone(), a.intent().strategy.clone());
+            let fees = self
+                .engine
+                .markets()
+                .get(&a.intent().event_slug)
+                .map(|m| m.fees)
+                .unwrap_or(wm_core::market::FeeSchedule::ZERO);
+            for u in self.exchange.submit(a, fees, now) {
+                self.queue.push(EventEnvelope::new(
+                    now,
+                    source,
+                    WeatherMachineEvent::OrderUpdate(u),
+                ));
+            }
+            // Latency-delayed orders are matched even without new book events.
+            let due = now + self.latency;
+            self.queue.push(EventEnvelope::new(
+                due,
+                source,
+                WeatherMachineEvent::Timer(TimerEvent {
+                    due_at: due,
+                    kind: TimerKind::Heartbeat,
+                }),
+            ));
+        }
+        out.decisions.extend(result.decisions);
+        out.approved.extend(result.approved);
+        out.alerts.extend(result.alerts);
+        out.hints.extend(result.hints);
+
+        // Settle finished days using the observed resolution value.
+        for slug in self.engine.settleable_markets(self.settle_grace) {
+            let Some(final_value) = self.engine.final_value(&slug) else {
+                continue;
+            };
+            let Some(date) = self.engine.markets().get(&slug).map(|m| m.local_date) else {
+                continue;
+            };
+            let pnl = self.engine.settle(&slug, final_value);
+            out.settlements.push(Settlement {
+                event_slug: slug,
+                local_date: date,
+                final_value,
+                pnl,
+                at: now,
+            });
+        }
+    }
+}
+
 /// Run a backtest over pre-built input events.
-pub fn run_backtest(inputs: Vec<EventEnvelope>, cfg: &BacktestConfig, model: Arc<dyn ProbabilityModel>) -> (BacktestReport, Engine) {
-    let mut engine = Engine::new(cfg.engine.clone(), model);
-    let mut exchange = SimulatedExchange::new(cfg.sim.clone());
-    let mut q = ReplayQueue::new();
+pub fn run_backtest(
+    inputs: Vec<EventEnvelope>,
+    cfg: &BacktestConfig,
+    model: Arc<dyn ProbabilityModel>,
+) -> (BacktestReport, Engine) {
+    let mut session =
+        SimulationSession::new(cfg.engine.clone(), cfg.sim.clone(), cfg.settle_grace, model);
     let first = inputs.iter().map(|e| e.available_at).min();
     let last = inputs.iter().map(|e| e.available_at).max();
     for mut e in inputs {
         e.source = EventSource::Replay;
-        // Guarantee a settlement check after every market's day (+ grace).
-        if let WeatherMachineEvent::MarketSnapshot(m) = &e.event {
-            let (_, end) = wm_core::time::local_day_bounds(m.market.local_date, m.market.timezone);
-            let at = end + cfg.settle_grace + Duration::seconds(1);
-            q.push(EventEnvelope::new(at, EventSource::Replay, WeatherMachineEvent::Timer(TimerEvent { due_at: at, kind: TimerKind::Heartbeat })));
-        }
-        q.push(e);
+        session.push(e);
     }
     // Heartbeat timers across the whole span.
     if let (Some(a), Some(b)) = (first, last)
@@ -189,7 +476,14 @@ pub fn run_backtest(inputs: Vec<EventEnvelope>, cfg: &BacktestConfig, model: Arc
     {
         let mut t = a;
         while t <= b + cfg.settle_grace {
-            q.push(EventEnvelope::new(t, EventSource::Replay, WeatherMachineEvent::Timer(TimerEvent { due_at: t, kind: TimerKind::Heartbeat })));
+            session.push(EventEnvelope::new(
+                t,
+                EventSource::Replay,
+                WeatherMachineEvent::Timer(TimerEvent {
+                    due_at: t,
+                    kind: TimerKind::Heartbeat,
+                }),
+            ));
             t += cfg.heartbeat;
         }
     }
@@ -212,84 +506,27 @@ pub fn run_backtest(inputs: Vec<EventEnvelope>, cfg: &BacktestConfig, model: Arc
         alerts: Vec::new(),
         decision_log: Vec::new(),
     };
-    let mut last_time: Option<DateTime<Utc>> = None;
     let mut daily: BTreeMap<NaiveDate, Usd> = BTreeMap::new();
-    let mut strategy_of: BTreeMap<ClientOrderId, StrategyId> = BTreeMap::new();
-
-    while let Some(env) = q.pop() {
-        if let Some(t) = last_time {
-            debug_assert!(env.available_at >= t, "replay clock went backwards");
-        }
-        last_time = Some(env.available_at);
-        let now = env.available_at;
-        report.events += 1;
-
-        // The exchange sees market data first (knowledge-consistent).
-        match &env.event {
-            WeatherMachineEvent::OrderBookUpdate(b) => {
-                for u in exchange.on_book(&b.book, now) {
-                    q.push(EventEnvelope::new(now, EventSource::Replay, WeatherMachineEvent::OrderUpdate(u)));
-                }
-            }
-            WeatherMachineEvent::MarketTrade(t) => {
-                for u in exchange.on_trade(&t.trade, now) {
-                    q.push(EventEnvelope::new(now, EventSource::Replay, WeatherMachineEvent::OrderUpdate(u)));
-                }
-            }
-            WeatherMachineEvent::OrderUpdate(u) => {
-                if let Some(f) = &u.fill {
-                    report.fills += 1;
-                    let strategy = strategy_of.get(&f.client_order_id).cloned().unwrap_or_else(|| StrategyId::from_static("unknown"));
-                    let slug = engine.orders().get(&f.client_order_id).map(|o| o.event_slug.clone());
-                    let label = engine.orders().get(&f.client_order_id).map(|o| o.bucket.label()).unwrap_or_default();
-                    let rounding = if f.side == Side::Buy { Rounding::Up } else { Rounding::Down };
-                    report.trades.push(TradeRecord {
-                        client_order_id: f.client_order_id.clone(),
-                        strategy,
-                        event_slug: slug.unwrap_or_else(|| EventSlug::from_static("unknown")),
-                        bucket_label: label,
-                        side: if f.side == Side::Buy { "BUY".into() } else { "SELL".into() },
-                        price: f.price.to_string(),
-                        shares: f.shares.to_string(),
-                        fee: f.fee,
-                        cost_or_proceeds: notional(f.price, f.shares, rounding),
-                        at: f.ts,
-                    });
-                }
-            }
-            _ => {}
-        }
-        for u in exchange.process_due(now) {
-            q.push(EventEnvelope::new(now, EventSource::Replay, WeatherMachineEvent::OrderUpdate(u)));
-        }
-
-        let out = engine.handle(&env);
+    // Drain day by day so memory stays bounded on long replays.
+    while let Some(next) = session.next_due() {
+        let out = session.run_until(next + Duration::days(1));
+        report.events += out.events;
         report.decisions += out.decisions.len() as u64;
-        report.decision_log.extend(out.decisions.iter().filter(|d| d.strategy.as_str() != "evaluation").cloned());
+        report.decision_log.extend(
+            out.decisions
+                .into_iter()
+                .filter(|d| d.strategy.as_str() != "evaluation"),
+        );
+        report.approvals += out.approved.len() as u64;
+        report.fills += out.trades.len() as u64;
+        report.trades.extend(out.trades);
         report.alerts.extend(out.alerts);
-        for a in out.approved {
-            report.approvals += 1;
-            strategy_of.insert(a.client_order_id().clone(), a.intent().strategy.clone());
-            let fees = engine.markets().get(&a.intent().event_slug).map(|m| m.fees).unwrap_or(wm_core::market::FeeSchedule::ZERO);
-            for u in exchange.submit(&a, fees, now) {
-                q.push(EventEnvelope::new(now, EventSource::Replay, WeatherMachineEvent::OrderUpdate(u)));
-            }
-            // Make sure latency-delayed orders are processed even without new book events.
-            let due = now + Duration::milliseconds(cfg.sim.latency_ms.max(0));
-            q.push(EventEnvelope::new(due, EventSource::Replay, WeatherMachineEvent::Timer(TimerEvent { due_at: due, kind: TimerKind::Heartbeat })));
-        }
-
-        // Settle finished days using the observed resolution value.
-        for slug in engine.settleable_markets(cfg.settle_grace) {
-            let Some(final_value) = engine.final_value(&slug) else { continue };
-            let date = engine.markets().get(&slug).map(|m| m.local_date);
-            let pnl = engine.settle(&slug, final_value);
+        for s in out.settlements {
             report.settled_markets += 1;
-            if let Some(d) = date {
-                *daily.entry(d).or_insert(Usd::ZERO) += pnl;
-            }
+            *daily.entry(s.local_date).or_insert(Usd::ZERO) += s.pnl;
         }
     }
+    let engine = session.into_engine();
 
     report.realized_pnl = engine.realized_pnl_total();
     // Attribute PnL per strategy from the trade ledger (cost/proceeds) plus settlement payouts.
@@ -297,7 +534,12 @@ pub fn run_backtest(inputs: Vec<EventEnvelope>, cfg: &BacktestConfig, model: Arc
         let strategy = report
             .trades
             .iter()
-            .find(|t| engine.orders().get(&t.client_order_id).is_some_and(|o| o.token == p.instrument.token))
+            .find(|t| {
+                engine
+                    .orders()
+                    .get(&t.client_order_id)
+                    .is_some_and(|o| o.token == p.instrument.token)
+            })
             .map(|t| t.strategy.to_string())
             .unwrap_or_else(|| "unknown".into());
         *report.pnl_by_strategy.entry(strategy).or_insert(Usd::ZERO) += p.realized_pnl;
@@ -326,11 +568,34 @@ mod tests {
 
     #[test]
     fn queue_orders_by_knowledge_time_then_priority() {
-        let t = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z").unwrap().with_timezone(&Utc);
+        let t = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let mut q = ReplayQueue::new();
-        q.push(EventEnvelope::new(t + Duration::seconds(5), EventSource::Replay, WeatherMachineEvent::Timer(TimerEvent { due_at: t, kind: TimerKind::Heartbeat })));
-        q.push(EventEnvelope::new(t, EventSource::Replay, WeatherMachineEvent::Timer(TimerEvent { due_at: t, kind: TimerKind::Heartbeat })));
-        q.push(EventEnvelope::new(t, EventSource::Replay, WeatherMachineEvent::Operator(wm_core::event::OperatorCommand::KillSwitch { engaged: false, reason: String::new() })));
+        q.push(EventEnvelope::new(
+            t + Duration::seconds(5),
+            EventSource::Replay,
+            WeatherMachineEvent::Timer(TimerEvent {
+                due_at: t,
+                kind: TimerKind::Heartbeat,
+            }),
+        ));
+        q.push(EventEnvelope::new(
+            t,
+            EventSource::Replay,
+            WeatherMachineEvent::Timer(TimerEvent {
+                due_at: t,
+                kind: TimerKind::Heartbeat,
+            }),
+        ));
+        q.push(EventEnvelope::new(
+            t,
+            EventSource::Replay,
+            WeatherMachineEvent::Operator(wm_core::event::OperatorCommand::KillSwitch {
+                engaged: false,
+                reason: String::new(),
+            }),
+        ));
         let a = q.pop().unwrap();
         let b = q.pop().unwrap();
         let c = q.pop().unwrap();

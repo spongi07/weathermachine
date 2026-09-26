@@ -16,7 +16,10 @@ pub struct TokioClock {
 
 impl TokioClock {
     pub fn new(origin_utc: DateTime<Utc>) -> Self {
-        Self { origin_mono: tokio::time::Instant::now(), origin_utc }
+        Self {
+            origin_mono: tokio::time::Instant::now(),
+            origin_utc,
+        }
     }
 }
 

@@ -36,14 +36,21 @@ impl Default for ObservationLedger {
 
 impl ObservationLedger {
     pub fn new(retention: Duration) -> Self {
-        Self { versions: BTreeMap::new(), newest: HashMap::new(), retention }
+        Self {
+            versions: BTreeMap::new(),
+            newest: HashMap::new(),
+            retention,
+        }
     }
 
     /// Seed from persisted observations after a restart, so duplicates are
     /// recognized and versions continue correctly.
     pub fn warm_start(&mut self, observations: impl IntoIterator<Item = Observation>) {
         for obs in observations {
-            let newest = self.newest.entry(obs.key.station.clone()).or_insert(obs.key.observed_at);
+            let newest = self
+                .newest
+                .entry(obs.key.station.clone())
+                .or_insert(obs.key.observed_at);
             if obs.key.observed_at > *newest {
                 *newest = obs.key.observed_at;
             }
@@ -90,20 +97,34 @@ impl ObservationLedger {
                 }
                 candidate.version = 1;
                 self.versions.insert(key, vec![candidate.clone()]);
-                Classified { class, observation: candidate, previous: None }
+                Classified {
+                    class,
+                    observation: candidate,
+                    previous: None,
+                }
             }
             Some(versions) => {
                 // Invariant: a key is only ever inserted with a non-empty version list.
                 let Some(latest) = versions.last().cloned() else {
                     candidate.version = 1;
                     versions.push(candidate.clone());
-                    return Classified { class: DedupClass::New, observation: candidate, previous: None };
+                    return Classified {
+                        class: DedupClass::New,
+                        observation: candidate,
+                        previous: None,
+                    };
                 };
-                let seen_before = versions.iter().any(|v| v.content_hash == candidate.content_hash);
+                let seen_before = versions
+                    .iter()
+                    .any(|v| v.content_hash == candidate.content_hash);
                 if seen_before {
                     // Identical content (possibly relayed by a different provider,
                     // or an upstream flip-flop back to an earlier version).
-                    return Classified { class: DedupClass::Duplicate, observation: latest, previous: None };
+                    return Classified {
+                        class: DedupClass::Duplicate,
+                        observation: latest,
+                        previous: None,
+                    };
                 }
                 candidate.version = latest.version + 1;
                 let class = if candidate.quality.correction_marker {
@@ -112,7 +133,11 @@ impl ObservationLedger {
                     DedupClass::Revision
                 };
                 versions.push(candidate.clone());
-                Classified { class, observation: candidate, previous: Some(latest) }
+                Classified {
+                    class,
+                    observation: candidate,
+                    previous: Some(latest),
+                }
             }
         }
     }
@@ -138,7 +163,11 @@ mod tests {
 
     fn obs(time: &str, temp: i32, raw: &str, cor: bool) -> Observation {
         Observation {
-            key: ObservationKey { station: StationId::new("EHAM").unwrap(), observed_at: utc(time), report_type: ReportType::Metar },
+            key: ObservationKey {
+                station: StationId::new("EHAM").unwrap(),
+                observed_at: utc(time),
+                report_type: ReportType::Metar,
+            },
             version: 1,
             temperature: Some(TempC::from_whole(temp)),
             dewpoint: None,
@@ -149,7 +178,10 @@ mod tests {
             provider_receipt_at: None,
             fetched_at: utc(time) + Duration::minutes(3),
             parser_version: 1,
-            quality: QualityFlags { correction_marker: cor, ..QualityFlags::default() },
+            quality: QualityFlags {
+                correction_marker: cor,
+                ..QualityFlags::default()
+            },
         }
     }
 
@@ -168,7 +200,10 @@ mod tests {
         let cor = l.classify(obs("2026-09-26T12:55:00Z", 17, "B COR 17/12", true));
         assert_eq!(cor.class, DedupClass::Correction);
         assert_eq!(cor.observation.version, 2);
-        assert_eq!(cor.previous.as_ref().unwrap().temperature, Some(TempC::from_whole(18)));
+        assert_eq!(
+            cor.previous.as_ref().unwrap().temperature,
+            Some(TempC::from_whole(18))
+        );
         // Unlabelled change: revision, version 3.
         let rev = l.classify(obs("2026-09-26T12:55:00Z", 16, "B 16/12", false));
         assert_eq!(rev.class, DedupClass::Revision);
@@ -179,7 +214,10 @@ mod tests {
         // Late arrival of an older report.
         let late = l.classify(obs("2026-09-26T11:55:00Z", 16, "C 16/12", false));
         assert_eq!(late.class, DedupClass::OutOfOrder);
-        assert_eq!(l.newest_observation_time(&StationId::new("EHAM").unwrap()), Some(utc("2026-09-26T12:55:00Z")));
+        assert_eq!(
+            l.newest_observation_time(&StationId::new("EHAM").unwrap()),
+            Some(utc("2026-09-26T12:55:00Z"))
+        );
         let latest = l.latest_for_station(&StationId::new("EHAM").unwrap());
         assert_eq!(latest.len(), 3);
         assert_eq!(latest[2].version, 3);
@@ -189,7 +227,11 @@ mod tests {
     fn warm_start_and_prune() {
         let mut l = ObservationLedger::new(Duration::hours(24));
         l.warm_start(vec![obs("2026-09-25T12:55:00Z", 18, "X", false)]);
-        assert_eq!(l.classify(obs("2026-09-25T12:55:00Z", 18, "X", false)).class, DedupClass::Duplicate);
+        assert_eq!(
+            l.classify(obs("2026-09-25T12:55:00Z", 18, "X", false))
+                .class,
+            DedupClass::Duplicate
+        );
         l.prune(utc("2026-09-26T13:00:00Z"));
         assert!(l.is_empty());
     }

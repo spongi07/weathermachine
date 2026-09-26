@@ -26,7 +26,11 @@ pub struct ResponseCache {
 
 impl ResponseCache {
     pub fn get(&self, url: &str) -> Option<CachedResponse> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(url).cloned()
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(url)
+            .cloned()
     }
 
     pub fn put(&self, url: &str, value: CachedResponse) {
@@ -37,7 +41,10 @@ impl ResponseCache {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -55,17 +62,27 @@ pub struct TtlCache<K, V> {
 
 impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
     pub fn new(ttl: Duration) -> Self {
-        Self { ttl, inner: Mutex::new(HashMap::new()) }
+        Self {
+            ttl,
+            inner: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Value if present and younger than the TTL at monotonic time `now`.
     pub fn get(&self, key: &K, now: Duration) -> Option<V> {
-        let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.get(key).and_then(|(v, at)| (now.saturating_sub(*at) < self.ttl).then(|| v.clone()))
+        let map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.get(key)
+            .and_then(|(v, at)| (now.saturating_sub(*at) < self.ttl).then(|| v.clone()))
     }
 
     pub fn insert(&self, key: K, value: V, now: Duration) {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, (value, now));
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, (value, now));
     }
 
     /// Drop expired entries.

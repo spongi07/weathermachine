@@ -5,15 +5,21 @@
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sqlx::Row;
-use wm_core::event::{EventEnvelope, EventSource, ObservationEvent, ProviderHealthEvent, WeatherMachineEvent};
+use wm_core::event::{
+    EventEnvelope, EventSource, ObservationEvent, ProviderHealthEvent, WeatherMachineEvent,
+};
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
-use wm_core::ids::{ClientOrderId, DecisionId, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId};
+use wm_core::ids::{
+    ClientOrderId, DecisionId, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId,
+};
 use wm_core::ingest::{CacheOutcome, IngestBatch, ProviderRequestRecord, RawPayloadRecord};
 use wm_core::market::Side;
 use wm_core::synthetic::synthetic_temperature_market;
 use wm_core::trading::{DecisionRecord, Fill, Liquidity, RunMode};
 use wm_core::units::{Price, Shares, TempC, Usd};
-use wm_core::weather::{DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision};
+use wm_core::weather::{
+    DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision,
+};
 use wm_storage::PgStore;
 
 struct TestDb {
@@ -26,7 +32,12 @@ impl TestDb {
     async fn drop_db(self) {
         self.store.pool().close().await;
         if let Ok(admin) = PgStore::connect(&self.admin_url, 2).await {
-            let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)", self.name))).execute(admin.pool()).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+                self.name
+            )))
+            .execute(admin.pool())
+            .await;
         }
     }
 }
@@ -38,17 +49,27 @@ async fn fresh() -> Option<TestDb> {
     };
     let admin = PgStore::connect(&url, 2).await.expect("connect admin");
     let name = format!("wm_it_{}", uuid_like());
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\""))).execute(admin.pool()).await.expect("create db");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+        .execute(admin.pool())
+        .await
+        .expect("create db");
     admin.pool().close().await;
     let (base, _) = url.rsplit_once('/').expect("url has database path");
     let db_url = format!("{base}/{name}");
     let store = PgStore::connect(&db_url, 5).await.expect("connect test db");
     store.migrate().await.expect("migrate");
-    Some(TestDb { store, admin_url: url, name })
+    Some(TestDb {
+        store,
+        admin_url: url,
+        name,
+    })
 }
 
 fn uuid_like() -> String {
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     format!("{:x}{:x}", n, std::process::id())
 }
 
@@ -62,7 +83,11 @@ fn eham() -> StationId {
 
 fn obs(t: &str, whole: i32, version: u32, raw: &str) -> Observation {
     Observation {
-        key: ObservationKey { station: eham(), observed_at: utc(t), report_type: ReportType::Metar },
+        key: ObservationKey {
+            station: eham(),
+            observed_at: utc(t),
+            report_type: ReportType::Metar,
+        },
         version,
         temperature: Some(TempC::from_whole(whole)),
         dewpoint: Some(TempC::from_whole(12)),
@@ -73,7 +98,10 @@ fn obs(t: &str, whole: i32, version: u32, raw: &str) -> Observation {
         provider_receipt_at: Some(utc(t) + Duration::minutes(2)),
         fetched_at: utc(t) + Duration::minutes(3),
         parser_version: 1,
-        quality: QualityFlags { auto: true, ..QualityFlags::default() },
+        quality: QualityFlags {
+            auto: true,
+            ..QualityFlags::default()
+        },
     }
 }
 
@@ -120,29 +148,73 @@ async fn migrations_ingest_dedup_and_corrections() {
     let body = br#"[{"rawOb":"EHAM 261255Z 18/12"}]"#;
     let o1 = obs("2026-09-26T12:25:00Z", 17, 1, "EHAM 261225Z 17/12");
     let o2 = obs("2026-09-26T12:55:00Z", 18, 1, "EHAM 261255Z 18/12");
-    s.persist_ingest(&batch("2026-09-26T12:58:00Z", body, vec![(o1.clone(), DedupClass::New), (o2.clone(), DedupClass::New)])).await.unwrap();
+    s.persist_ingest(&batch(
+        "2026-09-26T12:58:00Z",
+        body,
+        vec![(o1.clone(), DedupClass::New), (o2.clone(), DedupClass::New)],
+    ))
+    .await
+    .unwrap();
     // Same payload again (next poll): stored once, sighting counted.
-    s.persist_ingest(&batch("2026-09-26T12:59:00Z", body, vec![])).await.unwrap();
-    let row = sqlx::query("SELECT seen_count, first_fetched_at, last_fetched_at FROM raw_weather_payloads").fetch_one(s.pool()).await.unwrap();
+    s.persist_ingest(&batch("2026-09-26T12:59:00Z", body, vec![]))
+        .await
+        .unwrap();
+    let row = sqlx::query(
+        "SELECT seen_count, first_fetched_at, last_fetched_at FROM raw_weather_payloads",
+    )
+    .fetch_one(s.pool())
+    .await
+    .unwrap();
     assert_eq!(row.try_get::<i64, _>("seen_count").unwrap(), 2);
-    assert!(row.try_get::<DateTime<Utc>, _>("last_fetched_at").unwrap() > row.try_get::<DateTime<Utc>, _>("first_fetched_at").unwrap());
-    let n: i64 = sqlx::query("SELECT count(*) FROM provider_requests").fetch_one(s.pool()).await.unwrap().try_get(0).unwrap();
+    assert!(
+        row.try_get::<DateTime<Utc>, _>("last_fetched_at").unwrap()
+            > row.try_get::<DateTime<Utc>, _>("first_fetched_at").unwrap()
+    );
+    let n: i64 = sqlx::query("SELECT count(*) FROM provider_requests")
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
     assert_eq!(n, 2);
     // Correction: version 2 stored alongside version 1; the current view shows v2.
     let mut c = obs("2026-09-26T12:55:00Z", 17, 2, "EHAM 261255Z COR 17/12");
     c.quality.correction_marker = true;
-    let mut b = batch("2026-09-26T13:01:00Z", b"[2]", vec![(c.clone(), DedupClass::Correction)]);
-    b.corrections.push(wm_core::event::CorrectionEvent { previous: o2.clone(), current: c.clone(), labeled: true });
+    let mut b = batch(
+        "2026-09-26T13:01:00Z",
+        b"[2]",
+        vec![(c.clone(), DedupClass::Correction)],
+    );
+    b.corrections.push(wm_core::event::CorrectionEvent {
+        previous: o2.clone(),
+        current: c.clone(),
+        labeled: true,
+    });
     s.persist_ingest(&b).await.unwrap();
-    let versions: i64 = sqlx::query("SELECT count(*) FROM weather_observations WHERE observed_at = $1").bind(utc("2026-09-26T12:55:00Z")).fetch_one(s.pool()).await.unwrap().try_get(0).unwrap();
+    let versions: i64 =
+        sqlx::query("SELECT count(*) FROM weather_observations WHERE observed_at = $1")
+            .bind(utc("2026-09-26T12:55:00Z"))
+            .fetch_one(s.pool())
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
     assert_eq!(versions, 2, "raw history is never overwritten");
-    let current = s.observations_since(&eham(), utc("2026-09-26T00:00:00Z")).await.unwrap();
+    let current = s
+        .observations_since(&eham(), utc("2026-09-26T00:00:00Z"))
+        .await
+        .unwrap();
     assert_eq!(current.len(), 2);
     assert_eq!(current[1].version, 2);
     assert_eq!(current[1].temperature, Some(TempC::from_whole(17)));
     assert!(current[1].quality.correction_marker);
     assert_eq!(current[0], o1, "round-trip preserves every field");
-    let corr: i64 = sqlx::query("SELECT count(*) FROM weather_corrections").fetch_one(s.pool()).await.unwrap().try_get(0).unwrap();
+    let corr: i64 = sqlx::query("SELECT count(*) FROM weather_corrections")
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
     assert_eq!(corr, 1);
     let stats = s.request_stats(utc("2026-09-26T00:00:00Z")).await.unwrap();
     assert_eq!(stats[0].requests, 3);
@@ -154,16 +226,42 @@ async fn journal_roundtrip_is_exact() {
     let Some(db) = fresh().await else { return };
     let s = &db.store;
     let run = RunId::deterministic(9);
-    s.record_run(&run, RunMode::Paper, "test-model", &serde_json::json!({"k": 1}), utc("2026-09-26T00:00:00Z")).await.unwrap();
+    s.record_run(
+        &run,
+        RunMode::Paper,
+        "test-model",
+        &serde_json::json!({"k": 1}),
+        utc("2026-09-26T00:00:00Z"),
+    )
+    .await
+    .unwrap();
     let mut events = Vec::new();
-    for (i, t) in ["2026-09-26T12:25:00Z", "2026-09-26T12:55:00Z"].iter().enumerate() {
-        let mut e = EventEnvelope::new(utc(t), EventSource::Live, WeatherMachineEvent::WeatherObservation(ObservationEvent { observation: obs(t, 17 + i as i32, 1, t), class: DedupClass::New }));
+    for (i, t) in ["2026-09-26T12:25:00Z", "2026-09-26T12:55:00Z"]
+        .iter()
+        .enumerate()
+    {
+        let mut e = EventEnvelope::new(
+            utc(t),
+            EventSource::Live,
+            WeatherMachineEvent::WeatherObservation(ObservationEvent {
+                observation: obs(t, 17 + i as i32, 1, t),
+                class: DedupClass::New,
+            }),
+        );
         e.seq = i as u64 + 1;
         events.push(e);
     }
-    let mut h = ProviderHealthSnapshot::new(ProviderId::awc(), Some(eham()), utc("2026-09-26T12:58:00Z"));
+    let mut h =
+        ProviderHealthSnapshot::new(ProviderId::awc(), Some(eham()), utc("2026-09-26T12:58:00Z"));
     h.state = ProviderHealthState::Healthy;
-    let mut e = EventEnvelope::new(utc("2026-09-26T12:58:00Z"), EventSource::Live, WeatherMachineEvent::ProviderHealthChanged(ProviderHealthEvent { previous_state: None, snapshot: h }));
+    let mut e = EventEnvelope::new(
+        utc("2026-09-26T12:58:00Z"),
+        EventSource::Live,
+        WeatherMachineEvent::ProviderHealthChanged(ProviderHealthEvent {
+            previous_state: None,
+            snapshot: h,
+        }),
+    );
     e.seq = 3;
     events.push(e);
     s.append_events(&run, &events).await.unwrap();
@@ -178,14 +276,39 @@ async fn journal_roundtrip_is_exact() {
 async fn markets_rules_decisions_orders_fills() {
     let Some(db) = fresh().await else { return };
     let s = &db.store;
-    let m = synthetic_temperature_market(&LocationId::new("amsterdam").unwrap(), &eham(), NaiveDate::from_ymd_opt(2026, 9, 26).unwrap(), chrono_tz::Europe::Amsterdam, 13, 24, utc("2026-09-26T06:00:00Z"));
+    let m = synthetic_temperature_market(
+        &LocationId::new("amsterdam").unwrap(),
+        &eham(),
+        NaiveDate::from_ymd_opt(2026, 9, 26).unwrap(),
+        chrono_tz::Europe::Amsterdam,
+        13,
+        24,
+        utc("2026-09-26T06:00:00Z"),
+    );
     s.upsert_market(&m, Some(b"{\"raw\":true}")).await.unwrap();
     s.upsert_market(&m, Some(b"{\"raw\":true}")).await.unwrap();
-    let outcomes: i64 = sqlx::query("SELECT count(*) FROM market_outcomes").fetch_one(s.pool()).await.unwrap().try_get(0).unwrap();
+    let outcomes: i64 = sqlx::query("SELECT count(*) FROM market_outcomes")
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
     assert_eq!(outcomes, m.outcomes.len() as i64);
-    assert_eq!(s.rules_review_status(&m.rules.sha256).await.unwrap().as_deref(), Some("auto_parsed"));
+    assert_eq!(
+        s.rules_review_status(&m.rules.sha256)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("auto_parsed")
+    );
     assert!(s.approve_rules(&m.rules.sha256, "operator").await.unwrap());
-    assert_eq!(s.rules_review_status(&m.rules.sha256).await.unwrap().as_deref(), Some("approved"));
+    assert_eq!(
+        s.rules_review_status(&m.rules.sha256)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("approved")
+    );
 
     let run = RunId::deterministic(3);
     let d = DecisionRecord {
@@ -238,9 +361,19 @@ async fn markets_rules_decisions_orders_fills() {
     })
     .await
     .unwrap();
-    let n: i64 = sqlx::query("SELECT count(*) FROM decision_snapshots").fetch_one(s.pool()).await.unwrap().try_get(0).unwrap();
+    let n: i64 = sqlx::query("SELECT count(*) FROM decision_snapshots")
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
     assert_eq!(n, 1);
-    let f: i64 = sqlx::query("SELECT fee_micros FROM fills").fetch_one(s.pool()).await.unwrap().try_get(0).unwrap();
+    let f: i64 = sqlx::query("SELECT fee_micros FROM fills")
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
     assert_eq!(f, 23_750);
     db.drop_db().await;
 }
@@ -250,8 +383,15 @@ async fn station_lease_is_exclusive_across_connections() {
     let Some(db) = fresh().await else { return };
     let s = &db.store;
     let station = StationId::new(format!("T{}", &uuid_like()[..6].to_ascii_uppercase())).unwrap();
-    let first = s.try_station_lease(&station).await.unwrap().expect("first lease");
-    assert!(s.try_station_lease(&station).await.unwrap().is_none(), "second collector refused");
+    let first = s
+        .try_station_lease(&station)
+        .await
+        .unwrap()
+        .expect("first lease");
+    assert!(
+        s.try_station_lease(&station).await.unwrap().is_none(),
+        "second collector refused"
+    );
     first.release().await.unwrap();
     let again = s.try_station_lease(&station).await.unwrap();
     assert!(again.is_some(), "lease available after release");

@@ -1,0 +1,846 @@
+//! Command-line interface of the `weather-machine` binary.
+#![allow(clippy::print_stdout)]
+
+use crate::config::AppConfig;
+use crate::demo::{self, DemoOptions};
+use crate::http::{self, BasicAuth, Publisher, Shared};
+use crate::runtime::{self, RuntimeContext};
+use crate::{healthcheck, setup, telemetry};
+use anyhow::{Context, Result, bail};
+use chrono::{Duration, NaiveDate, Utc};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::io::BufReader;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use tokio::sync::{mpsc, watch};
+use wm_backtest::{
+    BacktestConfig, BacktestReport, Fidelity, StudyConfig, import_iem_csv, run_backtest, study,
+};
+use wm_core::event::{EventEnvelope, WeatherMachineEvent};
+use wm_core::ids::{RunId, StationId};
+use wm_core::market::FeeSchedule;
+use wm_core::resolution::ObservationFilter;
+use wm_core::time::{Clock, SystemClock};
+use wm_core::trading::RunMode;
+use wm_core::units::Price;
+use wm_execution::SimConfig;
+use wm_polymarket::{GammaClient, build_market, event_slug};
+use wm_storage::PgStore;
+use wm_strategy::ev::{break_even_table, research_price_grid};
+use wm_weather::{CollectorConfig, CollectorRegistry, PollOutcome, PollingHints, StationCollector};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "weather-machine",
+    version,
+    about = "Weather Machine — automated research and paper trading of Polymarket daily-high temperature markets"
+)]
+pub struct Cli {
+    /// Main configuration file (default: $WM_CONFIG or configs/weather-machine.toml).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Run the paper-trading service: collectors, market data, engine, dashboard (default).
+    Run,
+    /// Run the dashboard on synthetic data in accelerated time (no network, no database).
+    Demo {
+        /// Virtual seconds per wall-clock second.
+        #[arg(long, env = "WM_DEMO_SPEED", default_value_t = 60.0)]
+        speed: f64,
+        #[arg(long, env = "WM_DEMO_SEED", default_value_t = 7)]
+        seed: u64,
+        /// Days of synthetic history used to train the demo model.
+        #[arg(long, default_value_t = 240)]
+        train_days: u32,
+    },
+    /// Phase-0 data experiment: run the station collectors only (zero trades).
+    Collect {
+        /// Poll each station exactly once and print the result.
+        #[arg(long)]
+        once: bool,
+        /// Do not use PostgreSQL even if WM_DATABASE_URL is set.
+        #[arg(long)]
+        no_db: bool,
+    },
+    /// Apply database migrations and exit.
+    Migrate,
+    /// Research tooling.
+    Research {
+        #[command(subcommand)]
+        command: ResearchCommand,
+    },
+    /// Backtest the configured strategies (synthetic days or a recorded run journal).
+    Backtest {
+        /// Number of synthetic days (plumbing test — synthetic data is not evidence of edge).
+        #[arg(long, conflicts_with = "journal")]
+        synthetic_days: Option<u32>,
+        /// Replay the event journal of a recorded paper run (run id), re-simulating execution.
+        #[arg(long)]
+        journal: Option<String>,
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        /// Trained model JSON (default: the configured model; synthetic runs train one).
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// Write the full JSON report here.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Market tooling.
+    Markets {
+        #[command(subcommand)]
+        command: MarketsCommand,
+    },
+    /// Resolution-rules review.
+    Rules {
+        #[command(subcommand)]
+        command: RulesCommand,
+    },
+    /// Print the break-even table (price → probability needed, fee included).
+    EvTable {
+        /// Taker fee rate (e.g. 0.05).
+        #[arg(long, default_value = "0.05")]
+        fee_rate: String,
+    },
+    /// Validate configuration and environment, then exit.
+    CheckConfig,
+    /// Container health probe (exit 0 = healthy).
+    Healthcheck {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        timeout_secs: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ResearchCommand {
+    /// P(high is final | N minutes observed since the high), with Wilson intervals,
+    /// from an IEM ASOS CSV export (columns station,valid,metar); also trains the model.
+    PeakSurvival {
+        #[arg(long)]
+        csv: PathBuf,
+        #[arg(long, default_value = "EHAM")]
+        station: String,
+        #[arg(long, default_value = "Europe/Amsterdam")]
+        timezone: String,
+        #[arg(long, value_enum, default_value_t = FilterArg::All)]
+        filter: FilterArg,
+        /// Assumed publication delay (knowledge time = observation + delay).
+        #[arg(long, default_value_t = 5)]
+        publication_delay_min: i64,
+        /// Write the trained model JSON here (use with WM_MODEL_PATH / [model].path).
+        #[arg(long)]
+        model_out: Option<PathBuf>,
+        /// Write the Markdown report here.
+        #[arg(long)]
+        report_out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FilterArg {
+    All,
+    HourlyNwsFaa,
+    HourlyOther,
+}
+
+impl FilterArg {
+    fn filter(self) -> ObservationFilter {
+        match self {
+            FilterArg::All => ObservationFilter::AllRows,
+            FilterArg::HourlyNwsFaa => ObservationFilter::WRH_HOURLY_NWS_FAA,
+            FilterArg::HourlyOther => ObservationFilter::WRH_HOURLY_OTHER,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MarketsCommand {
+    /// Fetch and parse the configured locations' markets for a date (read-only).
+    Discover {
+        /// Local date (default: today in each location's time zone).
+        #[arg(long)]
+        date: Option<NaiveDate>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RulesCommand {
+    /// Record a human approval of a rules text (by SHA-256).
+    Approve {
+        #[arg(long)]
+        sha256: String,
+        #[arg(long)]
+        reviewer: String,
+    },
+}
+
+/// Execute a parsed command line.
+pub async fn execute(cli: Cli) -> Result<()> {
+    telemetry::init_crypto();
+    match cli.command.unwrap_or(Command::Run) {
+        Command::Healthcheck { url, timeout_secs } => {
+            let url = url.unwrap_or_else(healthcheck::default_url);
+            healthcheck::probe(
+                &url,
+                std::time::Duration::from_secs(timeout_secs.clamp(1, 60)),
+            )
+            .await
+        }
+        Command::EvTable { fee_rate } => ev_table(&fee_rate),
+        Command::CheckConfig => {
+            let cfg = AppConfig::load(cli.config.as_deref())?;
+            println!(
+                "configuration OK: {} location(s), mode {}",
+                cfg.locations.len(),
+                cfg.file.app.mode.as_str()
+            );
+            for l in &cfg.locations {
+                println!(
+                    "  {} → station {} ({}), sources {} + {:?}, confirmed filter {:?}",
+                    l.location.id,
+                    l.station.id,
+                    l.location.timezone,
+                    l.observation_sources.primary,
+                    l.observation_sources.secondary,
+                    l.market.confirmed_filter
+                );
+            }
+            match cfg.user_agent() {
+                Ok(ua) => println!("User-Agent: {ua}"),
+                Err(e) => println!("User-Agent: NOT CONFIGURED ({e}) — set WM_CONTACT"),
+            }
+            println!(
+                "database: {}",
+                if cfg.env.database_url.is_some() {
+                    "configured"
+                } else {
+                    "not configured (trading blocked)"
+                }
+            );
+            println!(
+                "model: {}",
+                cfg.file
+                    .model
+                    .path
+                    .as_deref()
+                    .unwrap_or("none (no-edge: no weather trades)")
+            );
+            Ok(())
+        }
+        Command::Run => serve(cli.config, Mode::Run).await,
+        Command::Demo {
+            speed,
+            seed,
+            train_days,
+        } => {
+            serve(
+                cli.config,
+                Mode::Demo(DemoOptions {
+                    speed,
+                    seed,
+                    train_days,
+                    ..DemoOptions::default()
+                }),
+            )
+            .await
+        }
+        Command::Collect { once, no_db } => collect(cli.config, once, no_db).await,
+        Command::Migrate => {
+            let cfg = AppConfig::load(cli.config.as_deref())?;
+            telemetry::init_tracing(&cfg.file.app.log_format);
+            let url = cfg
+                .env
+                .database_url
+                .as_deref()
+                .context("WM_DATABASE_URL is required")?;
+            let store = PgStore::connect(url, 2).await?;
+            store.migrate().await?;
+            println!("migrations applied");
+            Ok(())
+        }
+        Command::Research {
+            command:
+                ResearchCommand::PeakSurvival {
+                    csv,
+                    station,
+                    timezone,
+                    filter,
+                    publication_delay_min,
+                    model_out,
+                    report_out,
+                },
+        } => peak_survival(
+            cli.config,
+            csv,
+            &station,
+            &timezone,
+            filter,
+            publication_delay_min,
+            model_out,
+            report_out,
+        ),
+        Command::Backtest {
+            synthetic_days,
+            journal,
+            seed,
+            model,
+            out,
+        } => backtest(cli.config, synthetic_days, journal, seed, model, out).await,
+        Command::Markets {
+            command: MarketsCommand::Discover { date },
+        } => discover(cli.config, date).await,
+        Command::Rules {
+            command: RulesCommand::Approve { sha256, reviewer },
+        } => {
+            let cfg = AppConfig::load(cli.config.as_deref())?;
+            let url = cfg
+                .env
+                .database_url
+                .as_deref()
+                .context("WM_DATABASE_URL is required")?;
+            let store = PgStore::connect(url, 2).await?;
+            if store.approve_rules(sha256.trim(), reviewer.trim()).await? {
+                println!("rules {sha256} approved by {reviewer}");
+                Ok(())
+            } else {
+                bail!("no stored rules text with sha256 {sha256} (discover the market first)")
+            }
+        }
+    }
+}
+
+enum Mode {
+    Run,
+    Demo(DemoOptions),
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
+}
+
+/// `run` and `demo`: HTTP server + runtime, graceful shutdown on SIGTERM/SIGINT.
+async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
+    let cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    let prometheus = telemetry::init_metrics()
+        .map_err(|e| tracing::warn!(error = %e, "metrics recorder not installed"))
+        .ok();
+    let (publisher, snapshots) = Publisher::new();
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+    let ready = Arc::new(AtomicBool::new(false));
+    let ui_dir = PathBuf::from(&cfg.file.app.ui_dir);
+    let basic_auth = match (
+        std::env::var("WM_DASHBOARD_USER")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        std::env::var("WM_DASHBOARD_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(u), Some(p)) => Some(BasicAuth::new(&u, &p)),
+        (None, None) => None,
+        _ => bail!("set both WM_DASHBOARD_USER and WM_DASHBOARD_PASSWORD (or neither)"),
+    };
+    if !ui_dir.join("index.html").is_file() {
+        tracing::warn!(ui_dir = %ui_dir.display(), "dashboard assets not found: serving the /lite dashboard only");
+    }
+    let shared = Arc::new(Shared {
+        snapshots,
+        commands: cmd_tx,
+        admin_token: cfg.env.admin_token.clone(),
+        basic_auth,
+        prometheus,
+        ui_dir: Some(ui_dir),
+        ready: Arc::clone(&ready),
+        liveness_max_age: std::time::Duration::from_secs(60),
+    });
+    let listener = tokio::net::TcpListener::bind(&cfg.file.app.http_bind)
+        .await
+        .with_context(|| format!("binding {}", cfg.file.app.http_bind))?;
+    tracing::info!(addr = %cfg.file.app.http_bind, "dashboard listening");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let server = tokio::spawn(http::serve(listener, shared, shutdown_rx.clone()));
+    let signal_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutdown signal received");
+        let _ = signal_tx.send(true);
+    });
+    let result = match mode {
+        Mode::Run => {
+            runtime::run(
+                cfg,
+                RuntimeContext {
+                    publisher,
+                    commands: cmd_rx,
+                    ready,
+                    shutdown: shutdown_rx,
+                },
+            )
+            .await
+        }
+        Mode::Demo(opts) => {
+            let opts = DemoOptions {
+                snapshot_interval: std::time::Duration::from_millis(
+                    cfg.file.app.snapshot_interval_ms,
+                ),
+                ..opts
+            };
+            demo::run(cfg, opts, publisher, cmd_rx, ready, shutdown_rx).await
+        }
+    };
+    let _ = shutdown_tx.send(true);
+    match tokio::time::timeout(std::time::Duration::from_secs(10), server).await {
+        Ok(Ok(Err(e))) => tracing::error!(error = %e, "HTTP server error"),
+        Ok(Err(e)) => tracing::error!(error = %e, "HTTP server task failed"),
+        _ => {}
+    }
+    if let Err(e) = &result {
+        tracing::error!(error = %format!("{e:#}"), "runtime stopped with an error");
+    }
+    result
+}
+
+fn ev_table(fee_rate: &str) -> Result<()> {
+    let rate = Price::parse(fee_rate).map_err(|e| anyhow::anyhow!("invalid fee rate: {e}"))?;
+    let fee = FeeSchedule::taker(rate.micros());
+    println!(
+        "{:>7} {:>10} {:>14} {:>22}",
+        "price", "fee/share", "break-even p", "wins to recover 1 loss"
+    );
+    for r in break_even_table(&research_price_grid(), &fee, Price::ZERO) {
+        println!(
+            "{:>7} {:>10.5} {:>13.2}% {:>22.1}",
+            r.price.to_string(),
+            r.fee_per_share,
+            r.break_even_probability * 100.0,
+            r.wins_to_recover_one_loss
+        );
+    }
+    Ok(())
+}
+
+async fn collect(config: Option<PathBuf>, once: bool, no_db: bool) -> Result<()> {
+    let cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let ua = cfg
+        .user_agent()
+        .context("NOAA/NWS require an identifying User-Agent: set WM_CONTACT")?;
+    let store = match (&cfg.env.database_url, no_db) {
+        (Some(url), false) => {
+            let s = PgStore::connect(url, cfg.file.database.max_connections).await?;
+            if cfg.file.app.auto_migrate {
+                s.migrate().await?;
+            }
+            Some(s)
+        }
+        _ => None,
+    };
+    let providers = setup::Providers::build(&cfg, Arc::clone(&clock), &ua)?;
+    let registry = CollectorRegistry::new();
+    let (events_tx, mut events_rx) = mpsc::channel::<EventEnvelope>(4096);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut collectors = Vec::new();
+    let mut leases = Vec::new();
+    let mut hint_senders = Vec::new();
+    for l in &cfg.locations {
+        let ids = setup::location_ids(l)?;
+        if let Some(s) = &store {
+            match s.try_station_lease(&ids.station).await? {
+                Some(lease) => leases.push(lease),
+                None => bail!(
+                    "station {} is already being collected by another instance",
+                    ids.station
+                ),
+            }
+        }
+        let claim = registry
+            .claim(&ids.station)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let sink: Arc<dyn wm_core::ingest::IngestSink> = match &store {
+            Some(s) => Arc::new(s.clone()),
+            None => Arc::new(wm_core::ingest::MemoryIngestSink::new()),
+        };
+        let (hint_tx, hint_rx) = watch::channel(PollingHints::default());
+        hint_senders.push(hint_tx);
+        let c = StationCollector::new(
+            claim,
+            CollectorConfig {
+                station: ids.station.clone(),
+                location: ids.location.clone(),
+                timezone: ids.timezone,
+                policy: setup::polling_policy(&cfg, l),
+                health: cfg.file.health.clone(),
+                max_gate_wait: std::time::Duration::from_secs(90),
+            },
+            providers.observation_sources(&cfg, l)?,
+            sink,
+            events_tx.clone(),
+            hint_rx,
+            Arc::clone(&clock),
+        );
+        collectors.push(c);
+    }
+    drop(events_tx);
+    let printer = tokio::spawn(async move {
+        while let Some(e) = events_rx.recv().await {
+            match &e.event {
+                WeatherMachineEvent::WeatherObservation(o) => {
+                    let ob = &o.observation;
+                    println!(
+                        "{} {} {:<6} {:>5} °C  {:<9} via {:<6} known after {:>4}s  {}",
+                        ob.key.station,
+                        ob.key.observed_at.format("%Y-%m-%d %H:%MZ"),
+                        ob.key.report_type.as_str(),
+                        ob.temperature
+                            .map_or_else(|| "—".to_owned(), |t| format!("{:.1}", t.as_f64())),
+                        o.class.as_str(),
+                        ob.provider,
+                        ob.knowledge_delay_secs(),
+                        ob.raw_text
+                    );
+                }
+                WeatherMachineEvent::WeatherCorrection(c) => println!(
+                    "CORRECTION {} v{} → v{}",
+                    c.current.key.fingerprint(),
+                    c.previous.version,
+                    c.current.version
+                ),
+                WeatherMachineEvent::ProviderHealthChanged(h) => println!(
+                    "health {} [{}] → {} ({})",
+                    h.snapshot.provider,
+                    h.snapshot
+                        .scope
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    h.snapshot.state,
+                    h.snapshot.reason
+                ),
+                _ => {}
+            }
+        }
+    });
+    if once {
+        for mut c in collectors {
+            let station = c.station().clone();
+            let outcome = c.poll_once().await;
+            match &outcome {
+                PollOutcome::Fetched {
+                    provider,
+                    new,
+                    out_of_order,
+                    duplicates,
+                    corrections,
+                } => println!(
+                    "{station}: {provider} → {new} new, {out_of_order} late, {duplicates} duplicate, {corrections} corrected"
+                ),
+                PollOutcome::GateClosed { provider, retry_in } => println!(
+                    "{station}: {provider} gate closed, retry in {} s",
+                    retry_in.as_secs()
+                ),
+                PollOutcome::Failed {
+                    provider,
+                    detail,
+                    throttled,
+                } => println!(
+                    "{station}: {provider} FAILED{}: {detail}",
+                    if *throttled { " (throttled)" } else { "" }
+                ),
+            }
+        }
+    } else {
+        let mut handles = Vec::new();
+        for c in collectors {
+            handles.push(tokio::spawn(c.run(shutdown_rx.clone())));
+        }
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+    let _ = printer.await;
+    for (name, gate) in &providers.gates {
+        let s = gate.stats();
+        if s.requests_total > 0 {
+            println!(
+                "{name}: {} request(s), {} throttled, {} failed",
+                s.requests_total, s.throttled_total, s.failures_total
+            );
+        }
+    }
+    for l in leases {
+        let _ = l.release().await;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn peak_survival(
+    config: Option<PathBuf>,
+    csv: PathBuf,
+    station: &str,
+    timezone: &str,
+    filter: FilterArg,
+    delay_min: i64,
+    model_out: Option<PathBuf>,
+    report_out: Option<PathBuf>,
+) -> Result<()> {
+    let station = StationId::new(station.to_owned()).context("station")?;
+    let tz: chrono_tz::Tz = timezone
+        .parse()
+        .map_err(|e| anyhow::anyhow!("timezone: {e}"))?;
+    let file = std::fs::File::open(&csv).with_context(|| format!("opening {}", csv.display()))?;
+    let (obs, stats) = import_iem_csv(BufReader::new(file), &station, Duration::minutes(delay_min))
+        .map_err(|e| anyhow::anyhow!(e))?;
+    println!(
+        "imported {} of {} rows (comments {}, other stations {}, unparseable {}, no temperature {}, duplicates {})",
+        stats.imported,
+        stats.rows,
+        stats.skipped_comment,
+        stats.skipped_station,
+        stats.skipped_unparseable,
+        stats.skipped_no_temperature,
+        stats.duplicates
+    );
+    if obs.is_empty() {
+        bail!("no observations imported");
+    }
+    // Station geometry from configuration when available (solar noon).
+    let peak = AppConfig::load(config.as_deref())
+        .ok()
+        .and_then(|c| {
+            c.locations
+                .iter()
+                .find(|l| l.station.id == station.as_str())
+                .map(setup::peak_config)
+        })
+        .unwrap_or_default();
+    let cfg = StudyConfig {
+        station,
+        tz,
+        filter: filter.filter(),
+        peak,
+        k_classes: 4,
+        min_high_local_minute: 9 * 60,
+    };
+    let (report, model) = study(&obs, &cfg);
+    let md = report.to_markdown();
+    println!("{md}");
+    if let Some(p) = report_out {
+        std::fs::write(&p, &md).with_context(|| format!("writing {}", p.display()))?;
+    }
+    if let Some(p) = model_out {
+        std::fs::write(&p, serde_json::to_vec_pretty(&model)?)
+            .with_context(|| format!("writing {}", p.display()))?;
+        println!(
+            "model written to {} ({} samples)",
+            p.display(),
+            model.total_samples()
+        );
+    }
+    Ok(())
+}
+
+fn print_report(r: &BacktestReport) {
+    println!("fidelity        {:?}", r.fidelity);
+    println!("events          {}", r.events);
+    println!(
+        "decisions       {} (approvals {}, fills {})",
+        r.decisions, r.approvals, r.fills
+    );
+    println!("settled markets {}", r.settled_markets);
+    println!("realized PnL    {}", r.realized_pnl);
+    println!("days +/−        {} / {}", r.winning_days, r.losing_days);
+    println!("max drawdown    {}", r.max_drawdown);
+    println!(
+        "mean daily PnL  95% bootstrap CI [{:.3}, {:.3}]",
+        r.mean_daily_pnl_ci.0, r.mean_daily_pnl_ci.1
+    );
+    for (s, p) in &r.pnl_by_strategy {
+        println!("  {s:<24} {p}");
+    }
+}
+
+async fn backtest(
+    config: Option<PathBuf>,
+    synthetic_days: Option<u32>,
+    journal: Option<String>,
+    seed: u64,
+    model: Option<PathBuf>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    let loc = cfg.locations.first().context("no location configured")?;
+    let ids = setup::location_ids(loc)?;
+    let (events, fidelity, model): (
+        Vec<EventEnvelope>,
+        Fidelity,
+        Arc<dyn wm_strategy::ProbabilityModel>,
+    ) = match (synthetic_days, journal) {
+        (Some(days), None) => {
+            let start = wm_core::time::local_date(Utc::now(), ids.timezone)
+                - Duration::days(i64::from(days.max(1)));
+            let model: Arc<dyn wm_strategy::ProbabilityModel> = match &model {
+                Some(p) => Arc::new(setup::read_model(p)?),
+                None => demo::train_model(&ids, setup::peak_config(loc), start, 240, seed),
+            };
+            let events = (0..days.max(1))
+                .flat_map(|i| {
+                    demo::day_events(
+                        &ids,
+                        start + Duration::days(i64::from(i)),
+                        seed,
+                        u64::from(i),
+                    )
+                })
+                .collect();
+            println!(
+                "synthetic backtest: {days} day(s) from {start} — plumbing test, NOT evidence of edge"
+            );
+            (events, Fidelity::Synthetic, model)
+        }
+        (None, Some(run)) => {
+            let run: RunId =
+                serde_json::from_value(serde_json::Value::String(run.trim().to_owned()))
+                    .context("run id must be a UUID")?;
+            let url = cfg
+                .env
+                .database_url
+                .as_deref()
+                .context("WM_DATABASE_URL is required to load a journal")?;
+            let store = PgStore::connect(url, 2).await?;
+            let mut events = store.load_journal(&run).await?;
+            // Execution is re-simulated: drop recorded order updates.
+            events.retain(|e| !matches!(e.event, WeatherMachineEvent::OrderUpdate(_)));
+            let has_books = events
+                .iter()
+                .any(|e| matches!(e.event, WeatherMachineEvent::OrderBookUpdate(_)));
+            let model: Arc<dyn wm_strategy::ProbabilityModel> = match &model {
+                Some(p) => Arc::new(setup::read_model(p)?),
+                None => setup::load_model(&cfg)?,
+            };
+            println!("journal backtest of run {run}: {} events", events.len());
+            (
+                events,
+                if has_books {
+                    Fidelity::TrueOrderBook
+                } else {
+                    Fidelity::PriceOnly
+                },
+                model,
+            )
+        }
+        _ => bail!("choose exactly one of --synthetic-days N or --journal RUN_ID"),
+    };
+    let bt = BacktestConfig {
+        engine: setup::engine_config(&cfg, RunMode::Backtest, RunId::deterministic(seed))?,
+        sim: SimConfig::default(),
+        fidelity,
+        settle_grace: Duration::hours(2),
+        heartbeat: Duration::minutes(15),
+    };
+    let (report, _) = tokio::task::spawn_blocking(move || run_backtest(events, &bt, model))
+        .await
+        .context("backtest task")?;
+    print_report(&report);
+    if let Some(p) = out {
+        std::fs::write(&p, serde_json::to_vec_pretty(&report)?)
+            .with_context(|| format!("writing {}", p.display()))?;
+        println!("report written to {}", p.display());
+    }
+    Ok(())
+}
+
+async fn discover(config: Option<PathBuf>, date: Option<NaiveDate>) -> Result<()> {
+    let cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let ua = cfg
+        .user_agent()
+        .unwrap_or_else(|_| format!("WeatherMachine/{} (market-discovery)", wm_core::VERSION));
+    let providers = setup::Providers::build(&cfg, Arc::clone(&clock), &ua)?;
+    let fetcher = providers
+        .fetcher("polymarket_gamma")
+        .context("providers.polymarket_gamma is disabled")?;
+    let gamma = GammaClient::new(
+        Arc::clone(fetcher),
+        &cfg.file.providers.polymarket_gamma.base_url,
+    );
+    for l in &cfg.locations {
+        let spec = setup::market_spec(l)?;
+        let d = date.unwrap_or_else(|| wm_core::time::local_date(clock.now(), spec.timezone));
+        let slug = event_slug(&spec.slug_template, d);
+        println!("== {} {} ({slug})", l.location.id, d);
+        let (events, _) = gamma
+            .events_by_slug(&slug, std::time::Duration::from_secs(30))
+            .await?;
+        let Some(ev) = events.iter().find(|e| e.slug == slug) else {
+            println!("   no event with this slug");
+            continue;
+        };
+        match build_market(ev, &spec, d, clock.now()) {
+            Ok(m) => {
+                println!(
+                    "   {} — {} outcome(s), neg_risk {}, end {:?}",
+                    m.title,
+                    m.outcomes.len(),
+                    m.neg_risk,
+                    m.end_time
+                );
+                println!("   resolution: {:?}", m.resolution.source);
+                println!(
+                    "   filters: {:?} (certainty {:?})",
+                    m.resolution
+                        .filters
+                        .iter()
+                        .map(ObservationFilter::label)
+                        .collect::<Vec<_>>(),
+                    m.resolution.filter_certainty
+                );
+                println!(
+                    "   machine tradable: {} · unrecognized clauses: {:?}",
+                    m.resolution.is_machine_tradable(),
+                    m.resolution.unrecognized_clauses
+                );
+                println!("   rules sha256: {}", m.rules.sha256);
+                for o in m.sorted_outcomes() {
+                    println!(
+                        "   {:>12}  yes {}  no {}  tick {}  min {}",
+                        o.label, o.yes_token, o.no_token, o.tick_size, o.min_order_size
+                    );
+                }
+            }
+            Err(e) => println!("   mapping failed (would not be traded): {e}"),
+        }
+    }
+    Ok(())
+}

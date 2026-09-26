@@ -31,7 +31,9 @@ impl RetryAfter {
         if let Ok(secs) = v.parse::<u64>() {
             return Some(RetryAfter::Delay(Duration::from_secs(secs)));
         }
-        DateTime::parse_from_rfc2822(v).ok().map(|t| RetryAfter::At(t.with_timezone(&Utc)))
+        DateTime::parse_from_rfc2822(v)
+            .ok()
+            .map(|t| RetryAfter::At(t.with_timezone(&Utc)))
     }
 
     /// Delay relative to `now` (never negative).
@@ -47,13 +49,23 @@ impl RetryAfter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestOutcome {
     /// 2xx or 304.
-    Success { status: u16 },
+    Success {
+        status: u16,
+    },
     /// 429 Too Many Requests.
-    Throttled { status: u16, retry_after: Option<Duration> },
+    Throttled {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
     /// 5xx (503 may carry Retry-After).
-    ServerError { status: u16, retry_after: Option<Duration> },
+    ServerError {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
     /// 4xx other than 429. 401/403 open the circuit immediately.
-    ClientError { status: u16 },
+    ClientError {
+        status: u16,
+    },
     Timeout,
     Connect,
     /// Body read error, TLS error, oversize body, dropped permit, …
@@ -119,7 +131,10 @@ impl WaitReason {
 pub enum Admission {
     Proceed,
     /// Not before the given monotonic instant.
-    NotBefore { at: Duration, reason: WaitReason },
+    NotBefore {
+        at: Duration,
+        reason: WaitReason,
+    },
 }
 
 /// Counters and state exposed for health/metrics.
@@ -209,7 +224,10 @@ impl GateCore {
             Some(until) if now < until => self.politeness_multiplier,
             _ => 1,
         };
-        self.policy.min_interval.saturating_mul(mult).max(self.policy.class.min_interval_floor())
+        self.policy
+            .min_interval
+            .saturating_mul(mult)
+            .max(self.policy.class.min_interval_floor())
     }
 
     fn roll_budget_day(&mut self, today: NaiveDate) {
@@ -221,19 +239,30 @@ impl GateCore {
 
     /// Decide whether a request may start at monotonic time `now` (UTC date `today`
     /// is used for the daily budget). On `Proceed` the start is recorded.
-    pub fn admit(&mut self, now: Duration, today: NaiveDate, until_midnight: Duration) -> Admission {
+    pub fn admit(
+        &mut self,
+        now: Duration,
+        today: NaiveDate,
+        until_midnight: Duration,
+    ) -> Admission {
         self.roll_budget_day(today);
         if let Some(budget) = self.policy.daily_budget
             && self.requests_today >= budget
         {
-            return Admission::NotBefore { at: now + until_midnight, reason: WaitReason::DailyBudget };
+            return Admission::NotBefore {
+                at: now + until_midnight,
+                reason: WaitReason::DailyBudget,
+            };
         }
 
         match self.circuit {
             CircuitState::Open => {
                 let until = self.circuit_open_until.unwrap_or(now);
                 if now < until {
-                    return Admission::NotBefore { at: until, reason: WaitReason::CircuitOpen };
+                    return Admission::NotBefore {
+                        at: until,
+                        reason: WaitReason::CircuitOpen,
+                    };
                 }
                 self.circuit = CircuitState::HalfOpen;
                 self.half_open_probe_in_flight = false;
@@ -250,17 +279,26 @@ impl GateCore {
         if let Some(until) = self.retry_after_until
             && now < until
         {
-            return Admission::NotBefore { at: until, reason: WaitReason::RetryAfter };
+            return Admission::NotBefore {
+                at: until,
+                reason: WaitReason::RetryAfter,
+            };
         }
         if let Some(until) = self.backoff_until
             && now < until
         {
-            return Admission::NotBefore { at: until, reason: WaitReason::Backoff };
+            return Admission::NotBefore {
+                at: until,
+                reason: WaitReason::Backoff,
+            };
         }
         if let Some(last) = self.last_start {
             let next = last + self.effective_min_interval(now);
             if now < next {
-                return Admission::NotBefore { at: next, reason: WaitReason::MinInterval };
+                return Admission::NotBefore {
+                    at: next,
+                    reason: WaitReason::MinInterval,
+                };
             }
         }
         if self.in_flight >= self.policy.max_concurrency {
@@ -343,7 +381,8 @@ impl GateCore {
                 self.failures_total += 1;
                 self.consecutive_failures += 1;
                 let ra = retry_after.map(|d| d.min(self.policy.max_retry_after));
-                let own = self.equal_jitter(self.policy.throttle_backoff_base, self.consecutive_failures);
+                let own =
+                    self.equal_jitter(self.policy.throttle_backoff_base, self.consecutive_failures);
                 // Honour the server's Retry-After as a minimum; be at least as
                 // patient as our own throttle backoff.
                 let wait = match ra {
@@ -353,20 +392,27 @@ impl GateCore {
                 self.retry_after_until = Some(now + wait.max(self.effective_min_interval(now)));
                 self.current_backoff = wait;
                 // Escalate politeness for the decay period.
-                self.politeness_multiplier =
-                    (self.politeness_multiplier.max(1) * self.policy.politeness_factor).min(MAX_POLITENESS);
+                self.politeness_multiplier = (self.politeness_multiplier.max(1)
+                    * self.policy.politeness_factor)
+                    .min(MAX_POLITENESS);
                 self.politeness_until = Some(now + self.policy.politeness_decay);
-                if was_half_open || self.consecutive_failures >= self.policy.circuit_failure_threshold {
+                if was_half_open
+                    || self.consecutive_failures >= self.policy.circuit_failure_threshold
+                {
                     self.open_circuit(now, false);
                 }
             }
             other => {
                 self.failures_total += 1;
                 self.consecutive_failures += 1;
-                let backoff = self.equal_jitter(self.policy.backoff_base, self.consecutive_failures);
+                let backoff =
+                    self.equal_jitter(self.policy.backoff_base, self.consecutive_failures);
                 self.backoff_until = Some(now + backoff.max(self.effective_min_interval(now)));
                 self.current_backoff = backoff;
-                if let RequestOutcome::ServerError { retry_after: Some(ra), .. } = other
+                if let RequestOutcome::ServerError {
+                    retry_after: Some(ra),
+                    ..
+                } = other
                     && self.policy.respect_retry_after
                 {
                     let ra = (*ra).min(self.policy.max_retry_after);
@@ -375,7 +421,8 @@ impl GateCore {
                 let forbidden = matches!(other, RequestOutcome::ClientError { status: 401 | 403 });
                 if forbidden {
                     self.open_circuit(now, true);
-                } else if was_half_open || self.consecutive_failures >= self.policy.circuit_failure_threshold
+                } else if was_half_open
+                    || self.consecutive_failures >= self.policy.circuit_failure_threshold
                 {
                     self.open_circuit(now, false);
                 }
@@ -387,15 +434,23 @@ impl GateCore {
     /// Earliest monotonic instant at which a request could be admitted,
     /// ignoring the daily budget.
     pub fn blocked_until(&self) -> Option<Duration> {
-        [self.retry_after_until, self.backoff_until, self.circuit_open_until.filter(|_| self.circuit == CircuitState::Open)]
-            .into_iter()
-            .flatten()
-            .max()
+        [
+            self.retry_after_until,
+            self.backoff_until,
+            self.circuit_open_until
+                .filter(|_| self.circuit == CircuitState::Open),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
     }
 
     pub fn stats(&self, now: Duration) -> GateStats {
-        let requests_last_hour =
-            self.recent_starts.iter().filter(|&&t| now.saturating_sub(t) < HOUR).count() as u32;
+        let requests_last_hour = self
+            .recent_starts
+            .iter()
+            .filter(|&&t| now.saturating_sub(t) < HOUR)
+            .count() as u32;
         GateStats {
             requests_total: self.requests_total,
             successes_total: self.successes_total,
@@ -436,12 +491,19 @@ pub struct ProviderGate {
 
 impl std::fmt::Debug for ProviderGate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderGate").field("provider", &self.provider).finish()
+        f.debug_struct("ProviderGate")
+            .field("provider", &self.provider)
+            .finish()
     }
 }
 
 impl ProviderGate {
-    pub fn new(provider: ProviderId, policy: RateLimitPolicy, clock: Arc<dyn Clock>, seed: u64) -> Arc<Self> {
+    pub fn new(
+        provider: ProviderId,
+        policy: RateLimitPolicy,
+        clock: Arc<dyn Clock>,
+        seed: u64,
+    ) -> Arc<Self> {
         let permits = policy.max_concurrency.max(1) as usize;
         Arc::new(Self {
             provider,
@@ -460,7 +522,9 @@ impl ProviderGate {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, GateCore> {
-        self.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.core
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn policy(&self) -> RateLimitPolicy {
@@ -483,7 +547,10 @@ impl ProviderGate {
         let sem = match Arc::clone(&self.semaphore).try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                return Err(GateWait { reason: WaitReason::Concurrency, retry_in: Duration::from_millis(100) });
+                return Err(GateWait {
+                    reason: WaitReason::Concurrency,
+                    retry_in: Duration::from_millis(100),
+                });
             }
         };
         let now = self.clock.monotonic();
@@ -496,7 +563,10 @@ impl ProviderGate {
                 _sem: sem,
                 completed: false,
             }),
-            Admission::NotBefore { at, reason } => Err(GateWait { reason, retry_in: at.saturating_sub(now) }),
+            Admission::NotBefore { at, reason } => Err(GateWait {
+                reason,
+                retry_in: at.saturating_sub(now),
+            }),
         }
     }
 
@@ -547,7 +617,9 @@ impl ProviderGate {
         let now_mono = self.clock.monotonic();
         let blocked = self.lock().blocked_until()?;
         let delta = blocked.checked_sub(now_mono)?;
-        chrono::Duration::from_std(delta).ok().map(|d| self.clock.now() + d)
+        chrono::Duration::from_std(delta)
+            .ok()
+            .map(|d| self.clock.now() + d)
     }
 
     fn complete(&self, outcome: RequestOutcome) {
@@ -580,7 +652,9 @@ impl GatePermit {
 impl Drop for GatePermit {
     fn drop(&mut self) {
         if !self.completed {
-            self.gate.complete(RequestOutcome::Other("permit dropped without outcome".into()));
+            self.gate.complete(RequestOutcome::Other(
+                "permit dropped without outcome".into(),
+            ));
         }
     }
 }
@@ -623,9 +697,18 @@ mod tests {
     fn retry_after_is_honoured_and_politeness_escalates() {
         let mut g = nws();
         assert_eq!(g.admit(s(0), DAY, FAR), Admission::Proceed);
-        g.complete(s(1), RequestOutcome::Throttled { status: 429, retry_after: Some(s(600)) });
+        g.complete(
+            s(1),
+            RequestOutcome::Throttled {
+                status: 429,
+                retry_after: Some(s(600)),
+            },
+        );
         match g.admit(s(599), DAY, FAR) {
-            Admission::NotBefore { reason: WaitReason::RetryAfter, at } => assert!(at >= s(601)),
+            Admission::NotBefore {
+                reason: WaitReason::RetryAfter,
+                at,
+            } => assert!(at >= s(601)),
             a => panic!("unexpected {a:?}"),
         }
         // Politeness doubled the minimum interval for 24h.
@@ -640,10 +723,19 @@ mod tests {
     fn throttle_without_retry_after_uses_throttle_backoff() {
         let mut g = nws();
         assert_eq!(g.admit(s(0), DAY, FAR), Admission::Proceed);
-        g.complete(s(0), RequestOutcome::Throttled { status: 429, retry_after: None });
+        g.complete(
+            s(0),
+            RequestOutcome::Throttled {
+                status: 429,
+                retry_after: None,
+            },
+        );
         // throttle_backoff_base = 300s, equal jitter in [150s, 300s].
         match g.admit(s(149), DAY, FAR) {
-            Admission::NotBefore { reason: WaitReason::RetryAfter, .. } => {}
+            Admission::NotBefore {
+                reason: WaitReason::RetryAfter,
+                ..
+            } => {}
             a => panic!("unexpected {a:?}"),
         }
         let blocked = g.blocked_until().unwrap();
@@ -663,11 +755,20 @@ mod tests {
                     Admission::NotBefore { at, .. } => t = at,
                 }
             }
-            g.complete(t, RequestOutcome::ServerError { status: 500, retry_after: None });
+            g.complete(
+                t,
+                RequestOutcome::ServerError {
+                    status: 500,
+                    retry_after: None,
+                },
+            );
             let st = g.stats(t);
             assert_eq!(st.consecutive_failures, i);
             if i < 5 {
-                assert!(st.current_backoff >= last_backoff / 2, "backoff should grow");
+                assert!(
+                    st.current_backoff >= last_backoff / 2,
+                    "backoff should grow"
+                );
                 last_backoff = st.current_backoff;
                 assert_eq!(st.circuit, CircuitState::Closed);
             } else {
@@ -675,7 +776,10 @@ mod tests {
             }
         }
         match g.admit(t + s(1), DAY, FAR) {
-            Admission::NotBefore { reason: WaitReason::CircuitOpen, at } => {
+            Admission::NotBefore {
+                reason: WaitReason::CircuitOpen,
+                at,
+            } => {
                 assert!(at >= t + s(600));
             }
             a => panic!("unexpected {a:?}"),
@@ -695,7 +799,10 @@ mod tests {
         assert_eq!(g.admit(t, DAY, FAR), Admission::Proceed, "probe admitted");
         assert!(matches!(
             g.admit(t + s(31), DAY, FAR),
-            Admission::NotBefore { reason: WaitReason::HalfOpenProbeInFlight, .. }
+            Admission::NotBefore {
+                reason: WaitReason::HalfOpenProbeInFlight,
+                ..
+            }
         ));
         g.complete(t + s(1), RequestOutcome::Success { status: 200 });
         assert_eq!(g.stats(t).circuit, CircuitState::Closed);
@@ -737,7 +844,13 @@ mod tests {
             g.complete(t, RequestOutcome::Success { status: 200 });
             t += s(30);
         }
-        assert!(matches!(g.admit(t, DAY, s(100)), Admission::NotBefore { reason: WaitReason::DailyBudget, .. }));
+        assert!(matches!(
+            g.admit(t, DAY, s(100)),
+            Admission::NotBefore {
+                reason: WaitReason::DailyBudget,
+                ..
+            }
+        ));
         // New UTC day resets the budget.
         let tomorrow = DAY.succ_opt().unwrap();
         assert_eq!(g.admit(t + s(100), tomorrow, FAR), Admission::Proceed);

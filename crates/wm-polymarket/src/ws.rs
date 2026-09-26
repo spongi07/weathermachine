@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
-use wm_core::event::{EventEnvelope, EventSource, MarketTradeEvent, OrderBookEvent, WeatherMachineEvent};
+use wm_core::event::{
+    EventEnvelope, EventSource, MarketTradeEvent, OrderBookEvent, WeatherMachineEvent,
+};
 use wm_core::ids::TokenId;
 use wm_core::market::{BookLevel, OrderBook, Side, TradePrint};
 use wm_core::time::Clock;
@@ -25,10 +27,31 @@ use wm_net::{ProviderGate, RequestOutcome};
 /// Parsed market-channel event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WsEvent {
-    Book { asset: String, bids: Vec<(Price, Shares)>, asks: Vec<(Price, Shares)>, ts: Option<DateTime<Utc>>, hash: Option<String> },
-    PriceChange { asset: String, side: Side, price: Price, size: Shares, ts: Option<DateTime<Utc>> },
-    TickSize { asset: String, tick: Price },
-    LastTrade { asset: String, price: Price, size: Shares, side: Option<Side>, ts: Option<DateTime<Utc>> },
+    Book {
+        asset: String,
+        bids: Vec<(Price, Shares)>,
+        asks: Vec<(Price, Shares)>,
+        ts: Option<DateTime<Utc>>,
+        hash: Option<String>,
+    },
+    PriceChange {
+        asset: String,
+        side: Side,
+        price: Price,
+        size: Shares,
+        ts: Option<DateTime<Utc>>,
+    },
+    TickSize {
+        asset: String,
+        tick: Price,
+    },
+    LastTrade {
+        asset: String,
+        price: Price,
+        size: Shares,
+        side: Option<Side>,
+        ts: Option<DateTime<Utc>>,
+    },
     Pong,
     Other,
 }
@@ -59,7 +82,11 @@ fn side(v: Option<&Value>) -> Option<Side> {
 
 fn levels(v: Option<&Value>) -> Vec<(Price, Shares)> {
     v.and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|l| Some((price(l.get("price"))?, shares(l.get("size"))?))).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| Some((price(l.get("price"))?, shares(l.get("size"))?)))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -70,22 +97,59 @@ fn parse_one(obj: &Value, out: &mut Vec<WsEvent>) {
     match et {
         "book" => {
             if let Some(asset) = asset {
-                let bids = if obj.get("bids").is_some() { levels(obj.get("bids")) } else { levels(obj.get("buys")) };
-                let asks = if obj.get("asks").is_some() { levels(obj.get("asks")) } else { levels(obj.get("sells")) };
-                out.push(WsEvent::Book { asset, bids, asks, ts, hash: obj.get("hash").and_then(s) });
+                let bids = if obj.get("bids").is_some() {
+                    levels(obj.get("bids"))
+                } else {
+                    levels(obj.get("buys"))
+                };
+                let asks = if obj.get("asks").is_some() {
+                    levels(obj.get("asks"))
+                } else {
+                    levels(obj.get("sells"))
+                };
+                out.push(WsEvent::Book {
+                    asset,
+                    bids,
+                    asks,
+                    ts,
+                    hash: obj.get("hash").and_then(s),
+                });
             }
         }
         "price_change" => {
             if let Some(changes) = obj.get("price_changes").and_then(Value::as_array) {
                 for c in changes {
-                    if let (Some(a), Some(sd), Some(p), Some(sz)) = (c.get("asset_id").and_then(s), side(c.get("side")), price(c.get("price")), shares(c.get("size"))) {
-                        out.push(WsEvent::PriceChange { asset: a, side: sd, price: p, size: sz, ts });
+                    if let (Some(a), Some(sd), Some(p), Some(sz)) = (
+                        c.get("asset_id").and_then(s),
+                        side(c.get("side")),
+                        price(c.get("price")),
+                        shares(c.get("size")),
+                    ) {
+                        out.push(WsEvent::PriceChange {
+                            asset: a,
+                            side: sd,
+                            price: p,
+                            size: sz,
+                            ts,
+                        });
                     }
                 }
-            } else if let (Some(a), Some(changes)) = (asset, obj.get("changes").and_then(Value::as_array)) {
+            } else if let (Some(a), Some(changes)) =
+                (asset, obj.get("changes").and_then(Value::as_array))
+            {
                 for c in changes {
-                    if let (Some(sd), Some(p), Some(sz)) = (side(c.get("side")), price(c.get("price")), shares(c.get("size"))) {
-                        out.push(WsEvent::PriceChange { asset: a.clone(), side: sd, price: p, size: sz, ts });
+                    if let (Some(sd), Some(p), Some(sz)) = (
+                        side(c.get("side")),
+                        price(c.get("price")),
+                        shares(c.get("size")),
+                    ) {
+                        out.push(WsEvent::PriceChange {
+                            asset: a.clone(),
+                            side: sd,
+                            price: p,
+                            size: sz,
+                            ts,
+                        });
                     }
                 }
             }
@@ -96,8 +160,16 @@ fn parse_one(obj: &Value, out: &mut Vec<WsEvent>) {
             }
         }
         "last_trade_price" => {
-            if let (Some(a), Some(p), Some(sz)) = (asset, price(obj.get("price")), shares(obj.get("size"))) {
-                out.push(WsEvent::LastTrade { asset: a, price: p, size: sz, side: side(obj.get("side")), ts });
+            if let (Some(a), Some(p), Some(sz)) =
+                (asset, price(obj.get("price")), shares(obj.get("size")))
+            {
+                out.push(WsEvent::LastTrade {
+                    asset: a,
+                    price: p,
+                    size: sz,
+                    side: side(obj.get("side")),
+                    ts,
+                });
             }
         }
         _ => out.push(WsEvent::Other),
@@ -149,9 +221,24 @@ impl LocalBook {
         }
     }
 
-    pub fn apply_snapshot(&mut self, bids: &[(Price, Shares)], asks: &[(Price, Shares)], ts: Option<DateTime<Utc>>, hash: Option<String>, now: DateTime<Utc>) {
-        self.bids = bids.iter().filter(|(_, s)| s.micros() > 0).map(|(p, s)| (p.micros(), s.micros())).collect();
-        self.asks = asks.iter().filter(|(_, s)| s.micros() > 0).map(|(p, s)| (p.micros(), s.micros())).collect();
+    pub fn apply_snapshot(
+        &mut self,
+        bids: &[(Price, Shares)],
+        asks: &[(Price, Shares)],
+        ts: Option<DateTime<Utc>>,
+        hash: Option<String>,
+        now: DateTime<Utc>,
+    ) {
+        self.bids = bids
+            .iter()
+            .filter(|(_, s)| s.micros() > 0)
+            .map(|(p, s)| (p.micros(), s.micros()))
+            .collect();
+        self.asks = asks
+            .iter()
+            .filter(|(_, s)| s.micros() > 0)
+            .map(|(p, s)| (p.micros(), s.micros()))
+            .collect();
         self.exchange_ts = ts;
         self.hash = hash;
         self.received_at = now;
@@ -159,7 +246,14 @@ impl LocalBook {
     }
 
     /// Apply a level update; size 0 removes the level. `BUY` = bid side.
-    pub fn apply_change(&mut self, side: Side, price: Price, size: Shares, ts: Option<DateTime<Utc>>, now: DateTime<Utc>) {
+    pub fn apply_change(
+        &mut self,
+        side: Side,
+        price: Price,
+        size: Shares,
+        ts: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) {
         let book = match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
@@ -175,7 +269,10 @@ impl LocalBook {
 
     /// Top-`depth` snapshot for the engine.
     pub fn snapshot(&self, depth: usize) -> OrderBook {
-        let lvl = |(p, s): (&u32, &i64)| BookLevel { price: Price::saturating_from_micros(*p), size: Shares::from_micros(*s) };
+        let lvl = |(p, s): (&u32, &i64)| BookLevel {
+            price: Price::saturating_from_micros(*p),
+            size: Shares::from_micros(*s),
+        };
         OrderBook {
             token: self.token.clone(),
             bids: self.bids.iter().rev().take(depth).map(lvl).collect(),
@@ -211,7 +308,12 @@ pub struct MarketStreamConfig {
 
 impl Default for MarketStreamConfig {
     fn default() -> Self {
-        Self { url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(), ping_interval: Duration::from_secs(10), book_depth: 10, max_reconnect_wait: Duration::from_secs(300) }
+        Self {
+            url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(),
+            ping_interval: Duration::from_secs(10),
+            book_depth: 10,
+            max_reconnect_wait: Duration::from_secs(300),
+        }
     }
 }
 
@@ -228,7 +330,14 @@ pub struct MarketStream {
 impl MarketStream {
     pub fn new(cfg: MarketStreamConfig, gate: Arc<ProviderGate>, clock: Arc<dyn Clock>) -> Self {
         let (status_tx, _) = watch::channel(StreamStatus::default());
-        Self { cfg, gate, clock, books: HashMap::new(), status: StreamStatus::default(), status_tx }
+        Self {
+            cfg,
+            gate,
+            clock,
+            books: HashMap::new(),
+            status: StreamStatus::default(),
+            status_tx,
+        }
     }
 
     pub fn status(&self) -> watch::Receiver<StreamStatus> {
@@ -245,16 +354,31 @@ impl MarketStream {
         let mut trades = Vec::new();
         for e in events {
             match e {
-                WsEvent::Book { asset, bids, asks, ts, hash } => {
+                WsEvent::Book {
+                    asset,
+                    bids,
+                    asks,
+                    ts,
+                    hash,
+                } => {
                     let token = match TokenId::new(asset.clone()) {
                         Ok(t) => t,
                         Err(_) => continue,
                     };
-                    let b = self.books.entry(asset.clone()).or_insert_with(|| LocalBook::new(token, now));
+                    let b = self
+                        .books
+                        .entry(asset.clone())
+                        .or_insert_with(|| LocalBook::new(token, now));
                     b.apply_snapshot(&bids, &asks, ts, hash, now);
                     touched.push(asset);
                 }
-                WsEvent::PriceChange { asset, side, price, size, ts } => {
+                WsEvent::PriceChange {
+                    asset,
+                    side,
+                    price,
+                    size,
+                    ts,
+                } => {
                     if let Some(b) = self.books.get_mut(&asset)
                         && b.valid
                     {
@@ -268,9 +392,21 @@ impl MarketStream {
                         touched.push(asset);
                     }
                 }
-                WsEvent::LastTrade { asset, price, size, side, ts } => {
+                WsEvent::LastTrade {
+                    asset,
+                    price,
+                    size,
+                    side,
+                    ts,
+                } => {
                     if let Ok(token) = TokenId::new(asset) {
-                        trades.push(TradePrint { token, price, size, aggressor: side, ts: ts.unwrap_or(now) });
+                        trades.push(TradePrint {
+                            token,
+                            price,
+                            size,
+                            aggressor: side,
+                            ts: ts.unwrap_or(now),
+                        });
                     }
                 }
                 WsEvent::Pong | WsEvent::Other => {}
@@ -280,15 +416,25 @@ impl MarketStream {
         touched.dedup();
         for a in touched {
             if let Some(b) = self.books.get(&a) {
-                let ev = WeatherMachineEvent::OrderBookUpdate(OrderBookEvent { book: b.snapshot(self.cfg.book_depth) });
-                if out.send(EventEnvelope::new(now, EventSource::Live, ev)).await.is_err() {
+                let ev = WeatherMachineEvent::OrderBookUpdate(OrderBookEvent {
+                    book: b.snapshot(self.cfg.book_depth),
+                });
+                if out
+                    .send(EventEnvelope::new(now, EventSource::Live, ev))
+                    .await
+                    .is_err()
+                {
                     return false;
                 }
             }
         }
         for t in trades {
             let ev = WeatherMachineEvent::MarketTrade(MarketTradeEvent { trade: t });
-            if out.send(EventEnvelope::new(now, EventSource::Live, ev)).await.is_err() {
+            if out
+                .send(EventEnvelope::new(now, EventSource::Live, ev))
+                .await
+                .is_err()
+            {
                 return false;
             }
         }
@@ -300,7 +446,12 @@ impl MarketStream {
     }
 
     /// Run until shutdown. `assets` may change at runtime (re-subscribe).
-    pub async fn run(mut self, mut assets: watch::Receiver<Vec<TokenId>>, out: mpsc::Sender<EventEnvelope>, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run(
+        mut self,
+        mut assets: watch::Receiver<Vec<TokenId>>,
+        out: mpsc::Sender<EventEnvelope>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
         loop {
             if *shutdown.borrow() {
                 break;
@@ -322,7 +473,11 @@ impl MarketStream {
                     }
                 }
             };
-            let conn = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(self.cfg.url.as_str())).await;
+            let conn = tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio_tungstenite::connect_async(self.cfg.url.as_str()),
+            )
+            .await;
             let mut ws = match conn {
                 Ok(Ok((ws, _))) => {
                     permit.complete(RequestOutcome::Success { status: 101 });
@@ -341,7 +496,11 @@ impl MarketStream {
                     continue;
                 }
             };
-            if ws.send(Message::text(Self::subscription(&current))).await.is_err() {
+            if ws
+                .send(Message::text(Self::subscription(&current)))
+                .await
+                .is_err()
+            {
                 continue;
             }
             self.status.connected = true;
@@ -397,17 +556,39 @@ mod tests {
     fn parses_book_and_price_changes_both_formats() {
         let book = r#"[{"event_type":"book","asset_id":"1018","market":"0xc","bids":[{"price":"0.93","size":"100"}],"asks":[{"price":"0.95","size":"50"}],"timestamp":"1790427300000","hash":"0x1"}]"#;
         let ev = parse_ws_message(book).unwrap();
-        assert!(matches!(&ev[0], WsEvent::Book { asset, bids, .. } if asset == "1018" && bids.len() == 1));
+        assert!(
+            matches!(&ev[0], WsEvent::Book { asset, bids, .. } if asset == "1018" && bids.len() == 1)
+        );
         let new_fmt = r#"{"event_type":"price_change","market":"0xc","price_changes":[{"asset_id":"1018","price":"0.94","size":"25","side":"BUY","hash":"h","best_bid":"0.94","best_ask":"0.95"}],"timestamp":"1790427301000"}"#;
         let ev = parse_ws_message(new_fmt).unwrap();
-        assert_eq!(ev, vec![WsEvent::PriceChange { asset: "1018".into(), side: Side::Buy, price: Price::parse("0.94").unwrap(), size: Shares::from_whole(25), ts: crate::clob::parse_epoch(&serde_json::json!("1790427301000")) }]);
+        assert_eq!(
+            ev,
+            vec![WsEvent::PriceChange {
+                asset: "1018".into(),
+                side: Side::Buy,
+                price: Price::parse("0.94").unwrap(),
+                size: Shares::from_whole(25),
+                ts: crate::clob::parse_epoch(&serde_json::json!("1790427301000"))
+            }]
+        );
         let legacy = r#"{"event_type":"price_change","asset_id":"1018","changes":[{"price":"0.95","side":"SELL","size":"0"}]}"#;
         let ev = parse_ws_message(legacy).unwrap();
-        assert!(matches!(&ev[0], WsEvent::PriceChange { side: Side::Sell, size, .. } if size.micros() == 0));
+        assert!(
+            matches!(&ev[0], WsEvent::PriceChange { side: Side::Sell, size, .. } if size.micros() == 0)
+        );
         let tick = r#"{"event_type":"tick_size_change","asset_id":"1018","old_tick_size":"0.01","new_tick_size":"0.001"}"#;
-        assert_eq!(parse_ws_message(tick).unwrap(), vec![WsEvent::TickSize { asset: "1018".into(), tick: Price::parse("0.001").unwrap() }]);
+        assert_eq!(
+            parse_ws_message(tick).unwrap(),
+            vec![WsEvent::TickSize {
+                asset: "1018".into(),
+                tick: Price::parse("0.001").unwrap()
+            }]
+        );
         let trade = r#"{"event_type":"last_trade_price","asset_id":"1018","price":"0.95","side":"BUY","size":"10"}"#;
-        assert!(matches!(parse_ws_message(trade).unwrap()[0], WsEvent::LastTrade { .. }));
+        assert!(matches!(
+            parse_ws_message(trade).unwrap()[0],
+            WsEvent::LastTrade { .. }
+        ));
         assert_eq!(parse_ws_message("PONG").unwrap(), vec![WsEvent::Pong]);
         assert!(parse_ws_message("{garbage").is_err());
     }
@@ -416,10 +597,34 @@ mod tests {
     fn local_book_applies_deltas() {
         let now = Utc::now();
         let mut b = LocalBook::new(TokenId::new("1").unwrap(), now);
-        b.apply_snapshot(&[(Price::parse("0.93").unwrap(), Shares::from_whole(100))], &[(Price::parse("0.95").unwrap(), Shares::from_whole(50))], None, None, now);
-        b.apply_change(Side::Buy, Price::parse("0.94").unwrap(), Shares::from_whole(10), None, now);
-        b.apply_change(Side::Sell, Price::parse("0.95").unwrap(), Shares::ZERO, None, now);
-        b.apply_change(Side::Sell, Price::parse("0.96").unwrap(), Shares::from_whole(5), None, now);
+        b.apply_snapshot(
+            &[(Price::parse("0.93").unwrap(), Shares::from_whole(100))],
+            &[(Price::parse("0.95").unwrap(), Shares::from_whole(50))],
+            None,
+            None,
+            now,
+        );
+        b.apply_change(
+            Side::Buy,
+            Price::parse("0.94").unwrap(),
+            Shares::from_whole(10),
+            None,
+            now,
+        );
+        b.apply_change(
+            Side::Sell,
+            Price::parse("0.95").unwrap(),
+            Shares::ZERO,
+            None,
+            now,
+        );
+        b.apply_change(
+            Side::Sell,
+            Price::parse("0.96").unwrap(),
+            Shares::from_whole(5),
+            None,
+            now,
+        );
         let s = b.snapshot(5);
         assert_eq!(s.best_bid().unwrap().price, Price::parse("0.94").unwrap());
         assert_eq!(s.best_ask().unwrap().price, Price::parse("0.96").unwrap());

@@ -29,7 +29,12 @@ pub fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
     if let Ok(t) = DateTime::parse_from_rfc3339(s) {
         return Some(t.with_timezone(&Utc));
     }
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M"] {
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+    ] {
         if let Ok(n) = NaiveDateTime::parse_from_str(s, fmt) {
             return Some(Utc.from_utc_datetime(&n));
         }
@@ -45,8 +50,16 @@ fn report_type_of(metar: Option<&MetarReport>, hint: Option<&str>) -> ReportType
     }
 }
 
-fn malformed(detail: String, raw: wm_core::ingest::RawPayloadRecord, request: wm_core::ingest::ProviderRequestRecord) -> SourceError {
-    SourceError::Malformed { detail, raw: Box::new(raw), request: Box::new(request) }
+fn malformed(
+    detail: String,
+    raw: wm_core::ingest::RawPayloadRecord,
+    request: wm_core::ingest::ProviderRequestRecord,
+) -> SourceError {
+    SourceError::Malformed {
+        detail,
+        raw: Box::new(raw),
+        request: Box::new(request),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +71,9 @@ pub struct AwcMetarSource {
     fetcher: Arc<HttpFetcher>,
     base_url: String,
     hours: u32,
+    backfill_hours: u32,
+    /// Last successful poll per station: drives the adaptive backfill window.
+    last_success: std::sync::Mutex<std::collections::HashMap<StationId, DateTime<Utc>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,21 +90,77 @@ struct AwcMetar {
 impl AwcMetarSource {
     pub const DEFAULT_BASE: &'static str = "https://aviationweather.gov";
 
-    /// `hours` of history requested per poll (≥ 2 recovers reports missed during short outages).
+    /// Longest history window requested (cold start / after an outage). A local
+    /// calendar day never spans more than 25 hours, so 26 covers it entirely.
+    pub const MAX_BACKFILL_HOURS: u32 = 26;
+
+    /// `hours` of history requested per routine poll (≥ 2 recovers reports
+    /// missed during short outages). The first poll of each station and the
+    /// first poll after a gap request enough history to rebuild the whole local
+    /// day (see [`Self::hours_for`]), because a day with a hole is never traded.
     pub fn new(fetcher: Arc<HttpFetcher>, base_url: impl Into<String>, hours: u32) -> Self {
-        Self { fetcher, base_url: base_url.into().trim_end_matches('/').to_owned(), hours: hours.clamp(1, 24) }
+        Self {
+            fetcher,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            hours: hours.clamp(1, Self::MAX_BACKFILL_HOURS),
+            backfill_hours: Self::MAX_BACKFILL_HOURS,
+            last_success: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
+    /// Override the cold-start/outage backfill window (hours, ≥ routine hours).
+    pub fn with_backfill_hours(mut self, hours: u32) -> Self {
+        self.backfill_hours = hours.clamp(self.hours, Self::MAX_BACKFILL_HOURS);
+        self
+    }
+
+    /// Routine endpoint.
     pub fn endpoint(&self, station: &StationId) -> String {
-        format!("/api/data/metar?ids={station}&format=json&hours={}", self.hours)
+        Self::endpoint_hours(station, self.hours)
+    }
+
+    pub fn endpoint_hours(station: &StationId, hours: u32) -> String {
+        format!("/api/data/metar?ids={station}&format=json&hours={hours}")
+    }
+
+    /// History window for the next poll: the full backfill on the first poll,
+    /// otherwise enough to cover the time since the last success (+1 h margin).
+    pub fn hours_for(&self, station: &StationId, now: DateTime<Utc>) -> u32 {
+        let last = self
+            .last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(station)
+            .copied();
+        match last {
+            None => self.backfill_hours,
+            Some(t) => {
+                let gap_hours = u32::try_from(((now - t).num_minutes().max(0) + 59) / 60)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(1);
+                gap_hours.clamp(self.hours, self.backfill_hours)
+            }
+        }
+    }
+
+    fn note_success(&self, station: &StationId, at: DateTime<Utc>) {
+        self.last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(station.clone(), at);
     }
 
     /// Parse an AWC JSON body. Public for fixture tests.
-    pub fn parse_body(body: &[u8], station: &StationId, fetched_at: DateTime<Utc>) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
+    pub fn parse_body(
+        body: &[u8],
+        station: &StationId,
+        fetched_at: DateTime<Utc>,
+    ) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
         if body.iter().all(u8::is_ascii_whitespace) {
             return Ok((Vec::new(), Vec::new()));
         }
-        let entries: Vec<AwcMetar> = serde_json::from_slice(body).map_err(|e| format!("invalid AWC JSON: {e}"))?;
+        let entries: Vec<AwcMetar> =
+            serde_json::from_slice(body).map_err(|e| format!("invalid AWC JSON: {e}"))?;
         let mut reports = Vec::new();
         let mut warnings = Vec::new();
         for (i, e) in entries.into_iter().enumerate() {
@@ -98,12 +170,17 @@ impl AwcMetarSource {
             };
             let parsed = metar::parse_metar(&raw);
             let icao = e.icao_id.as_deref().map(str::to_ascii_uppercase);
-            let st = icao.clone().or_else(|| parsed.as_ref().ok().map(|m| m.station.clone()));
+            let st = icao
+                .clone()
+                .or_else(|| parsed.as_ref().ok().map(|m| m.station.clone()));
             if st.as_deref() != Some(station.as_str()) {
                 warnings.push(format!("entry {i}: station {st:?} != {station}"));
                 continue;
             }
-            let reference = e.obs_time.and_then(|t| Utc.timestamp_opt(t, 0).single()).unwrap_or(fetched_at);
+            let reference = e
+                .obs_time
+                .and_then(|t| Utc.timestamp_opt(t, 0).single())
+                .unwrap_or(fetched_at);
             let observed_at = match parsed.as_ref().ok().and_then(|m| m.observed_at(reference)) {
                 Some(t) => t,
                 None => match e.obs_time.and_then(|t| Utc.timestamp_opt(t, 0).single()) {
@@ -123,7 +200,10 @@ impl AwcMetarSource {
                 observed_at,
                 report_type: report_type_of(metar.as_ref(), e.metar_type.as_deref()),
                 raw_text: raw,
-                provider_temp_tenths: e.temp.filter(|t| t.is_finite()).map(|t| (t * 10.0).round() as i32),
+                provider_temp_tenths: e
+                    .temp
+                    .filter(|t| t.is_finite())
+                    .map(|t| (t * 10.0).round() as i32),
                 provider_receipt_at: e.receipt_time.as_deref().and_then(parse_timestamp),
                 metar,
             });
@@ -141,17 +221,39 @@ impl ObservationSource for AwcMetarSource {
         self.fetcher.gate()
     }
 
-    fn fetch<'a>(&'a self, station: &'a StationId, max_gate_wait: Duration) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
+    fn fetch<'a>(
+        &'a self,
+        station: &'a StationId,
+        max_gate_wait: Duration,
+    ) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
         Box::pin(async move {
-            let endpoint = self.endpoint(station);
+            let hours = self.hours_for(station, self.gate().clock().now());
+            let endpoint = Self::endpoint_hours(station, hours);
             let req = FetchRequest::get(format!("{}{}", self.base_url, endpoint), endpoint.clone())
                 .station(station.clone())
                 .accept("application/json")
                 .max_gate_wait(max_gate_wait);
             let resp = self.fetcher.get(&req).await?;
-            let raw = raw_record(self.provider(), station, &endpoint, resp.fetched_at, resp.status, resp.content_type.clone(), &resp.body);
+            let raw = raw_record(
+                self.provider(),
+                station,
+                &endpoint,
+                resp.fetched_at,
+                resp.status,
+                resp.content_type.clone(),
+                &resp.body,
+            );
             match Self::parse_body(&resp.body, station, resp.fetched_at) {
-                Ok((reports, warnings)) => Ok(SourceFetch { reports, raw, request: resp.record, cache: resp.cache, warnings }),
+                Ok((reports, warnings)) => {
+                    self.note_success(station, resp.fetched_at);
+                    Ok(SourceFetch {
+                        reports,
+                        raw,
+                        request: resp.record,
+                        cache: resp.cache,
+                        warnings,
+                    })
+                }
                 Err(detail) => Err(malformed(detail, raw, resp.record)),
             }
         })
@@ -172,7 +274,10 @@ impl TgftpMetarSource {
     pub const DEFAULT_BASE: &'static str = "https://tgftp.nws.noaa.gov";
 
     pub fn new(fetcher: Arc<HttpFetcher>, base_url: impl Into<String>) -> Self {
-        Self { fetcher, base_url: base_url.into().trim_end_matches('/').to_owned() }
+        Self {
+            fetcher,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+        }
     }
 
     pub fn endpoint(station: &StationId) -> String {
@@ -184,7 +289,8 @@ impl TgftpMetarSource {
         let text = std::str::from_utf8(body).map_err(|_| "station file is not UTF-8".to_owned())?;
         let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
         let stamp = lines.next().ok_or("empty station file")?;
-        let header_time = parse_timestamp(stamp).ok_or_else(|| format!("bad timestamp line '{stamp}'"))?;
+        let header_time =
+            parse_timestamp(stamp).ok_or_else(|| format!("bad timestamp line '{stamp}'"))?;
         let raw = lines.collect::<Vec<_>>().join(" ");
         if raw.is_empty() {
             return Err("missing report line".into());
@@ -193,7 +299,9 @@ impl TgftpMetarSource {
         if m.station != station.as_str() {
             return Err(format!("station mismatch: {} != {station}", m.station));
         }
-        let observed_at = m.observed_at(header_time).ok_or("unresolvable observation time")?;
+        let observed_at = m
+            .observed_at(header_time)
+            .ok_or("unresolvable observation time")?;
         Ok(vec![ParsedReport {
             station: station.clone(),
             observed_at,
@@ -215,16 +323,34 @@ impl ObservationSource for TgftpMetarSource {
         self.fetcher.gate()
     }
 
-    fn fetch<'a>(&'a self, station: &'a StationId, max_gate_wait: Duration) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
+    fn fetch<'a>(
+        &'a self,
+        station: &'a StationId,
+        max_gate_wait: Duration,
+    ) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
         Box::pin(async move {
             let endpoint = Self::endpoint(station);
             let req = FetchRequest::get(format!("{}{}", self.base_url, endpoint), endpoint.clone())
                 .station(station.clone())
                 .max_gate_wait(max_gate_wait);
             let resp = self.fetcher.get(&req).await?;
-            let raw = raw_record(self.provider(), station, &endpoint, resp.fetched_at, resp.status, resp.content_type.clone(), &resp.body);
+            let raw = raw_record(
+                self.provider(),
+                station,
+                &endpoint,
+                resp.fetched_at,
+                resp.status,
+                resp.content_type.clone(),
+                &resp.body,
+            );
             match Self::parse_body(&resp.body, station) {
-                Ok(reports) => Ok(SourceFetch { reports, raw, request: resp.record, cache: resp.cache, warnings: Vec::new() }),
+                Ok(reports) => Ok(SourceFetch {
+                    reports,
+                    raw,
+                    request: resp.record,
+                    cache: resp.cache,
+                    warnings: Vec::new(),
+                }),
                 Err(detail) => Err(malformed(detail, raw, resp.record)),
             }
         })
@@ -271,15 +397,23 @@ impl NwsApiSource {
     pub const DEFAULT_BASE: &'static str = "https://api.weather.gov";
 
     pub fn new(fetcher: Arc<HttpFetcher>, base_url: impl Into<String>, limit: u32) -> Self {
-        Self { fetcher, base_url: base_url.into().trim_end_matches('/').to_owned(), limit: limit.clamp(1, 50) }
+        Self {
+            fetcher,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            limit: limit.clamp(1, 50),
+        }
     }
 
     pub fn endpoint(&self, station: &StationId) -> String {
         format!("/stations/{station}/observations?limit={}", self.limit)
     }
 
-    pub fn parse_body(body: &[u8], station: &StationId) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
-        let col: NwsCollection = serde_json::from_slice(body).map_err(|e| format!("invalid NWS GeoJSON: {e}"))?;
+    pub fn parse_body(
+        body: &[u8],
+        station: &StationId,
+    ) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
+        let col: NwsCollection =
+            serde_json::from_slice(body).map_err(|e| format!("invalid NWS GeoJSON: {e}"))?;
         let mut out = Vec::new();
         let mut warnings = Vec::new();
         for (i, f) in col.features.into_iter().enumerate() {
@@ -293,7 +427,10 @@ impl NwsApiSource {
                 continue;
             };
             let parsed = metar::parse_metar(&raw).ok();
-            let observed_at = parsed.as_ref().and_then(|m| m.observed_at(ts)).unwrap_or(ts);
+            let observed_at = parsed
+                .as_ref()
+                .and_then(|m| m.observed_at(ts))
+                .unwrap_or(ts);
             let celsius = p.temperature.and_then(|t| {
                 let is_c = t.unit_code.as_deref().is_none_or(|u| u.ends_with("degC"));
                 t.value.filter(|v| v.is_finite() && is_c)
@@ -321,7 +458,11 @@ impl ObservationSource for NwsApiSource {
         self.fetcher.gate()
     }
 
-    fn fetch<'a>(&'a self, station: &'a StationId, max_gate_wait: Duration) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
+    fn fetch<'a>(
+        &'a self,
+        station: &'a StationId,
+        max_gate_wait: Duration,
+    ) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
         Box::pin(async move {
             let endpoint = self.endpoint(station);
             let req = FetchRequest::get(format!("{}{}", self.base_url, endpoint), endpoint.clone())
@@ -329,9 +470,23 @@ impl ObservationSource for NwsApiSource {
                 .accept("application/geo+json")
                 .max_gate_wait(max_gate_wait);
             let resp = self.fetcher.get(&req).await?;
-            let raw = raw_record(self.provider(), station, &endpoint, resp.fetched_at, resp.status, resp.content_type.clone(), &resp.body);
+            let raw = raw_record(
+                self.provider(),
+                station,
+                &endpoint,
+                resp.fetched_at,
+                resp.status,
+                resp.content_type.clone(),
+                &resp.body,
+            );
             match Self::parse_body(&resp.body, station) {
-                Ok((reports, warnings)) => Ok(SourceFetch { reports, raw, request: resp.record, cache: resp.cache, warnings }),
+                Ok((reports, warnings)) => Ok(SourceFetch {
+                    reports,
+                    raw,
+                    request: resp.record,
+                    cache: resp.cache,
+                    warnings,
+                }),
                 Err(detail) => Err(malformed(detail, raw, resp.record)),
             }
         })
@@ -363,10 +518,61 @@ mod tests {
     ]"#;
 
     #[test]
+    fn awc_backfills_the_whole_day_on_cold_start_and_after_gaps() {
+        let now = utc("2026-09-26T12:00:00Z");
+        let clock = Arc::new(wm_core::time::ManualClock::new(now));
+        let gate = wm_net::ProviderGate::new(
+            ProviderId::awc(),
+            wm_net::RateLimitPolicy::nws_conservative(),
+            clock,
+            1,
+        );
+        let fetcher = Arc::new(
+            HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap(),
+        );
+        let src = AwcMetarSource::new(fetcher, "http://127.0.0.1:9", 3);
+        assert_eq!(
+            src.hours_for(&eham(), now),
+            AwcMetarSource::MAX_BACKFILL_HOURS,
+            "cold start rebuilds the local day"
+        );
+        src.note_success(&eham(), now);
+        assert_eq!(
+            src.hours_for(&eham(), now + chrono::Duration::minutes(30)),
+            3
+        );
+        assert_eq!(
+            src.hours_for(&eham(), now + chrono::Duration::hours(5)),
+            6,
+            "outage gap + 1 h margin"
+        );
+        assert_eq!(
+            src.hours_for(&eham(), now + chrono::Duration::hours(40)),
+            AwcMetarSource::MAX_BACKFILL_HOURS
+        );
+        assert!(src.endpoint(&eham()).ends_with("hours=3"));
+        let other = StationId::new("EGLL").unwrap();
+        assert_eq!(
+            src.hours_for(&other, now),
+            AwcMetarSource::MAX_BACKFILL_HOURS,
+            "per-station state"
+        );
+    }
+
+    #[test]
     fn awc_fixture_parses() {
-        let (reports, warnings) = AwcMetarSource::parse_body(AWC_FIXTURE.as_bytes(), &eham(), utc("2026-09-26T12:58:10Z")).unwrap();
+        let (reports, warnings) = AwcMetarSource::parse_body(
+            AWC_FIXTURE.as_bytes(),
+            &eham(),
+            utc("2026-09-26T12:58:10Z"),
+        )
+        .unwrap();
         assert_eq!(reports.len(), 2);
-        assert_eq!(warnings.len(), 1, "entry without rawOb is skipped with a warning");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "entry without rawOb is skipped with a warning"
+        );
         let r = &reports[0];
         assert_eq!(r.observed_at, utc("2026-09-26T12:55:00Z"));
         assert_eq!(r.report_type, ReportType::Metar);
@@ -396,7 +602,10 @@ mod tests {
         assert_eq!(reports[0].observed_at, utc("2026-09-26T12:55:00Z"));
         assert!(TgftpMetarSource::parse_body(b"garbage", &eham()).is_err());
         assert!(TgftpMetarSource::parse_body(b"2026/09/26 12:55\n", &eham()).is_err());
-        assert!(TgftpMetarSource::parse_body(b"2026/09/26 12:55\nEGLL 261250Z 19/11 Q1015\n", &eham()).is_err());
+        assert!(
+            TgftpMetarSource::parse_body(b"2026/09/26 12:55\nEGLL 261250Z 19/11 Q1015\n", &eham())
+                .is_err()
+        );
     }
 
     #[test]
@@ -414,9 +623,18 @@ mod tests {
 
     #[test]
     fn timestamps() {
-        assert_eq!(parse_timestamp("2026-09-26 12:57:41"), Some(utc("2026-09-26T12:57:41Z")));
-        assert_eq!(parse_timestamp("2026-09-26T12:57:41.5Z").map(|t| t.timestamp()), Some(utc("2026-09-26T12:57:41Z").timestamp()));
-        assert_eq!(parse_timestamp("2026/09/26 12:55"), Some(utc("2026-09-26T12:55:00Z")));
+        assert_eq!(
+            parse_timestamp("2026-09-26 12:57:41"),
+            Some(utc("2026-09-26T12:57:41Z"))
+        );
+        assert_eq!(
+            parse_timestamp("2026-09-26T12:57:41.5Z").map(|t| t.timestamp()),
+            Some(utc("2026-09-26T12:57:41Z").timestamp())
+        );
+        assert_eq!(
+            parse_timestamp("2026/09/26 12:55"),
+            Some(utc("2026-09-26T12:55:00Z"))
+        );
         assert_eq!(parse_timestamp("nope"), None);
     }
 }

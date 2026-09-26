@@ -5,13 +5,18 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use wm_core::health::ProviderHealthState;
-use wm_core::ids::{ClientOrderId, DecisionId, EventSlug, LocationId, RunId, StationId, StrategyId, TokenId};
+use wm_core::ids::{
+    ClientOrderId, DecisionId, EventSlug, LocationId, RunId, StationId, StrategyId, TokenId,
+};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
 use wm_core::portfolio::{InstrumentRef, PositionBook};
 use wm_core::synthetic::{synthetic_book, synthetic_temperature_market};
 use wm_core::trading::{Fill, IntentKind, Liquidity, RunMode, TimeInForce, TradeIntent};
 use wm_core::units::{Price, Probability, Shares, Usd};
-use wm_risk::{CheckId, OpenOrderView, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus};
+use wm_risk::{
+    CheckId, OpenOrderView, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs,
+    WeatherStatus,
+};
 
 fn utc(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -24,14 +29,35 @@ fn loc() -> LocationId {
 }
 
 fn market_on(day: u32) -> DailyTemperatureMarket {
-    synthetic_temperature_market(&loc(), &StationId::new("EHAM").unwrap(), NaiveDate::from_ymd_opt(2026, 7, day).unwrap(), chrono_tz::Europe::Amsterdam, 13, 24, utc(NOW))
+    synthetic_temperature_market(
+        &loc(),
+        &StationId::new("EHAM").unwrap(),
+        NaiveDate::from_ymd_opt(2026, 7, day).unwrap(),
+        chrono_tz::Europe::Amsterdam,
+        13,
+        24,
+        utc(NOW),
+    )
 }
 
 fn weather(health: ProviderHealthState, age_min: i64) -> WeatherStatus {
-    WeatherStatus { station: StationId::new("EHAM").unwrap(), last_observation_at: Some(utc(NOW) - Duration::minutes(age_min)), health, last_correction_at: None }
+    WeatherStatus {
+        station: StationId::new("EHAM").unwrap(),
+        last_observation_at: Some(utc(NOW) - Duration::minutes(age_min)),
+        health,
+        last_correction_at: None,
+        max_gap_minutes: Some(30),
+    }
 }
 
-fn intent(m: &DailyTemperatureMarket, v: i32, side: OutcomeSide, price: &str, shares: i64, decision: u64) -> TradeIntent {
+fn intent(
+    m: &DailyTemperatureMarket,
+    v: i32,
+    side: OutcomeSide,
+    price: &str,
+    shares: i64,
+    decision: u64,
+) -> TradeIntent {
     let o = m.outcome_for_value(v).unwrap();
     TradeIntent {
         decision_id: DecisionId(decision),
@@ -75,10 +101,22 @@ impl World {
         let market = market_on(1);
         let mut markets = HashMap::new();
         markets.insert(market.event_slug.clone(), market.clone());
-        Self { market, markets, positions: PositionBook::new(), orders: vec![], strategies: HashMap::new() }
+        Self {
+            market,
+            markets,
+            positions: PositionBook::new(),
+            orders: vec![],
+            strategies: HashMap::new(),
+        }
     }
 
-    fn inputs<'a>(&'a self, book: Option<&'a OrderBook>, w: Option<&'a WeatherStatus>, mode: RunMode, kill: Option<&'a str>) -> RiskInputs<'a> {
+    fn inputs<'a>(
+        &'a self,
+        book: Option<&'a OrderBook>,
+        w: Option<&'a WeatherStatus>,
+        mode: RunMode,
+        kill: Option<&'a str>,
+    ) -> RiskInputs<'a> {
         RiskInputs {
             now: utc(NOW),
             mode,
@@ -89,7 +127,12 @@ impl World {
             weather: w,
             market: &self.market,
             book,
-            portfolio: PortfolioView { positions: &self.positions, open_orders: &self.orders, markets: &self.markets, position_strategy: &self.strategies },
+            portfolio: PortfolioView {
+                positions: &self.positions,
+                open_orders: &self.orders,
+                markets: &self.markets,
+                position_strategy: &self.strategies,
+            },
         }
     }
 }
@@ -125,27 +168,157 @@ fn each_gate_rejects() {
     let base = intent(&w.market, 18, OutcomeSide::Yes, "0.95", 10, 1);
     let book = book_for(&base.token, "0.94", "0.95");
     let healthy = weather(ProviderHealthState::Healthy, 5);
-    type Case<'a> = (Box<dyn Fn(&mut TradeIntent)>, Option<WeatherStatus>, Option<OrderBook>, RunMode, Option<&'a str>, CheckId);
+    type Case<'a> = (
+        Box<dyn Fn(&mut TradeIntent)>,
+        Option<WeatherStatus>,
+        Option<OrderBook>,
+        RunMode,
+        Option<&'a str>,
+        CheckId,
+    );
     let cases: Vec<Case<'_>> = vec![
-        (Box::new(|_| {}), Some(healthy.clone()), Some(book.clone()), RunMode::Paper, Some("operator"), CheckId::KillSwitch),
-        (Box::new(|_| {}), Some(healthy.clone()), Some(book.clone()), RunMode::Live, None, CheckId::Mode),
-        (Box::new(|i| i.research_only = true), Some(healthy.clone()), Some(book.clone()), RunMode::Paper, None, CheckId::ResearchOnly),
-        (Box::new(|_| {}), Some(weather(ProviderHealthState::Throttled, 5)), Some(book.clone()), RunMode::Paper, None, CheckId::WeatherHealth),
-        (Box::new(|_| {}), Some(weather(ProviderHealthState::Healthy, 50)), Some(book.clone()), RunMode::Paper, None, CheckId::WeatherFreshness),
-        (Box::new(|_| {}), None, Some(book.clone()), RunMode::Paper, None, CheckId::WeatherHealth),
-        (Box::new(|_| {}), Some(healthy.clone()), None, RunMode::Paper, None, CheckId::MarketData),
-        (Box::new(|i| i.limit_price = Price::parse("0.955").unwrap()), Some(healthy.clone()), Some(book.clone()), RunMode::Paper, None, CheckId::Tick),
-        (Box::new(|i| i.limit_price = Price::parse("0.995").unwrap()), Some(healthy.clone()), Some(book_for(&base.token, "0.99", "0.995")), RunMode::Paper, None, CheckId::PriceBounds),
-        (Box::new(|_| {}), Some(healthy.clone()), Some(book_for(&base.token, "0.80", "0.95")), RunMode::Paper, None, CheckId::Spread),
-        (Box::new(|i| i.shares = Shares::from_whole(10)), Some(healthy.clone()), Some(synthetic_book(&base.token, Some("0.94"), Some("0.95"), 3, utc(NOW))), RunMode::Paper, None, CheckId::Liquidity),
-        (Box::new(|i| i.shares = Shares::from_whole(11)), Some(healthy.clone()), Some(book.clone()), RunMode::Paper, None, CheckId::PositionSize),
-        (Box::new(|i| i.shares = Shares::from_whole(2)), Some(healthy.clone()), Some(book.clone()), RunMode::Paper, None, CheckId::MinSize),
+        (
+            Box::new(|_| {}),
+            Some(healthy.clone()),
+            Some(book.clone()),
+            RunMode::Paper,
+            Some("operator"),
+            CheckId::KillSwitch,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(healthy.clone()),
+            Some(book.clone()),
+            RunMode::Live,
+            None,
+            CheckId::Mode,
+        ),
+        (
+            Box::new(|i| i.research_only = true),
+            Some(healthy.clone()),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::ResearchOnly,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(weather(ProviderHealthState::Throttled, 5)),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::WeatherHealth,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(weather(ProviderHealthState::Healthy, 50)),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::WeatherFreshness,
+        ),
+        (
+            Box::new(|_| {}),
+            None,
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::WeatherHealth,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(WeatherStatus {
+                max_gap_minutes: Some(180),
+                ..healthy.clone()
+            }),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::WeatherCoverage,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(WeatherStatus {
+                max_gap_minutes: None,
+                ..healthy.clone()
+            }),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::WeatherCoverage,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(healthy.clone()),
+            None,
+            RunMode::Paper,
+            None,
+            CheckId::MarketData,
+        ),
+        (
+            Box::new(|i| i.limit_price = Price::parse("0.955").unwrap()),
+            Some(healthy.clone()),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::Tick,
+        ),
+        (
+            Box::new(|i| i.limit_price = Price::parse("0.995").unwrap()),
+            Some(healthy.clone()),
+            Some(book_for(&base.token, "0.99", "0.995")),
+            RunMode::Paper,
+            None,
+            CheckId::PriceBounds,
+        ),
+        (
+            Box::new(|_| {}),
+            Some(healthy.clone()),
+            Some(book_for(&base.token, "0.80", "0.95")),
+            RunMode::Paper,
+            None,
+            CheckId::Spread,
+        ),
+        (
+            Box::new(|i| i.shares = Shares::from_whole(10)),
+            Some(healthy.clone()),
+            Some(synthetic_book(
+                &base.token,
+                Some("0.94"),
+                Some("0.95"),
+                3,
+                utc(NOW),
+            )),
+            RunMode::Paper,
+            None,
+            CheckId::Liquidity,
+        ),
+        (
+            Box::new(|i| i.shares = Shares::from_whole(11)),
+            Some(healthy.clone()),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::PositionSize,
+        ),
+        (
+            Box::new(|i| i.shares = Shares::from_whole(2)),
+            Some(healthy.clone()),
+            Some(book.clone()),
+            RunMode::Paper,
+            None,
+            CheckId::MinSize,
+        ),
     ];
     for (idx, (mutate, ws, b, mode, kill, expected)) in cases.into_iter().enumerate() {
         let mut i = base.clone();
         mutate(&mut i);
         let d = engine().evaluate(i, &w.inputs(b.as_ref(), ws.as_ref(), mode, kill));
-        assert!(checks(&d).contains(&expected), "case {idx}: expected {expected:?} in {:?}", checks(&d));
+        assert!(
+            checks(&d).contains(&expected),
+            "case {idx}: expected {expected:?} in {:?}",
+            checks(&d)
+        );
     }
 }
 
@@ -178,9 +351,18 @@ fn duplicates_are_rejected() {
     let book = book_for(&i.token, "0.94", "0.95");
     let ws = weather(ProviderHealthState::Healthy, 5);
     let mut e = engine();
-    assert!(e.evaluate(i.clone(), &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None)).is_approved());
+    assert!(
+        e.evaluate(
+            i.clone(),
+            &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None)
+        )
+        .is_approved()
+    );
     // Same decision replayed ⇒ rejected even without an open order.
-    let d = e.evaluate(i.clone(), &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
+    let d = e.evaluate(
+        i.clone(),
+        &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None),
+    );
     assert!(checks(&d).contains(&CheckId::Duplicate));
     // A live order on the token blocks a new decision too.
     w.orders.push(OpenOrderView {
@@ -203,8 +385,23 @@ fn duplicates_are_rejected() {
 
 fn buy_fill(w: &mut World, m: &DailyTemperatureMarket, v: i32, side: OutcomeSide, price: &str) {
     let o = m.outcome_for_value(v).unwrap();
-    let inst = InstrumentRef { token: o.token(side).clone(), condition_id: o.condition_id.clone(), event_slug: m.event_slug.clone(), outcome_side: side, bucket: o.bucket };
-    let fill = Fill { client_order_id: ClientOrderId::new("f").unwrap(), token: inst.token.clone(), side: Side::Buy, price: Price::parse(price).unwrap(), shares: Shares::from_whole(10), fee: Usd::ZERO, liquidity: Liquidity::Taker, ts: utc(NOW) };
+    let inst = InstrumentRef {
+        token: o.token(side).clone(),
+        condition_id: o.condition_id.clone(),
+        event_slug: m.event_slug.clone(),
+        outcome_side: side,
+        bucket: o.bucket,
+    };
+    let fill = Fill {
+        client_order_id: ClientOrderId::new("f").unwrap(),
+        token: inst.token.clone(),
+        side: Side::Buy,
+        price: Price::parse(price).unwrap(),
+        shares: Shares::from_whole(10),
+        fee: Usd::ZERO,
+        liquidity: Liquidity::Taker,
+        ts: utc(NOW),
+    };
     w.positions.apply_fill(&fill, &inst).unwrap();
     w.markets.insert(m.event_slug.clone(), m.clone());
 }
@@ -217,16 +414,23 @@ fn global_100_usd_limit_with_ten_dollar_positions() {
         let m = market_on(day);
         buy_fill(&mut w, &m, 18, OutcomeSide::Yes, "0.95");
     }
-    let cfg = RiskConfig { max_daily_new_exposure_usd: None, max_location_exposure_usd: None, max_strategy_exposure_usd: None, ..RiskConfig::default() };
+    let cfg = RiskConfig {
+        max_daily_new_exposure_usd: None,
+        max_location_exposure_usd: None,
+        max_strategy_exposure_usd: None,
+        ..RiskConfig::default()
+    };
     let ws = weather(ProviderHealthState::Healthy, 5);
     let i = intent(&w.market, 18, OutcomeSide::Yes, "0.95", 10, 1);
     let book = book_for(&i.token, "0.94", "0.95");
-    let d = RiskEngine::new(cfg.clone(), &RunId::deterministic(2)).evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
+    let d = RiskEngine::new(cfg.clone(), &RunId::deterministic(2))
+        .evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
     assert!(d.is_approved(), "95.00 ≤ 100: {:?}", checks(&d));
     // One more event ⇒ 104.50 > 100 ⇒ rejected.
     buy_fill(&mut w, &market_on(11), 18, OutcomeSide::Yes, "0.95");
     let i = intent(&w.market, 18, OutcomeSide::Yes, "0.95", 10, 3);
-    let d = RiskEngine::new(cfg, &RunId::deterministic(3)).evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
+    let d = RiskEngine::new(cfg, &RunId::deterministic(3))
+        .evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
     assert!(checks(&d).contains(&CheckId::GlobalExposure));
 }
 
@@ -237,7 +441,12 @@ fn correlated_legs_in_one_event_use_worst_case_not_sum() {
     buy_fill(&mut w, &m, 20, OutcomeSide::No, "0.97");
     buy_fill(&mut w, &m, 21, OutcomeSide::No, "0.98");
     let e = engine();
-    let summary = e.exposure(&PortfolioView { positions: &w.positions, open_orders: &w.orders, markets: &w.markets, position_strategy: &w.strategies });
+    let summary = e.exposure(&PortfolioView {
+        positions: &w.positions,
+        open_orders: &w.orders,
+        markets: &w.markets,
+        position_strategy: &w.strategies,
+    });
     // Capital 19.50; worst case = 9.70 − 0.20 = 9.50 (final 20: NO20 loses, NO21 wins 0.20).
     assert_eq!(summary.capital_deployed, Usd::parse("19.5").unwrap());
     assert_eq!(summary.global_worst_case, Usd::parse("9.5").unwrap());
@@ -254,7 +463,10 @@ fn reduce_intents_are_not_blocked_by_stale_weather() {
     i.weather_dependent = false;
     let book = book_for(&i.token, "0.50", "0.52");
     let stale = weather(ProviderHealthState::Unavailable, 300);
-    let d = engine().evaluate(i, &w.inputs(Some(&book), Some(&stale), RunMode::Paper, None));
+    let d = engine().evaluate(
+        i,
+        &w.inputs(Some(&book), Some(&stale), RunMode::Paper, None),
+    );
     assert!(d.is_approved(), "{:?}", checks(&d));
 }
 
@@ -273,7 +485,12 @@ fn daily_loss_limit_blocks_new_positions() {
 #[test]
 fn order_rate_limit() {
     let w = World::new();
-    let cfg = RiskConfig { max_orders_per_minute: 2, max_daily_new_exposure_usd: None, max_market_exposure_usd: None, ..RiskConfig::default() };
+    let cfg = RiskConfig {
+        max_orders_per_minute: 2,
+        max_daily_new_exposure_usd: None,
+        max_market_exposure_usd: None,
+        ..RiskConfig::default()
+    };
     let mut e = RiskEngine::new(cfg, &RunId::deterministic(4));
     let ws = weather(ProviderHealthState::Healthy, 5);
     for (n, v) in [(1u64, 18), (2, 19), (3, 20)] {

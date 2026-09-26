@@ -80,14 +80,17 @@ pub fn parse_decimal_micros(input: &str) -> Result<i64, UnitError> {
     if int_part.is_empty() && frac_part.is_empty() {
         return Err(UnitError::Parse(input.to_owned()));
     }
-    if !int_part.bytes().all(|b| b.is_ascii_digit()) || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
     {
         return Err(UnitError::Parse(input.to_owned()));
     }
     let int_value: i128 = if int_part.is_empty() {
         0
     } else {
-        int_part.parse::<i128>().map_err(|_| UnitError::Parse(input.to_owned()))?
+        int_part
+            .parse::<i128>()
+            .map_err(|_| UnitError::Parse(input.to_owned()))?
     };
     let mut frac_micros: i128 = 0;
     let mut round_up = false;
@@ -215,7 +218,11 @@ impl Price {
 
     /// Infallible constructor for constants: values above 1.0 saturate to 1.0.
     pub const fn saturating_from_micros(micros: u32) -> Self {
-        if micros > 1_000_000 { Self(1_000_000) } else { Self(micros) }
+        if micros > 1_000_000 {
+            Self(1_000_000)
+        } else {
+            Self(micros)
+        }
     }
 
     /// Parse an exact decimal price such as `"0.953"`.
@@ -287,7 +294,17 @@ macro_rules! signed_micro_unit {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
         #[derive(
-            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Default,
+            Serialize,
+            Deserialize,
         )]
         #[serde(transparent)]
         pub struct $name(i64);
@@ -382,7 +399,10 @@ macro_rules! signed_micro_unit {
 }
 
 signed_micro_unit!(Usd, "USD collateral amount in micro-units (6 decimals).");
-signed_micro_unit!(Shares, "Outcome-token quantity in micro-units (6 decimals).");
+signed_micro_unit!(
+    Shares,
+    "Outcome-token quantity in micro-units (6 decimals)."
+);
 
 impl fmt::Display for Usd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -420,7 +440,11 @@ pub fn round_shares_to_lot(shares: Shares, lot: Shares, rounding: Rounding) -> S
     if lot.micros() <= 0 {
         return shares;
     }
-    let lots = div_round(i128::from(shares.micros()), i128::from(lot.micros()), rounding);
+    let lots = div_round(
+        i128::from(shares.micros()),
+        i128::from(lot.micros()),
+        rounding,
+    );
     Shares((lots * i128::from(lot.micros())) as i64)
 }
 
@@ -505,7 +529,10 @@ mod tests {
         assert_eq!(p.ceil_to_tick(tick), Price::parse("0.96").unwrap());
         let fine = Price::parse("0.001").unwrap();
         assert!(p.is_on_tick(fine));
-        assert_eq!(Price::parse("0.999").unwrap().ceil_to_tick(tick), Price::ONE);
+        assert_eq!(
+            Price::parse("0.999").unwrap().ceil_to_tick(tick),
+            Price::ONE
+        );
     }
 
     #[test]
@@ -532,7 +559,10 @@ mod tests {
         assert_eq!(Usd::parse("10").unwrap().to_string(), "$10.00");
         assert_eq!(Usd::from_micros(1_234_567).to_string(), "$1.234567");
         assert_eq!(Shares::from_whole(5).to_string(), "5");
-        assert_eq!(shares_for_notional(usd, Price::ZERO, Rounding::Down), Shares::ZERO);
+        assert_eq!(
+            shares_for_notional(usd, Price::ZERO, Rounding::Down),
+            Shares::ZERO
+        );
     }
 
     #[test]
@@ -604,7 +634,9 @@ pub mod decimal_serde {
     fn micros<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
         match Raw::deserialize(d)? {
             Raw::Text(s) => parse_decimal_micros(&s).map_err(serde::de::Error::custom),
-            Raw::Int(i) => i.checked_mul(1_000_000).ok_or_else(|| serde::de::Error::custom("overflow")),
+            Raw::Int(i) => i
+                .checked_mul(1_000_000)
+                .ok_or_else(|| serde::de::Error::custom("overflow")),
             Raw::Float(f) => {
                 if f.is_finite() {
                     parse_decimal_micros(&format!("{f}")).map_err(serde::de::Error::custom)
@@ -679,7 +711,8 @@ pub mod decimal_serde {
 
         #[test]
         fn decimal_strings_and_numbers() {
-            let c: Cfg = serde_json::from_str(r#"{"size":"10.00","cap":"100","max_price":"0.99"}"#).unwrap();
+            let c: Cfg =
+                serde_json::from_str(r#"{"size":"10.00","cap":"100","max_price":"0.99"}"#).unwrap();
             assert_eq!(c.size, Usd::from_whole(10));
             assert_eq!(c.cap, Some(Usd::from_whole(100)));
             assert_eq!(c.max_price, Price::parse("0.99").unwrap());

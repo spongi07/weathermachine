@@ -40,7 +40,11 @@ pub enum SourceError {
     Fetch(#[from] FetchError),
     /// HTTP succeeded but the payload could not be parsed. Raw data is kept.
     #[error("malformed response: {detail}")]
-    Malformed { detail: String, raw: Box<RawPayloadRecord>, request: Box<ProviderRequestRecord> },
+    Malformed {
+        detail: String,
+        raw: Box<RawPayloadRecord>,
+        request: Box<ProviderRequestRecord>,
+    },
 }
 
 impl SourceError {
@@ -60,7 +64,11 @@ pub trait ObservationSource: Send + Sync {
     fn gate(&self) -> &std::sync::Arc<wm_net::ProviderGate>;
     /// Fetch the latest reports for `station`, waiting at most `max_gate_wait`
     /// for the rate-limit gate.
-    fn fetch<'a>(&'a self, station: &'a StationId, max_gate_wait: Duration) -> BoxFuture<'a, Result<SourceFetch, SourceError>>;
+    fn fetch<'a>(
+        &'a self,
+        station: &'a StationId,
+        max_gate_wait: Duration,
+    ) -> BoxFuture<'a, Result<SourceFetch, SourceError>>;
     /// Whether this source is backed by NOAA/NWS infrastructure.
     fn is_noaa(&self) -> bool {
         true
@@ -93,7 +101,12 @@ pub fn raw_record(
 /// Convert a provider report into a normalized [`Observation`] (version 1).
 /// Temperature comes from *our* parse of the raw text; the provider's decoded
 /// value is only used to flag disagreements.
-pub fn normalize(report: &ParsedReport, provider: &ProviderId, fetched_at: DateTime<Utc>, failover: bool) -> Observation {
+pub fn normalize(
+    report: &ParsedReport,
+    provider: &ProviderId,
+    fetched_at: DateTime<Utc>,
+    failover: bool,
+) -> Observation {
     let canonical = metar::canonicalize(&report.raw_text);
     let (temperature, precision) = match report.metar.as_ref().and_then(MetarReport::temperature) {
         Some((t, p)) => (Some(t), p),
@@ -141,7 +154,9 @@ mod tests {
     fn normalization_prefers_raw_parse_and_flags_mismatch() {
         let raw = "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG";
         let m = metar::parse_metar(raw).unwrap();
-        let fetched = DateTime::parse_from_rfc3339("2026-09-26T12:58:00Z").unwrap().with_timezone(&Utc);
+        let fetched = DateTime::parse_from_rfc3339("2026-09-26T12:58:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let report = ParsedReport {
             station: StationId::new("EHAM").unwrap(),
             observed_at: m.observed_at(fetched).unwrap(),

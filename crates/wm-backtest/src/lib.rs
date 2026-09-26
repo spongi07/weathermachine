@@ -11,6 +11,11 @@ pub mod research;
 pub mod synthetic;
 
 pub use historical::{ImportStats, import_iem_csv};
-pub use replay::{BacktestConfig, BacktestReport, Fidelity, TradeRecord, bootstrap_mean_ci, run_backtest};
-pub use research::{StudyConfig, SurvivalReport, SurvivalRow, date_range, study, walk_forward_splits, wilson};
+pub use replay::{
+    BacktestConfig, BacktestReport, Fidelity, SessionOutput, Settlement, SimulationSession,
+    TradeRecord, bootstrap_mean_ci, run_backtest,
+};
+pub use research::{
+    StudyConfig, SurvivalReport, SurvivalRow, date_range, study, walk_forward_splits, wilson,
+};
 pub use synthetic::{SyntheticDay, synthetic_history, synthetic_trading_day};

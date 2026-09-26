@@ -1,6 +1,8 @@
 //! Trading intents, orders, fills and decision audit records.
 
-use crate::ids::{ClientOrderId, ConditionId, DecisionId, EventSlug, LocationId, StrategyId, TokenId};
+use crate::ids::{
+    ClientOrderId, ConditionId, DecisionId, EventSlug, LocationId, StrategyId, TokenId,
+};
 use crate::market::{OutcomeSide, Side};
 use crate::units::{Price, Probability, Shares, Usd};
 use chrono::{DateTime, Utc};
@@ -103,7 +105,10 @@ impl OrderStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            OrderStatus::Filled | OrderStatus::Canceled | OrderStatus::Rejected | OrderStatus::Expired
+            OrderStatus::Filled
+                | OrderStatus::Canceled
+                | OrderStatus::Rejected
+                | OrderStatus::Expired
         )
     }
 

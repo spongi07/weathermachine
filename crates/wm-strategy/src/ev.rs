@@ -28,7 +28,11 @@ pub fn wins_to_recover_one_loss(price: Price, fees: &FeeSchedule) -> f64 {
     let fee = fees.taker_fee_per_share(price);
     let win = 1.0 - price.as_f64() - fee;
     let loss = price.as_f64() + fee;
-    if win <= 0.0 { f64::INFINITY } else { loss / win }
+    if win <= 0.0 {
+        f64::INFINITY
+    } else {
+        loss / win
+    }
 }
 
 /// One row of the break-even table.
@@ -41,7 +45,11 @@ pub struct BreakEvenRow {
 }
 
 /// Break-even table for the research price grid (0.90 … 0.99).
-pub fn break_even_table(prices: &[Price], fees: &FeeSchedule, slippage: Price) -> Vec<BreakEvenRow> {
+pub fn break_even_table(
+    prices: &[Price],
+    fees: &FeeSchedule,
+    slippage: Price,
+) -> Vec<BreakEvenRow> {
     prices
         .iter()
         .map(|p| BreakEvenRow {
@@ -55,13 +63,19 @@ pub fn break_even_table(prices: &[Price], fees: &FeeSchedule, slippage: Price) -
 
 /// Research price grid 0.90, 0.91, …, 0.99.
 pub fn research_price_grid() -> Vec<Price> {
-    (90..=99).filter_map(|c| Price::from_micros(c * 10_000).ok()).collect()
+    (90..=99)
+        .filter_map(|c| Price::from_micros(c * 10_000).ok())
+        .collect()
 }
 
 /// Effective entry price of a directional YES position acquired by splitting
 /// one unit of collateral into YES+NO (cost 1.0) and selling the NO side at
 /// `no_bid` (taker fee on the sale). Pure economics — see blueprint §18.
-pub fn split_then_sell_effective_price(no_bid: Price, fees: &FeeSchedule, gas_per_share: f64) -> f64 {
+pub fn split_then_sell_effective_price(
+    no_bid: Price,
+    fees: &FeeSchedule,
+    gas_per_share: f64,
+) -> f64 {
     1.0 - no_bid.as_f64() + fees.taker_fee_per_share(no_bid) + gas_per_share
 }
 
@@ -95,7 +109,11 @@ mod tests {
         assert!((break_even_probability(p("0.99"), &f, Price::ZERO) - 0.990_495).abs() < 1e-12);
         let table = break_even_table(&research_price_grid(), &f, p("0.005"));
         assert_eq!(table.len(), 10);
-        assert!(table.windows(2).all(|w| w[0].break_even_probability < w[1].break_even_probability));
+        assert!(
+            table
+                .windows(2)
+                .all(|w| w[0].break_even_probability < w[1].break_even_probability)
+        );
         assert!(table.last().unwrap().wins_to_recover_one_loss > 100.0);
     }
 
@@ -109,6 +127,9 @@ mod tests {
         let split = split_then_sell_effective_price(p("0.05"), &f, 0.0);
         assert!((direct - split).abs() < 1e-12);
         let f = FeeSchedule::taker(50_000);
-        assert!(split_then_sell_effective_price(p("0.05"), &f, 0.001) > direct_buy_effective_price(p("0.95"), &f) - 1e-12);
+        assert!(
+            split_then_sell_effective_price(p("0.05"), &f, 0.001)
+                > direct_buy_effective_price(p("0.95"), &f) - 1e-12
+        );
     }
 }

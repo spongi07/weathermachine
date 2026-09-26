@@ -32,13 +32,28 @@ pub struct ImportStats {
 }
 
 /// Parse an IEM CSV export into observations for `station`.
-pub fn import_iem_csv<R: Read>(reader: R, station: &StationId, publication_delay: Duration) -> Result<(Vec<Observation>, ImportStats), String> {
+pub fn import_iem_csv<R: Read>(
+    reader: R,
+    station: &StationId,
+    publication_delay: Duration,
+) -> Result<(Vec<Observation>, ImportStats), String> {
     let mut stats = ImportStats::default();
-    let mut rdr = csv::ReaderBuilder::new().comment(Some(b'#')).flexible(true).from_reader(reader);
+    let mut rdr = csv::ReaderBuilder::new()
+        .comment(Some(b'#'))
+        .flexible(true)
+        .from_reader(reader);
     let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
-    let idx = |name: &str| headers.iter().position(|h| h.trim().eq_ignore_ascii_case(name));
-    let (Some(i_station), Some(i_valid), Some(i_metar)) = (idx("station"), idx("valid"), idx("metar")) else {
-        return Err(format!("expected columns station,valid,metar; got {headers:?}"));
+    let idx = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h.trim().eq_ignore_ascii_case(name))
+    };
+    let (Some(i_station), Some(i_valid), Some(i_metar)) =
+        (idx("station"), idx("valid"), idx("metar"))
+    else {
+        return Err(format!(
+            "expected columns station,valid,metar; got {headers:?}"
+        ));
     };
     let provider = ProviderId::new("iem").map_err(|e| e.to_string())?;
     let mut seen = std::collections::HashSet::new();
@@ -62,7 +77,9 @@ pub fn import_iem_csv<R: Read>(reader: R, station: &StationId, publication_delay
             stats.skipped_unparseable += 1;
             continue;
         };
-        let observed_at = m.observed_at(valid_at + Duration::minutes(30)).unwrap_or(valid_at);
+        let observed_at = m
+            .observed_at(valid_at + Duration::minutes(30))
+            .unwrap_or(valid_at);
         let Some((temp, precision)) = m.temperature() else {
             stats.skipped_no_temperature += 1;
             continue;
@@ -73,7 +90,11 @@ pub fn import_iem_csv<R: Read>(reader: R, station: &StationId, publication_delay
             continue;
         }
         out.push(Observation {
-            key: ObservationKey { station: station.clone(), observed_at, report_type: m.report_type },
+            key: ObservationKey {
+                station: station.clone(),
+                observed_at,
+                report_type: m.report_type,
+            },
             version: 1,
             temperature: Some(temp),
             dewpoint: m.dewpoint(),
@@ -84,7 +105,11 @@ pub fn import_iem_csv<R: Read>(reader: R, station: &StationId, publication_delay
             provider_receipt_at: None,
             fetched_at: observed_at + publication_delay,
             parser_version: PARSER_VERSION,
-            quality: QualityFlags { auto: m.auto, correction_marker: m.cor, ..QualityFlags::default() },
+            quality: QualityFlags {
+                auto: m.auto,
+                correction_marker: m.cor,
+                ..QualityFlags::default()
+            },
         });
         stats.imported += 1;
     }
@@ -95,7 +120,10 @@ pub fn import_iem_csv<R: Read>(reader: R, station: &StationId, publication_delay
 
 /// Latest observation time in a set (for gap reporting).
 pub fn coverage(observations: &[Observation]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    Some((observations.first()?.key.observed_at, observations.last()?.key.observed_at))
+    Some((
+        observations.first()?.key.observed_at,
+        observations.last()?.key.observed_at,
+    ))
 }
 
 #[cfg(test)]
@@ -105,14 +133,29 @@ mod tests {
     #[test]
     fn imports_iem_metar_csv() {
         let csv = "#DEBUG: Format Typ    -> comma\nstation,valid,metar\nEHAM,2024-07-01 12:25,EHAM 011225Z 24012KT 9999 FEW030 21/12 Q1016 NOSIG\nEHAM,2024-07-01 12:55,EHAM 011255Z 24012KT 9999 FEW030 22/12 Q1016 NOSIG\nEHAM,2024-07-01 12:55,EHAM 011255Z 24012KT 9999 FEW030 22/12 Q1016 NOSIG\nEGLL,2024-07-01 12:50,EGLL 011250Z 24012KT 9999 19/11 Q1015\nEHAM,2024-07-01 13:25,EHAM 011325Z NIL\nEHAM,bad,EHAM 011355Z 22/12\n";
-        let (obs, st) = import_iem_csv(csv.as_bytes(), &StationId::new("EHAM").unwrap(), Duration::minutes(5)).unwrap();
+        let (obs, st) = import_iem_csv(
+            csv.as_bytes(),
+            &StationId::new("EHAM").unwrap(),
+            Duration::minutes(5),
+        )
+        .unwrap();
         assert_eq!(obs.len(), 2);
         assert_eq!(st.duplicates, 1);
         assert_eq!(st.skipped_station, 1);
         assert_eq!(st.skipped_no_temperature, 1);
         assert_eq!(st.skipped_unparseable, 1);
         assert_eq!(obs[1].temperature.unwrap().tenths(), 220);
-        assert_eq!(obs[1].fetched_at - obs[1].key.observed_at, Duration::minutes(5));
-        assert!(import_iem_csv("a,b\n1,2\n".as_bytes(), &StationId::new("EHAM").unwrap(), Duration::zero()).is_err());
+        assert_eq!(
+            obs[1].fetched_at - obs[1].key.observed_at,
+            Duration::minutes(5)
+        );
+        assert!(
+            import_iem_csv(
+                "a,b\n1,2\n".as_bytes(),
+                &StationId::new("EHAM").unwrap(),
+                Duration::zero()
+            )
+            .is_err()
+        );
     }
 }

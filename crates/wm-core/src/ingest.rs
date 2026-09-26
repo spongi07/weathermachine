@@ -94,11 +94,17 @@ impl MemoryIngestSink {
     }
 
     pub fn batches(&self) -> Vec<IngestBatch> {
-        self.batches.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn len(&self) -> usize {
-        self.batches.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -108,7 +114,10 @@ impl MemoryIngestSink {
 
 impl IngestSink for MemoryIngestSink {
     fn persist(&self, batch: IngestBatch) -> BoxFuture<'_, Result<(), SinkError>> {
-        self.batches.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(batch);
+        self.batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(batch);
         Box::pin(async { Ok(()) })
     }
 }

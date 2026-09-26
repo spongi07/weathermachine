@@ -32,7 +32,11 @@ impl IncrementDistribution {
     }
 
     pub fn p_equals(&self, k: usize) -> f64 {
-        if k + 1 >= self.probs.len() { 0.0 } else { self.probs[k] }
+        if k + 1 >= self.probs.len() {
+            0.0
+        } else {
+            self.probs[k]
+        }
     }
 
     fn tail_index(&self) -> usize {
@@ -171,7 +175,10 @@ pub fn cell_key(dims: &[FeatureDim], f: &PeakFeatures) -> String {
     if dims.is_empty() {
         return "global".to_owned();
     }
-    dims.iter().map(|d| format!("{d:?}={}", dim_value(*d, f))).collect::<Vec<_>>().join("|")
+    dims.iter()
+        .map(|d| format!("{d:?}={}", dim_value(*d, f)))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// Empirical, hierarchically smoothed model (serializable artefact).
@@ -194,7 +201,13 @@ pub struct EmpiricalPeakModel {
 }
 
 impl EmpiricalPeakModel {
-    pub fn new(id: impl Into<String>, station: impl Into<String>, view: impl Into<String>, k_classes: usize, levels: Vec<Vec<FeatureDim>>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        station: impl Into<String>,
+        view: impl Into<String>,
+        k_classes: usize,
+        levels: Vec<Vec<FeatureDim>>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: id.into(),
@@ -227,7 +240,10 @@ impl EmpiricalPeakModel {
         let k = (increment.max(0) as usize).min(self.k_classes - 1);
         for dims in self.levels.clone() {
             let key = cell_key(&dims, f);
-            let counts = self.cells.entry(key).or_insert_with(|| vec![0; self.k_classes]);
+            let counts = self
+                .cells
+                .entry(key)
+                .or_insert_with(|| vec![0; self.k_classes]);
             counts[k] += 1;
         }
     }
@@ -248,7 +264,9 @@ impl ProbabilityModel for EmpiricalPeakModel {
         let mut used = String::new();
         for dims in &self.levels {
             let key = cell_key(dims, f);
-            let Some(counts) = self.cells.get(&key) else { break };
+            let Some(counts) = self.cells.get(&key) else {
+                break;
+            };
             let n: u64 = counts.iter().sum();
             if n == 0 {
                 break;
@@ -258,7 +276,9 @@ impl ProbabilityModel for EmpiricalPeakModel {
                 Some(prior) => counts
                     .iter()
                     .zip(prior)
-                    .map(|(c, p)| (*c as f64 + self.prior_strength * p) / (n as f64 + self.prior_strength))
+                    .map(|(c, p)| {
+                        (*c as f64 + self.prior_strength * p) / (n as f64 + self.prior_strength)
+                    })
                     .collect(),
             };
             post = Some(probs);
@@ -266,8 +286,12 @@ impl ProbabilityModel for EmpiricalPeakModel {
             used = key;
         }
         post.map(|probs| {
-            IncrementDistribution { probs, support: support.min(u64::from(u32::MAX)) as u32, source: format!("{}:{used}", self.id) }
-                .normalized()
+            IncrementDistribution {
+                probs,
+                support: support.min(u64::from(u32::MAX)) as u32,
+                source: format!("{}:{used}", self.id),
+            }
+            .normalized()
         })
     }
 }
@@ -308,7 +332,11 @@ mod tests {
     }
 
     fn dist(p: &[f64]) -> IncrementDistribution {
-        IncrementDistribution { probs: p.to_vec(), support: 100, source: "t".into() }
+        IncrementDistribution {
+            probs: p.to_vec(),
+            support: 100,
+            source: "t".into(),
+        }
     }
 
     #[test]
@@ -338,7 +366,8 @@ mod tests {
 
     #[test]
     fn hierarchical_smoothing_shrinks_sparse_cells() {
-        let mut m = EmpiricalPeakModel::new("t", "EHAM", "all", 4, EmpiricalPeakModel::default_levels());
+        let mut m =
+            EmpiricalPeakModel::new("t", "EHAM", "all", 4, EmpiricalPeakModel::default_levels());
         // Global: 1000 samples, 80 % final.
         for i in 0..1000 {
             let f = features(if i % 2 == 0 { 30 } else { 150 }, 0);
@@ -349,7 +378,11 @@ mod tests {
             m.observe(&features(95, 20), 0);
         }
         let d = m.distribution(&features(95, 20)).unwrap();
-        assert!(d.probs[0] < 0.97, "3 samples cannot justify near-certainty: {}", d.probs[0]);
+        assert!(
+            d.probs[0] < 0.97,
+            "3 samples cannot justify near-certainty: {}",
+            d.probs[0]
+        );
         assert!(d.probs[0] > 0.80);
         assert_eq!(d.support, 3);
         let s: f64 = d.probs.iter().sum();
@@ -367,7 +400,8 @@ mod tests {
 
     #[test]
     fn model_serializes() {
-        let mut m = EmpiricalPeakModel::new("t", "EHAM", "all", 3, EmpiricalPeakModel::default_levels());
+        let mut m =
+            EmpiricalPeakModel::new("t", "EHAM", "all", 3, EmpiricalPeakModel::default_levels());
         m.observe(&features(60, 0), 0);
         let json = serde_json::to_string(&m).unwrap();
         let back: EmpiricalPeakModel = serde_json::from_str(&json).unwrap();

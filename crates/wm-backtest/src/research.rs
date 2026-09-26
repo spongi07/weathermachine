@@ -17,7 +17,10 @@ use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::weather::Observation;
 use wm_strategy::probability::{drop_bucket, hour_bucket};
-use wm_strategy::{CONFIRMATION_WINDOWS, EmpiricalPeakModel, PeakConfig, PeakDetectionEngine, TemperatureStateEngine, ViewKind};
+use wm_strategy::{
+    CONFIRMATION_WINDOWS, EmpiricalPeakModel, PeakConfig, PeakDetectionEngine,
+    TemperatureStateEngine, ViewKind,
+};
 
 /// Wilson score interval (95 %).
 pub fn wilson(successes: u64, n: u64) -> (f64, f64) {
@@ -67,13 +70,24 @@ impl SurvivalReport {
             self.to.map(|d| d.to_string()).unwrap_or_default()
         );
         for r in &self.rows {
-            s.push_str(&format!("| {} | {} | {} | {} | {:.4} | [{:.4}, {:.4}] |\n", r.window_minutes, r.stratum, r.samples, r.final_count, r.p_final, r.ci_low, r.ci_high));
+            s.push_str(&format!(
+                "| {} | {} | {} | {} | {:.4} | [{:.4}, {:.4}] |\n",
+                r.window_minutes,
+                r.stratum,
+                r.samples,
+                r.final_count,
+                r.p_final,
+                r.ci_low,
+                r.ci_high
+            ));
         }
         s
     }
 
     pub fn row(&self, window: u32, stratum: &str) -> Option<&SurvivalRow> {
-        self.rows.iter().find(|r| r.window_minutes == window && r.stratum == stratum)
+        self.rows
+            .iter()
+            .find(|r| r.window_minutes == window && r.stratum == stratum)
     }
 }
 
@@ -101,16 +115,28 @@ fn view_of(f: ObservationFilter) -> ViewKind {
 }
 
 /// Run the survival study and train an empirical model in one pass.
-pub fn study(observations: &[Observation], cfg: &StudyConfig) -> (SurvivalReport, EmpiricalPeakModel) {
+pub fn study(
+    observations: &[Observation],
+    cfg: &StudyConfig,
+) -> (SurvivalReport, EmpiricalPeakModel) {
     let view = view_of(cfg.filter);
     let mut engine = TemperatureStateEngine::new(3);
     engine.register_station(cfg.station.clone(), cfg.tz);
     let peak = PeakDetectionEngine::new(cfg.peak.clone());
-    let mut model = EmpiricalPeakModel::new(format!("empirical-{}-{}", cfg.station, view.label()), cfg.station.to_string(), view.label(), cfg.k_classes, EmpiricalPeakModel::default_levels());
+    let mut model = EmpiricalPeakModel::new(
+        format!("empirical-{}-{}", cfg.station, view.label()),
+        cfg.station.to_string(),
+        view.label(),
+        cfg.k_classes,
+        EmpiricalPeakModel::default_levels(),
+    );
 
     let mut by_day: BTreeMap<NaiveDate, Vec<&Observation>> = BTreeMap::new();
     for o in observations.iter().filter(|o| o.key.station == cfg.station) {
-        by_day.entry(local_date(o.key.observed_at, cfg.tz)).or_default().push(o);
+        by_day
+            .entry(local_date(o.key.observed_at, cfg.tz))
+            .or_default()
+            .push(o);
     }
     // (window, stratum) → (samples, finals)
     let mut table: BTreeMap<(u32, String), (u64, u64)> = BTreeMap::new();
@@ -120,21 +146,32 @@ pub fn study(observations: &[Observation], cfg: &StudyConfig) -> (SurvivalReport
             engine.apply_observation(o);
         }
         let (_, end) = local_day_bounds(*date, cfg.tz);
-        let Some(final_state) = engine.day_state(&cfg.station, *date, view, end) else { continue };
-        let Some(final_high) = final_state.high.map(|h| h.value.round_half_up_whole()) else { continue };
+        let Some(final_state) = engine.day_state(&cfg.station, *date, view, end) else {
+            continue;
+        };
+        let Some(final_high) = final_state.high.map(|h| h.value.round_half_up_whole()) else {
+            continue;
+        };
         days += 1;
         // Evaluate as of each eligible observation time (knowledge-consistent).
         let times: Vec<DateTime<Utc>> = final_state.points.iter().map(|p| p.observed_at).collect();
         let mut used: BTreeSet<(u32, DateTime<Utc>)> = BTreeSet::new();
         for t in times {
-            let Some(s) = engine.day_state(&cfg.station, *date, view, t) else { continue };
-            let Some(a) = peak.assess(&s, cfg.tz, t) else { continue };
+            let Some(s) = engine.day_state(&cfg.station, *date, view, t) else {
+                continue;
+            };
+            let Some(a) = peak.assess(&s, cfg.tz, t) else {
+                continue;
+            };
             let f = &a.features;
             model.observe(f, final_high - f.high_whole);
             for w in CONFIRMATION_WINDOWS {
                 // One sample per (window, high-touch): the first observation whose
                 // observed coverage since the high reaches the window.
-                if f.high_local_minute >= cfg.min_high_local_minute && f.window_met(w) && used.insert((w, f.high_at)) {
+                if f.high_local_minute >= cfg.min_high_local_minute
+                    && f.window_met(w)
+                    && used.insert((w, f.high_at))
+                {
                     let is_final = final_high == f.high_whole;
                     let strata = [
                         "all".to_owned(),
@@ -157,7 +194,15 @@ pub fn study(observations: &[Observation], cfg: &StudyConfig) -> (SurvivalReport
         .into_iter()
         .map(|((w, stratum), (n, k))| {
             let (lo, hi) = wilson(k, n);
-            SurvivalRow { window_minutes: w, stratum, samples: n, final_count: k, p_final: if n == 0 { 0.0 } else { k as f64 / n as f64 }, ci_low: lo, ci_high: hi }
+            SurvivalRow {
+                window_minutes: w,
+                stratum,
+                samples: n,
+                final_count: k,
+                p_final: if n == 0 { 0.0 } else { k as f64 / n as f64 },
+                ci_low: lo,
+                ci_high: hi,
+            }
         })
         .collect();
     let from = by_day.keys().next().copied();
@@ -166,13 +211,28 @@ pub fn study(observations: &[Observation], cfg: &StudyConfig) -> (SurvivalReport
         model.trained_from = f;
         model.trained_to = t;
     }
-    (SurvivalReport { station: cfg.station.to_string(), view: view.label(), days, from, to, rows }, model)
+    (
+        SurvivalReport {
+            station: cfg.station.to_string(),
+            view: view.label(),
+            days,
+            from,
+            to,
+            rows,
+        },
+        model,
+    )
 }
 
 /// Walk-forward split: train on `train_days`, skip `embargo_days`, test on
 /// `test_days`, roll forward by `test_days`. No test date is ever before its
 /// training window ends (no look-ahead), and embargo days separate them.
-pub fn walk_forward_splits(dates: &[NaiveDate], train_days: usize, embargo_days: usize, test_days: usize) -> Vec<(Vec<NaiveDate>, Vec<NaiveDate>)> {
+pub fn walk_forward_splits(
+    dates: &[NaiveDate],
+    train_days: usize,
+    embargo_days: usize,
+    test_days: usize,
+) -> Vec<(Vec<NaiveDate>, Vec<NaiveDate>)> {
     let mut out = Vec::new();
     let mut start = 0;
     while start + train_days + embargo_days + test_days <= dates.len() {
@@ -215,33 +275,67 @@ mod tests {
     #[test]
     fn study_on_synthetic_history() {
         let st = StationId::new("EHAM").unwrap();
-        let obs = synthetic_history(&st, NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(), 60, 11, Duration::minutes(5));
-        let cfg = StudyConfig { station: st, tz: chrono_tz::Europe::Amsterdam, filter: ObservationFilter::AllRows, peak: PeakConfig::default(), k_classes: 4, min_high_local_minute: 9 * 60 };
+        let obs = synthetic_history(
+            &st,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap(),
+            60,
+            11,
+            Duration::minutes(5),
+        );
+        let cfg = StudyConfig {
+            station: st,
+            tz: chrono_tz::Europe::Amsterdam,
+            filter: ObservationFilter::AllRows,
+            peak: PeakConfig::default(),
+            k_classes: 4,
+            min_high_local_minute: 9 * 60,
+        };
         let (report, model) = study(&obs, &cfg);
         assert_eq!(report.days, 60);
         let r30 = report.row(30, "all").unwrap();
         let r180 = report.row(180, "all").unwrap();
         assert!(r30.samples > 0 && r180.samples > 0);
         // On a smooth synthetic diurnal cycle, longer confirmation ⇒ more often final.
-        assert!(r180.p_final >= r30.p_final, "30: {} 180: {}", r30.p_final, r180.p_final);
+        assert!(
+            r180.p_final >= r30.p_final,
+            "30: {} 180: {}",
+            r30.p_final,
+            r180.p_final
+        );
         assert!(report.to_markdown().contains("| 180 | all |"));
         assert!(model.total_samples() > 1000);
-        assert_eq!(model.trained_from, NaiveDate::from_ymd_opt(2025, 6, 1).unwrap());
+        assert_eq!(
+            model.trained_from,
+            NaiveDate::from_ymd_opt(2025, 6, 1).unwrap()
+        );
         // The trained model produces a normalized distribution for live features.
         let f = crate::research::tests::any_features(&model);
         assert!(f.is_some());
     }
 
-    pub(crate) fn any_features(model: &EmpiricalPeakModel) -> Option<wm_strategy::IncrementDistribution> {
+    pub(crate) fn any_features(
+        model: &EmpiricalPeakModel,
+    ) -> Option<wm_strategy::IncrementDistribution> {
         let st = StationId::new("EHAM").unwrap();
-        let obs = synthetic_history(&st, NaiveDate::from_ymd_opt(2025, 8, 1).unwrap(), 1, 3, Duration::minutes(5));
+        let obs = synthetic_history(
+            &st,
+            NaiveDate::from_ymd_opt(2025, 8, 1).unwrap(),
+            1,
+            3,
+            Duration::minutes(5),
+        );
         let mut e = TemperatureStateEngine::new(3);
         e.register_station(st.clone(), chrono_tz::Europe::Amsterdam);
         for o in &obs {
             e.apply_observation(o);
         }
         let t = obs[30].key.observed_at;
-        let s = e.day_state(&st, local_date(t, chrono_tz::Europe::Amsterdam), ViewKind::All, t)?;
+        let s = e.day_state(
+            &st,
+            local_date(t, chrono_tz::Europe::Amsterdam),
+            ViewKind::All,
+            t,
+        )?;
         let a = PeakDetectionEngine::default().assess(&s, chrono_tz::Europe::Amsterdam, t)?;
         let d = model.distribution(&a.features)?;
         assert!((d.probs.iter().sum::<f64>() - 1.0).abs() < 1e-9);
@@ -250,7 +344,10 @@ mod tests {
 
     #[test]
     fn walk_forward_has_no_overlap_or_lookahead() {
-        let dates = date_range(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(), NaiveDate::from_ymd_opt(2025, 12, 31).unwrap());
+        let dates = date_range(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
+        );
         let splits = walk_forward_splits(&dates, 120, 7, 30);
         assert!(splits.len() >= 7);
         for (train, test) in &splits {

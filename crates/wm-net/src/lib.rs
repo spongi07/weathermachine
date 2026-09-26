@@ -19,7 +19,10 @@ pub mod user_agent;
 
 pub use cache::{CachedResponse, ResponseCache, TtlCache};
 pub use clock::TokioClock;
-pub use gate::{Admission, GateCore, GatePermit, GateStats, GateWait, ProviderGate, RequestOutcome, RetryAfter, WaitReason};
+pub use gate::{
+    Admission, GateCore, GatePermit, GateStats, GateWait, ProviderGate, RequestOutcome, RetryAfter,
+    WaitReason,
+};
 pub use http::{FetchError, FetchRequest, FetchResponse, HttpFetcher, NetError};
 pub use policy::{PolicyError, ProviderClass, RateLimitPolicy};
 pub use user_agent::build_user_agent;

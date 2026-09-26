@@ -16,5 +16,8 @@
 mod engine;
 mod snapshot;
 
-pub use engine::{Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, StationHint};
+pub use engine::{
+    Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, StationHint,
+    default_rejection_dedup_secs,
+};
 pub use snapshot::{EngineSnapshot, LocationSnapshot, ViewSnapshot};

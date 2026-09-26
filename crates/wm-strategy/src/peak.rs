@@ -79,7 +79,11 @@ impl PeakFeatures {
     }
 
     pub fn windows_met(&self) -> Vec<u32> {
-        CONFIRMATION_WINDOWS.iter().copied().filter(|w| self.window_met(*w)).collect()
+        CONFIRMATION_WINDOWS
+            .iter()
+            .copied()
+            .filter(|w| self.window_met(*w))
+            .collect()
     }
 }
 
@@ -98,7 +102,13 @@ pub struct PeakConfig {
 
 impl Default for PeakConfig {
     fn default() -> Self {
-        Self { longitude: 4.76, southern_hemisphere: false, watch_start_after_noon: -180, watch_end_after_noon: 300, watch_margin_tenths: 10 }
+        Self {
+            longitude: 4.76,
+            southern_hemisphere: false,
+            watch_start_after_noon: -180,
+            watch_end_after_noon: 300,
+            watch_margin_tenths: 10,
+        }
     }
 }
 
@@ -127,7 +137,11 @@ fn classify(points_after: &[ObsPoint], high_tenths: i32, latest_is_high: bool) -
         }
         prev = t;
     }
-    if rose { TrajectoryClass::Oscillating } else { TrajectoryClass::SteadyDecline }
+    if rose {
+        TrajectoryClass::Oscillating
+    } else {
+        TrajectoryClass::SteadyDecline
+    }
 }
 
 /// Stateless peak detector.
@@ -144,7 +158,12 @@ impl PeakDetectionEngine {
     pub fn assess(&self, state: &DayState, tz: Tz, now: DateTime<Utc>) -> Option<PeakAssessment> {
         let high = state.high?;
         let current = state.current?;
-        let after: Vec<ObsPoint> = state.points.iter().filter(|p| p.observed_at > high.last_at).copied().collect();
+        let after: Vec<ObsPoint> = state
+            .points
+            .iter()
+            .filter(|p| p.observed_at > high.last_at)
+            .copied()
+            .collect();
         let latest_is_high = current.observed_at == high.last_at;
         let noon = solar_noon_local_minutes(state.date, self.config.longitude, tz);
         let local_now = local_minute_of_day(now, tz);
@@ -171,11 +190,18 @@ impl PeakDetectionEngine {
             month: state.date.month(),
             season: Season::from_month(state.date.month(), self.config.southern_hemisphere),
             observation_count: state.observation_count,
-            data_age_minutes: state.last_observation_at.map_or(i64::MAX, |t| (now - t).num_minutes()),
+            data_age_minutes: state
+                .last_observation_at
+                .map_or(i64::MAX, |t| (now - t).num_minutes()),
         };
         let near_high = features.drop_tenths <= self.config.watch_margin_tenths;
-        let in_heating = (self.config.watch_start_after_noon..=self.config.watch_end_after_noon).contains(&minutes_after_noon);
-        Some(PeakAssessment { windows_met: features.windows_met(), peak_watch: near_high && in_heating, features })
+        let in_heating = (self.config.watch_start_after_noon..=self.config.watch_end_after_noon)
+            .contains(&minutes_after_noon);
+        Some(PeakAssessment {
+            windows_met: features.windows_met(),
+            peak_watch: near_high && in_heating,
+            features,
+        })
     }
 }
 
@@ -194,7 +220,11 @@ mod tests {
 
     fn obs(t: &str, tenths: i32) -> Observation {
         Observation {
-            key: ObservationKey { station: StationId::new("EHAM").unwrap(), observed_at: utc(t), report_type: ReportType::Metar },
+            key: ObservationKey {
+                station: StationId::new("EHAM").unwrap(),
+                observed_at: utc(t),
+                report_type: ReportType::Metar,
+            },
             version: 1,
             temperature: Some(TempC::from_tenths(tenths)),
             dewpoint: None,
@@ -219,20 +249,49 @@ mod tests {
         let now = utc(now);
         let date = wm_core::time::local_date(now, Amsterdam);
         let s = e.day_state(&st, date, ViewKind::All, now).unwrap();
-        PeakDetectionEngine::default().assess(&s, Amsterdam, now).unwrap()
+        PeakDetectionEngine::default()
+            .assess(&s, Amsterdam, now)
+            .unwrap()
     }
 
     #[test]
     fn steady_decline_vs_oscillation() {
-        let a = assess(&[("2026-07-01T12:00:00Z", 180), ("2026-07-01T12:30:00Z", 178), ("2026-07-01T13:00:00Z", 175), ("2026-07-01T13:30:00Z", 172)], "2026-07-01T13:31:00Z");
+        let a = assess(
+            &[
+                ("2026-07-01T12:00:00Z", 180),
+                ("2026-07-01T12:30:00Z", 178),
+                ("2026-07-01T13:00:00Z", 175),
+                ("2026-07-01T13:30:00Z", 172),
+            ],
+            "2026-07-01T13:31:00Z",
+        );
         assert_eq!(a.features.trajectory, TrajectoryClass::SteadyDecline);
         assert_eq!(a.features.minutes_since_high, 90);
         assert_eq!(a.windows_met, vec![30, 45, 60, 75, 90]);
-        let b = assess(&[("2026-07-01T12:00:00Z", 180), ("2026-07-01T12:30:00Z", 179), ("2026-07-01T13:00:00Z", 179), ("2026-07-01T13:30:00Z", 179)], "2026-07-01T13:31:00Z");
+        let b = assess(
+            &[
+                ("2026-07-01T12:00:00Z", 180),
+                ("2026-07-01T12:30:00Z", 179),
+                ("2026-07-01T13:00:00Z", 179),
+                ("2026-07-01T13:30:00Z", 179),
+            ],
+            "2026-07-01T13:31:00Z",
+        );
         assert_eq!(b.features.trajectory, TrajectoryClass::SteadyDecline);
-        let c = assess(&[("2026-07-01T12:00:00Z", 180), ("2026-07-01T12:30:00Z", 178), ("2026-07-01T13:00:00Z", 179), ("2026-07-01T13:30:00Z", 178)], "2026-07-01T13:31:00Z");
+        let c = assess(
+            &[
+                ("2026-07-01T12:00:00Z", 180),
+                ("2026-07-01T12:30:00Z", 178),
+                ("2026-07-01T13:00:00Z", 179),
+                ("2026-07-01T13:30:00Z", 178),
+            ],
+            "2026-07-01T13:31:00Z",
+        );
         assert_eq!(c.features.trajectory, TrajectoryClass::Oscillating);
-        let d = assess(&[("2026-07-01T12:00:00Z", 170), ("2026-07-01T12:30:00Z", 180)], "2026-07-01T12:31:00Z");
+        let d = assess(
+            &[("2026-07-01T12:00:00Z", 170), ("2026-07-01T12:30:00Z", 180)],
+            "2026-07-01T12:31:00Z",
+        );
         assert_eq!(d.features.trajectory, TrajectoryClass::AtHigh);
         assert!(d.windows_met.is_empty());
     }
@@ -240,19 +299,31 @@ mod tests {
     #[test]
     fn peak_watch_only_near_high_during_heating_hours() {
         // 14:00 CEST, at the high → watch.
-        let a = assess(&[("2026-07-01T11:30:00Z", 175), ("2026-07-01T12:00:00Z", 180)], "2026-07-01T12:01:00Z");
+        let a = assess(
+            &[("2026-07-01T11:30:00Z", 175), ("2026-07-01T12:00:00Z", 180)],
+            "2026-07-01T12:01:00Z",
+        );
         assert!(a.peak_watch);
         // 23:00 CEST → no watch even at the high.
-        let b = assess(&[("2026-07-01T20:30:00Z", 150), ("2026-07-01T21:00:00Z", 151)], "2026-07-01T21:01:00Z");
+        let b = assess(
+            &[("2026-07-01T20:30:00Z", 150), ("2026-07-01T21:00:00Z", 151)],
+            "2026-07-01T21:01:00Z",
+        );
         assert!(!b.peak_watch);
         // Far below the high → no watch.
-        let c = assess(&[("2026-07-01T10:00:00Z", 200), ("2026-07-01T12:00:00Z", 160)], "2026-07-01T12:01:00Z");
+        let c = assess(
+            &[("2026-07-01T10:00:00Z", 200), ("2026-07-01T12:00:00Z", 160)],
+            "2026-07-01T12:01:00Z",
+        );
         assert!(!c.peak_watch);
     }
 
     #[test]
     fn features_capture_time_and_season() {
-        let a = assess(&[("2026-07-01T12:00:00Z", 180), ("2026-07-01T13:00:00Z", 170)], "2026-07-01T13:05:00Z");
+        let a = assess(
+            &[("2026-07-01T12:00:00Z", 180), ("2026-07-01T13:00:00Z", 170)],
+            "2026-07-01T13:05:00Z",
+        );
         assert_eq!(a.features.season, Season::Summer);
         assert_eq!(a.features.month, 7);
         assert_eq!(a.features.high_local_minute, 14 * 60);

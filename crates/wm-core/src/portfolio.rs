@@ -72,7 +72,9 @@ impl PositionBook {
     }
 
     pub fn for_event<'a>(&'a self, slug: &'a EventSlug) -> impl Iterator<Item = &'a Position> {
-        self.positions.values().filter(move |p| &p.instrument.event_slug == slug && p.shares.micros() > 0)
+        self.positions
+            .values()
+            .filter(move |p| &p.instrument.event_slug == slug && p.shares.micros() > 0)
     }
 
     pub fn total_cost_basis(&self) -> Usd {
@@ -85,14 +87,21 @@ impl PositionBook {
 
     /// Apply a fill. Buys add shares at cost (plus fee); sells reduce shares
     /// and realize PnL against the average cost (minus fee).
-    pub fn apply_fill(&mut self, fill: &Fill, instrument: &InstrumentRef) -> Result<(), PortfolioError> {
-        let entry = self.positions.entry(fill.token.clone()).or_insert_with(|| Position {
-            instrument: instrument.clone(),
-            shares: Shares::ZERO,
-            cost_basis: Usd::ZERO,
-            realized_pnl: Usd::ZERO,
-            fees_paid: Usd::ZERO,
-        });
+    pub fn apply_fill(
+        &mut self,
+        fill: &Fill,
+        instrument: &InstrumentRef,
+    ) -> Result<(), PortfolioError> {
+        let entry = self
+            .positions
+            .entry(fill.token.clone())
+            .or_insert_with(|| Position {
+                instrument: instrument.clone(),
+                shares: Shares::ZERO,
+                cost_basis: Usd::ZERO,
+                realized_pnl: Usd::ZERO,
+                fees_paid: Usd::ZERO,
+            });
         match fill.side {
             Side::Buy => {
                 let cost = notional(fill.price, fill.shares, Rounding::Up) + fill.fee;
@@ -102,14 +111,18 @@ impl PositionBook {
             }
             Side::Sell => {
                 if fill.shares > entry.shares {
-                    return Err(PortfolioError::Oversell { requested: fill.shares, held: entry.shares });
+                    return Err(PortfolioError::Oversell {
+                        requested: fill.shares,
+                        held: entry.shares,
+                    });
                 }
                 let proceeds = notional(fill.price, fill.shares, Rounding::Down) - fill.fee;
                 // Cost released proportionally to shares sold (rounded up: conservative PnL).
                 let released = if entry.shares.micros() == 0 {
                     Usd::ZERO
                 } else {
-                    let num = i128::from(entry.cost_basis.micros()) * i128::from(fill.shares.micros());
+                    let num =
+                        i128::from(entry.cost_basis.micros()) * i128::from(fill.shares.micros());
                     let den = i128::from(entry.shares.micros());
                     Usd::from_micros(((num + den - 1) / den) as i64)
                 };
@@ -129,7 +142,11 @@ impl PositionBook {
     /// Returns realized PnL of the settlement.
     pub fn settle_event(&mut self, slug: &EventSlug, final_value: i32) -> Usd {
         let mut pnl = Usd::ZERO;
-        for p in self.positions.values_mut().filter(|p| &p.instrument.event_slug == slug) {
+        for p in self
+            .positions
+            .values_mut()
+            .filter(|p| &p.instrument.event_slug == slug)
+        {
             if p.shares.micros() == 0 {
                 continue;
             }
@@ -138,7 +155,11 @@ impl PositionBook {
                 OutcomeSide::Yes => in_bucket,
                 OutcomeSide::No => !in_bucket,
             };
-            let payout = if wins { Usd::from_micros(p.shares.micros()) } else { Usd::ZERO };
+            let payout = if wins {
+                Usd::from_micros(p.shares.micros())
+            } else {
+                Usd::ZERO
+            };
             let realized = payout - p.cost_basis;
             p.realized_pnl += realized;
             pnl += realized;
@@ -186,9 +207,14 @@ mod tests {
         let yes18 = instrument(OutcomeSide::Yes, 18);
         let no19 = instrument(OutcomeSide::No, 19);
         let mut book = PositionBook::new();
-        book.apply_fill(&fill(&yes18, Side::Buy, "0.95", 10, "0.02375"), &yes18).unwrap();
-        book.apply_fill(&fill(&no19, Side::Buy, "0.90", 10, "0"), &no19).unwrap();
-        assert_eq!(book.get(&yes18.token).unwrap().cost_basis, Usd::parse("9.52375").unwrap());
+        book.apply_fill(&fill(&yes18, Side::Buy, "0.95", 10, "0.02375"), &yes18)
+            .unwrap();
+        book.apply_fill(&fill(&no19, Side::Buy, "0.90", 10, "0"), &no19)
+            .unwrap();
+        assert_eq!(
+            book.get(&yes18.token).unwrap().cost_basis,
+            Usd::parse("9.52375").unwrap()
+        );
         let pnl = book.settle_event(&yes18.event_slug, 18);
         // YES 18 wins: +10 - 9.52375 ; NO 19 wins: +10 - 9.0
         assert_eq!(pnl, Usd::parse("1.47625").unwrap());
@@ -199,7 +225,8 @@ mod tests {
     fn settle_loss_when_high_breaks() {
         let yes18 = instrument(OutcomeSide::Yes, 18);
         let mut book = PositionBook::new();
-        book.apply_fill(&fill(&yes18, Side::Buy, "0.95", 10, "0"), &yes18).unwrap();
+        book.apply_fill(&fill(&yes18, Side::Buy, "0.95", 10, "0"), &yes18)
+            .unwrap();
         let pnl = book.settle_event(&yes18.event_slug, 19);
         assert_eq!(pnl, Usd::parse("-9.5").unwrap());
     }
@@ -208,13 +235,17 @@ mod tests {
     fn partial_sell_realizes_pnl_and_rejects_oversell() {
         let yes18 = instrument(OutcomeSide::Yes, 18);
         let mut book = PositionBook::new();
-        book.apply_fill(&fill(&yes18, Side::Buy, "0.90", 10, "0"), &yes18).unwrap();
-        book.apply_fill(&fill(&yes18, Side::Sell, "0.95", 4, "0"), &yes18).unwrap();
+        book.apply_fill(&fill(&yes18, Side::Buy, "0.90", 10, "0"), &yes18)
+            .unwrap();
+        book.apply_fill(&fill(&yes18, Side::Sell, "0.95", 4, "0"), &yes18)
+            .unwrap();
         let p = book.get(&yes18.token).unwrap();
         assert_eq!(p.shares, Shares::from_whole(6));
         assert_eq!(p.realized_pnl, Usd::parse("0.2").unwrap());
         assert_eq!(p.cost_basis, Usd::parse("5.4").unwrap());
-        let err = book.apply_fill(&fill(&yes18, Side::Sell, "0.95", 7, "0"), &yes18).unwrap_err();
+        let err = book
+            .apply_fill(&fill(&yes18, Side::Sell, "0.95", 7, "0"), &yes18)
+            .unwrap_err();
         assert!(matches!(err, PortfolioError::Oversell { .. }));
     }
 }

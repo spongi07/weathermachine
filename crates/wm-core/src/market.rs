@@ -44,19 +44,35 @@ pub struct TemperatureBucket {
 
 impl TemperatureBucket {
     pub fn exact(v: i32, unit: TempUnit) -> Self {
-        Self { lower: Some(v), upper: Some(v), unit }
+        Self {
+            lower: Some(v),
+            upper: Some(v),
+            unit,
+        }
     }
 
     pub fn at_or_below(v: i32, unit: TempUnit) -> Self {
-        Self { lower: None, upper: Some(v), unit }
+        Self {
+            lower: None,
+            upper: Some(v),
+            unit,
+        }
     }
 
     pub fn at_or_above(v: i32, unit: TempUnit) -> Self {
-        Self { lower: Some(v), upper: None, unit }
+        Self {
+            lower: Some(v),
+            upper: None,
+            unit,
+        }
     }
 
     pub fn range(lo: i32, hi: i32, unit: TempUnit) -> Self {
-        Self { lower: Some(lo.min(hi)), upper: Some(lo.max(hi)), unit }
+        Self {
+            lower: Some(lo.min(hi)),
+            upper: Some(lo.max(hi)),
+            unit,
+        }
     }
 
     pub fn contains(&self, whole: i32) -> bool {
@@ -200,7 +216,11 @@ impl DailyTemperatureMarket {
             return Err(PartitionError::MixedUnits);
         }
         for v in -80..=140 {
-            let n = self.outcomes.iter().filter(|o| o.bucket.contains(v)).count();
+            let n = self
+                .outcomes
+                .iter()
+                .filter(|o| o.bucket.contains(v))
+                .count();
             match n {
                 0 => return Err(PartitionError::Gap(v)),
                 1 => {}
@@ -329,10 +349,16 @@ pub struct FeeSchedule {
 }
 
 impl FeeSchedule {
-    pub const ZERO: FeeSchedule = FeeSchedule { taker_rate_micros: 0, maker_rate_micros: 0 };
+    pub const ZERO: FeeSchedule = FeeSchedule {
+        taker_rate_micros: 0,
+        maker_rate_micros: 0,
+    };
 
     pub fn taker(rate_micros: u32) -> Self {
-        Self { taker_rate_micros: rate_micros, maker_rate_micros: 0 }
+        Self {
+            taker_rate_micros: rate_micros,
+            maker_rate_micros: 0,
+        }
     }
 
     /// Fee charged for trading `shares` at `price` with the given rate, rounded
@@ -389,13 +415,28 @@ mod tests {
         let mut book = OrderBook {
             token: tok("1"),
             bids: vec![
-                BookLevel { price: Price::parse("0.93").unwrap(), size: Shares::from_whole(50) },
-                BookLevel { price: Price::parse("0.94").unwrap(), size: Shares::from_whole(10) },
-                BookLevel { price: Price::parse("0.90").unwrap(), size: Shares::ZERO },
+                BookLevel {
+                    price: Price::parse("0.93").unwrap(),
+                    size: Shares::from_whole(50),
+                },
+                BookLevel {
+                    price: Price::parse("0.94").unwrap(),
+                    size: Shares::from_whole(10),
+                },
+                BookLevel {
+                    price: Price::parse("0.90").unwrap(),
+                    size: Shares::ZERO,
+                },
             ],
             asks: vec![
-                BookLevel { price: Price::parse("0.97").unwrap(), size: Shares::from_whole(100) },
-                BookLevel { price: Price::parse("0.96").unwrap(), size: Shares::from_whole(20) },
+                BookLevel {
+                    price: Price::parse("0.97").unwrap(),
+                    size: Shares::from_whole(100),
+                },
+                BookLevel {
+                    price: Price::parse("0.96").unwrap(),
+                    size: Shares::from_whole(20),
+                },
             ],
             tick_size: Price::parse("0.01").unwrap(),
             min_order_size: Shares::from_whole(5),
@@ -404,8 +445,14 @@ mod tests {
             hash: None,
         };
         book.normalize();
-        assert_eq!(book.best_bid().unwrap().price, Price::parse("0.94").unwrap());
-        assert_eq!(book.best_ask().unwrap().price, Price::parse("0.96").unwrap());
+        assert_eq!(
+            book.best_bid().unwrap().price,
+            Price::parse("0.94").unwrap()
+        );
+        assert_eq!(
+            book.best_ask().unwrap().price,
+            Price::parse("0.96").unwrap()
+        );
         assert_eq!(book.spread(), Some(Price::parse("0.02").unwrap()));
         assert_eq!(book.bids.len(), 2, "zero-size level dropped");
         let (sh, cost) = book.ask_depth_up_to(Price::parse("0.96").unwrap());
@@ -419,11 +466,23 @@ mod tests {
     fn polymarket_fee_formula() {
         let fees = FeeSchedule::taker(50_000);
         // At p = 0.50 the fee is 0.05 × 0.25 = $0.0125/share → $1.25 per 100 shares.
-        assert_eq!(fees.taker_fee(Price::parse("0.5").unwrap(), Shares::from_whole(100)), Usd::parse("1.25").unwrap());
+        assert_eq!(
+            fees.taker_fee(Price::parse("0.5").unwrap(), Shares::from_whole(100)),
+            Usd::parse("1.25").unwrap()
+        );
         // At p = 0.95: 0.05 × 0.95 × 0.05 = 0.002375/share.
-        assert_eq!(fees.taker_fee(Price::parse("0.95").unwrap(), Shares::from_whole(100)), Usd::parse("0.2375").unwrap());
+        assert_eq!(
+            fees.taker_fee(Price::parse("0.95").unwrap(), Shares::from_whole(100)),
+            Usd::parse("0.2375").unwrap()
+        );
         assert!((fees.taker_fee_per_share(Price::parse("0.95").unwrap()) - 0.002375).abs() < 1e-12);
-        assert_eq!(fees.maker_fee(Price::parse("0.95").unwrap(), Shares::from_whole(100)), Usd::ZERO);
-        assert_eq!(FeeSchedule::ZERO.taker_fee(Price::parse("0.5").unwrap(), Shares::from_whole(100)), Usd::ZERO);
+        assert_eq!(
+            fees.maker_fee(Price::parse("0.95").unwrap(), Shares::from_whole(100)),
+            Usd::ZERO
+        );
+        assert_eq!(
+            FeeSchedule::ZERO.taker_fee(Price::parse("0.5").unwrap(), Shares::from_whole(100)),
+            Usd::ZERO
+        );
     }
 }

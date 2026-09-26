@@ -16,7 +16,12 @@ pub mod rules;
 pub mod ws;
 
 pub use clob::{ClobClient, ClobError, parse_book};
-pub use gamma::{GammaClient, GammaError, GammaEvent, LocationMarketSpec, MappingError, build_market, event_slug, parse_events};
+pub use gamma::{
+    GammaClient, GammaError, GammaEvent, LocationMarketSpec, MappingError, build_market,
+    event_slug, parse_events,
+};
 pub use outcomes::{map_outcome, parse_bucket_label};
 pub use rules::parse_resolution_spec;
-pub use ws::{LocalBook, MarketStream, MarketStreamConfig, StreamStatus, WsEvent, parse_ws_message};
+pub use ws::{
+    LocalBook, MarketStream, MarketStreamConfig, StreamStatus, WsEvent, parse_ws_message,
+};

@@ -88,17 +88,29 @@ pub enum FetchError {
     #[error("gate closed: {0}")]
     GateClosed(GateWait),
     #[error("throttled (retry after {retry_after:?})")]
-    Throttled { retry_after: Option<Duration>, record: Box<ProviderRequestRecord> },
+    Throttled {
+        retry_after: Option<Duration>,
+        record: Box<ProviderRequestRecord>,
+    },
     #[error("HTTP status {status}")]
-    Status { status: u16, record: Box<ProviderRequestRecord> },
+    Status {
+        status: u16,
+        record: Box<ProviderRequestRecord>,
+    },
     #[error("request timed out")]
     Timeout { record: Box<ProviderRequestRecord> },
     #[error("connection failed")]
     Connect { record: Box<ProviderRequestRecord> },
     #[error("response body exceeds {limit} bytes")]
-    BodyTooLarge { limit: usize, record: Box<ProviderRequestRecord> },
+    BodyTooLarge {
+        limit: usize,
+        record: Box<ProviderRequestRecord>,
+    },
     #[error("transport error: {detail}")]
-    Transport { detail: String, record: Box<ProviderRequestRecord> },
+    Transport {
+        detail: String,
+        record: Box<ProviderRequestRecord>,
+    },
 }
 
 impl FetchError {
@@ -135,14 +147,17 @@ pub struct HttpFetcher {
 
 impl std::fmt::Debug for HttpFetcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpFetcher").field("provider", &self.provider).finish()
+        f.debug_struct("HttpFetcher")
+            .field("provider", &self.provider)
+            .finish()
     }
 }
 
 impl HttpFetcher {
     pub fn new(gate: Arc<ProviderGate>, user_agent: &str) -> Result<Self, NetError> {
         let policy = gate.policy();
-        let ua = HeaderValue::from_str(user_agent).map_err(|e| NetError::UserAgent(e.to_string()))?;
+        let ua =
+            HeaderValue::from_str(user_agent).map_err(|e| NetError::UserAgent(e.to_string()))?;
         let client = reqwest::Client::builder()
             .user_agent(ua)
             .connect_timeout(policy.connect_timeout)
@@ -188,20 +203,39 @@ impl HttpFetcher {
     pub async fn get(&self, req: &FetchRequest) -> Result<FetchResponse, FetchError> {
         let clock = Arc::clone(self.gate.clock());
         let wait_started = clock.monotonic();
-        let permit = self.gate.acquire(req.max_gate_wait).await.map_err(FetchError::GateClosed)?;
+        let permit = self
+            .gate
+            .acquire(req.max_gate_wait)
+            .await
+            .map_err(FetchError::GateClosed)?;
         let gate_wait = clock.monotonic().saturating_sub(wait_started);
         let requested_at = clock.now();
 
         let mut headers = HeaderMap::new();
         if let Some(a) = req.accept {
-            headers.insert(HeaderName::from_static("accept"), HeaderValue::from_static(a));
+            headers.insert(
+                HeaderName::from_static("accept"),
+                HeaderValue::from_static(a),
+            );
         }
-        let cached = if req.conditional { self.cache.get(&req.url) } else { None };
+        let cached = if req.conditional {
+            self.cache.get(&req.url)
+        } else {
+            None
+        };
         if let Some(c) = &cached {
-            if let Some(etag) = c.etag.as_deref().and_then(|e| HeaderValue::from_str(e).ok()) {
+            if let Some(etag) = c
+                .etag
+                .as_deref()
+                .and_then(|e| HeaderValue::from_str(e).ok())
+            {
                 headers.insert(IF_NONE_MATCH, etag);
             }
-            if let Some(lm) = c.last_modified.as_deref().and_then(|v| HeaderValue::from_str(v).ok()) {
+            if let Some(lm) = c
+                .last_modified
+                .as_deref()
+                .and_then(|v| HeaderValue::from_str(v).ok())
+            {
                 headers.insert(IF_MODIFIED_SINCE, lm);
             }
         }
@@ -283,27 +317,45 @@ impl HttpFetcher {
         if status == 429 {
             record.throttled = true;
             self.count("429_total");
-            let outcome = RequestOutcome::Throttled { status, retry_after };
+            let outcome = RequestOutcome::Throttled {
+                status,
+                retry_after,
+            };
             let err_record = self.finish_record(record, &clock, started, "throttled");
             permit.complete(outcome);
             self.count("failures_total");
             tracing::warn!(provider = %self.provider, ?retry_after, "provider throttled us; backing off");
-            return Err(FetchError::Throttled { retry_after, record: Box::new(err_record) });
+            return Err(FetchError::Throttled {
+                retry_after,
+                record: Box::new(err_record),
+            });
         }
 
         if !(200..300).contains(&status) {
             let outcome = if status >= 500 {
-                RequestOutcome::ServerError { status, retry_after }
+                RequestOutcome::ServerError {
+                    status,
+                    retry_after,
+                }
             } else {
                 RequestOutcome::ClientError { status }
             };
             let err_record = self.finish_record(record, &clock, started, "http_status");
             permit.complete(outcome);
             self.count("failures_total");
-            return Err(FetchError::Status { status, record: Box::new(err_record) });
+            return Err(FetchError::Status {
+                status,
+                record: Box::new(err_record),
+            });
         }
 
-        let header_str = |name| response.headers().get(name).and_then(|v: &HeaderValue| v.to_str().ok()).map(str::to_owned);
+        let header_str = |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v: &HeaderValue| v.to_str().ok())
+                .map(str::to_owned)
+        };
         let etag = header_str(ETAG);
         let last_modified = header_str(LAST_MODIFIED);
         let content_type = header_str(CONTENT_TYPE);
@@ -314,7 +366,10 @@ impl HttpFetcher {
                 let err_record = self.finish_record(record, &clock, started, "body_too_large");
                 permit.complete(RequestOutcome::Other("body too large".into()));
                 self.count("failures_total");
-                return Err(FetchError::BodyTooLarge { limit: self.max_body_bytes, record: Box::new(err_record) });
+                return Err(FetchError::BodyTooLarge {
+                    limit: self.max_body_bytes,
+                    record: Box::new(err_record),
+                });
             }
             Err(ReadError::Transport(detail)) => {
                 return Err(self.fail(
@@ -388,7 +443,10 @@ impl HttpFetcher {
         let err = match &outcome {
             RequestOutcome::Timeout => FetchError::Timeout { record: rec },
             RequestOutcome::Connect => FetchError::Connect { record: rec },
-            _ => FetchError::Transport { detail: detail.clone(), record: rec },
+            _ => FetchError::Transport {
+                detail: detail.clone(),
+                record: rec,
+            },
         };
         permit.complete(outcome);
         self.count("failures_total");

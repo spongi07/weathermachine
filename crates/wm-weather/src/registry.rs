@@ -22,15 +22,24 @@ impl CollectorRegistry {
 
     /// Claim a station. Fails if already claimed; the claim is released on drop.
     pub fn claim(&self, station: &StationId) -> Result<CollectorClaim, AlreadyRunning> {
-        let mut set = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut set = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !set.insert(station.clone()) {
             return Err(AlreadyRunning(station.clone()));
         }
-        Ok(CollectorClaim { station: station.clone(), registry: self.clone() })
+        Ok(CollectorClaim {
+            station: station.clone(),
+            registry: self.clone(),
+        })
     }
 
     pub fn is_claimed(&self, station: &StationId) -> bool {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(station)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(station)
     }
 }
 
@@ -49,7 +58,11 @@ impl CollectorClaim {
 
 impl Drop for CollectorClaim {
     fn drop(&mut self) {
-        self.registry.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.station);
+        self.registry
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.station);
     }
 }
 

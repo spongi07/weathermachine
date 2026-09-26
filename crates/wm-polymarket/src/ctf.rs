@@ -32,19 +32,29 @@ pub fn merge(yes: Shares, no: Shares) -> Usd {
 
 /// Payout for redeeming `shares` of a token after resolution.
 pub fn redeem(shares: Shares, won: bool) -> Usd {
-    if won { Usd::from_micros(shares.micros().max(0)) } else { Usd::ZERO }
+    if won {
+        Usd::from_micros(shares.micros().max(0))
+    } else {
+        Usd::ZERO
+    }
 }
 
 /// Neg-risk conversion of `amount` NO tokens held on `m` of `n` questions.
 /// Returns (collateral released, YES tokens per remaining question, remaining question count).
-pub fn neg_risk_convert(n_questions: usize, m_converted: usize, amount: Shares, fee_bips: u32) -> Option<(Usd, Shares, usize)> {
+pub fn neg_risk_convert(
+    n_questions: usize,
+    m_converted: usize,
+    amount: Shares,
+    fee_bips: u32,
+) -> Option<(Usd, Shares, usize)> {
     if m_converted == 0 || m_converted > n_questions || amount.micros() <= 0 {
         return None;
     }
     let gross = i128::from(amount.micros()) * (m_converted as i128 - 1);
     let fee = gross * i128::from(fee_bips) / 10_000;
     let collateral = Usd::from_micros(i64::try_from(gross - fee).ok()?);
-    let yes_amount = Shares::from_micros(amount.micros() - amount.micros() * i64::from(fee_bips) / 10_000);
+    let yes_amount =
+        Shares::from_micros(amount.micros() - amount.micros() * i64::from(fee_bips) / 10_000);
     Some((collateral, yes_amount, n_questions - m_converted))
 }
 
@@ -57,7 +67,10 @@ mod tests {
         let (y, n) = split(Usd::from_whole(10));
         assert_eq!(y, Shares::from_whole(10));
         assert_eq!(merge(y, n), Usd::from_whole(10));
-        assert_eq!(merge(Shares::from_whole(3), Shares::from_whole(10)), Usd::from_whole(3));
+        assert_eq!(
+            merge(Shares::from_whole(3), Shares::from_whole(10)),
+            Usd::from_whole(3)
+        );
         assert_eq!(redeem(Shares::from_whole(7), true), Usd::from_whole(7));
         assert_eq!(redeem(Shares::from_whole(7), false), Usd::ZERO);
     }

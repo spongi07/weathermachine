@@ -16,7 +16,9 @@ use wm_core::market::{FeeSchedule, TempUnit};
 use wm_core::time::SystemClock;
 use wm_core::units::Price;
 use wm_net::{HttpFetcher, ProviderGate, RateLimitPolicy};
-use wm_polymarket::{GammaClient, LocationMarketSpec, MarketStream, MarketStreamConfig, build_market, event_slug};
+use wm_polymarket::{
+    GammaClient, LocationMarketSpec, MarketStream, MarketStreamConfig, build_market, event_slug,
+};
 
 #[tokio::test]
 async fn market_stream_builds_books_pings_and_reconnects() {
@@ -52,8 +54,18 @@ async fn market_stream_builds_books_pings_and_reconnects() {
 
     let mut policy = RateLimitPolicy::local_test();
     policy.min_interval = Duration::from_millis(50);
-    let gate = ProviderGate::new(ProviderId::polymarket_ws(), policy, Arc::new(SystemClock::new()), 3);
-    let cfg = MarketStreamConfig { url: format!("ws://{addr}"), ping_interval: Duration::from_millis(200), book_depth: 5, max_reconnect_wait: Duration::from_secs(2) };
+    let gate = ProviderGate::new(
+        ProviderId::polymarket_ws(),
+        policy,
+        Arc::new(SystemClock::new()),
+        3,
+    );
+    let cfg = MarketStreamConfig {
+        url: format!("ws://{addr}"),
+        ping_interval: Duration::from_millis(200),
+        book_depth: 5,
+        max_reconnect_wait: Duration::from_secs(2),
+    };
     let stream = MarketStream::new(cfg, gate, Arc::new(SystemClock::new()));
     let status = stream.status();
     let (assets_tx, assets_rx) = watch::channel(vec![TokenId::new("1018").unwrap()]);
@@ -61,21 +73,42 @@ async fn market_stream_builds_books_pings_and_reconnects() {
     let (stop_tx, stop_rx) = watch::channel(false);
     let handle = tokio::spawn(stream.run(assets_rx, out_tx, stop_rx));
 
-    let sub = tokio::time::timeout(Duration::from_secs(3), sub_rx.recv()).await.unwrap().unwrap();
-    assert!(sub.contains("\"assets_ids\":[\"1018\"]") && sub.contains("\"type\":\"market\""), "{sub}");
+    let sub = tokio::time::timeout(Duration::from_secs(3), sub_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sub.contains("\"assets_ids\":[\"1018\"]") && sub.contains("\"type\":\"market\""),
+        "{sub}"
+    );
     let mut best_bids = Vec::new();
     while best_bids.len() < 2 {
-        let env = tokio::time::timeout(Duration::from_secs(3), out_rx.recv()).await.unwrap().unwrap();
+        let env = tokio::time::timeout(Duration::from_secs(3), out_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         if let WeatherMachineEvent::OrderBookUpdate(b) = env.event {
             best_bids.push(b.book.best_bid().unwrap().price);
         }
     }
-    assert_eq!(best_bids, vec![Price::parse("0.93").unwrap(), Price::parse("0.94").unwrap()]);
-    tokio::time::timeout(Duration::from_secs(3), ping_rx.recv()).await.unwrap().unwrap();
+    assert_eq!(
+        best_bids,
+        vec![Price::parse("0.93").unwrap(), Price::parse("0.94").unwrap()]
+    );
+    tokio::time::timeout(Duration::from_secs(3), ping_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     // After the server drops the connection the stream reconnects and resubscribes.
-    let sub2 = tokio::time::timeout(Duration::from_secs(5), sub_rx.recv()).await.unwrap().unwrap();
+    let sub2 = tokio::time::timeout(Duration::from_secs(5), sub_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(sub2.contains("1018"));
-    let env = tokio::time::timeout(Duration::from_secs(3), out_rx.recv()).await.unwrap().unwrap();
+    let env = tokio::time::timeout(Duration::from_secs(3), out_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(env.event, WeatherMachineEvent::OrderBookUpdate(_)));
     assert!(status.borrow().reconnects_total >= 1);
     drop(assets_tx);
@@ -86,9 +119,16 @@ async fn market_stream_builds_books_pings_and_reconnects() {
 #[tokio::test]
 async fn gamma_discovery_maps_event() {
     let server = MockServer::start().await;
-    let slug = event_slug("highest-temperature-in-amsterdam-on-{month}-{day}-{year}", NaiveDate::from_ymd_opt(2026, 9, 25).unwrap());
+    let slug = event_slug(
+        "highest-temperature-in-amsterdam-on-{month}-{day}-{year}",
+        NaiveDate::from_ymd_opt(2026, 9, 25).unwrap(),
+    );
     let market = |title: &str, i: u32| {
-        format!(r#"{{"id":"m{i}","question":"q","conditionId":"0xc{i}","groupItemTitle":"{title}","outcomes":"[\"Yes\",\"No\"]","clobTokenIds":"[\"{}\",\"{}\"]","acceptingOrders":true,"closed":false}}"#, 1000 + i, 2000 + i)
+        format!(
+            r#"{{"id":"m{i}","question":"q","conditionId":"0xc{i}","groupItemTitle":"{title}","outcomes":"[\"Yes\",\"No\"]","clobTokenIds":"[\"{}\",\"{}\"]","acceptingOrders":true,"closed":false}}"#,
+            1000 + i,
+            2000 + i
+        )
     };
     let body = format!(
         r#"[{{"id":"e","slug":"{slug}","title":"Highest temperature in Amsterdam on September 25?","description":"This market will resolve to the temperature range that contains the highest temperature recorded by NOAA at the Amsterdam Airport Schiphol Station in degrees Celsius. The resolution source for this market will be information from NOAA, available here: https://www.weather.gov/wrh/timeseries?site=eham.","negRisk":true,"active":true,"closed":false,"markets":[{},{},{}]}}]"#,
@@ -96,11 +136,26 @@ async fn gamma_discovery_maps_event() {
         market("18°C", 18),
         market("19°C or higher", 19)
     );
-    Mock::given(method("GET")).and(path("/events")).and(query_param("slug", slug.as_str())).respond_with(ResponseTemplate::new(200).set_body_string(body)).expect(1).mount(&server).await;
-    let gate = ProviderGate::new(ProviderId::polymarket_gamma(), RateLimitPolicy::local_test(), Arc::new(SystemClock::new()), 1);
-    let fetcher = Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap());
+    Mock::given(method("GET"))
+        .and(path("/events"))
+        .and(query_param("slug", slug.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let gate = ProviderGate::new(
+        ProviderId::polymarket_gamma(),
+        RateLimitPolicy::local_test(),
+        Arc::new(SystemClock::new()),
+        1,
+    );
+    let fetcher =
+        Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap());
     let client = GammaClient::new(fetcher, server.uri());
-    let (events, raw) = client.events_by_slug(&slug, Duration::from_secs(1)).await.unwrap();
+    let (events, raw) = client
+        .events_by_slug(&slug, Duration::from_secs(1))
+        .await
+        .unwrap();
     assert!(!raw.is_empty());
     let spec = LocationMarketSpec {
         location: LocationId::new("amsterdam").unwrap(),
@@ -110,7 +165,13 @@ async fn gamma_discovery_maps_event() {
         unit: TempUnit::Celsius,
         fees: FeeSchedule::taker(50_000),
     };
-    let m = build_market(&events[0], &spec, NaiveDate::from_ymd_opt(2026, 9, 25).unwrap(), Utc::now()).unwrap();
+    let m = build_market(
+        &events[0],
+        &spec,
+        NaiveDate::from_ymd_opt(2026, 9, 25).unwrap(),
+        Utc::now(),
+    )
+    .unwrap();
     assert_eq!(m.outcomes.len(), 3);
     assert_eq!(m.outcome_for_value(18).unwrap().yes_token.as_str(), "1018");
     assert!(m.rules.text.contains("NOAA"));

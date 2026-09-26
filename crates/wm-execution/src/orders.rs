@@ -3,7 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
-use wm_core::ids::{ClientOrderId, ConditionId, DecisionId, EventSlug, LocationId, StrategyId, TokenId};
+use wm_core::ids::{
+    ClientOrderId, ConditionId, DecisionId, EventSlug, LocationId, StrategyId, TokenId,
+};
 use wm_core::market::{OutcomeSide, Side, TemperatureBucket};
 use wm_core::portfolio::InstrumentRef;
 use wm_core::trading::{IntentKind, OrderStatus, OrderUpdate, TimeInForce};
@@ -61,7 +63,11 @@ pub enum OrderError {
     #[error("unknown order {0}")]
     Unknown(ClientOrderId),
     #[error("invalid transition {from:?} → {to:?} for {id}")]
-    InvalidTransition { id: ClientOrderId, from: OrderStatus, to: OrderStatus },
+    InvalidTransition {
+        id: ClientOrderId,
+        from: OrderStatus,
+        to: OrderStatus,
+    },
     #[error("filled quantity would decrease or exceed order size for {0}")]
     InvalidFill(ClientOrderId),
 }
@@ -69,7 +75,10 @@ pub enum OrderError {
 /// Result of applying an update.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Applied {
-    Changed { previous: OrderStatus, newly_filled: Shares },
+    Changed {
+        previous: OrderStatus,
+        newly_filled: Shares,
+    },
     /// Duplicate delivery of an already applied update (idempotent).
     Unchanged,
 }
@@ -96,7 +105,12 @@ impl OrderManager {
     }
 
     /// Register an approved intent as a pending order.
-    pub fn register(&mut self, approved: &ApprovedIntent, bucket: TemperatureBucket, now: DateTime<Utc>) -> Result<&OrderRecord, OrderError> {
+    pub fn register(
+        &mut self,
+        approved: &ApprovedIntent,
+        bucket: TemperatureBucket,
+        now: DateTime<Utc>,
+    ) -> Result<&OrderRecord, OrderError> {
         let id = approved.client_order_id().clone();
         if self.orders.contains_key(&id) {
             return Err(OrderError::Duplicate(id));
@@ -135,12 +149,19 @@ impl OrderManager {
 
     /// Apply a venue update. Terminal orders ignore repeated identical updates.
     pub fn apply(&mut self, u: &OrderUpdate) -> Result<Applied, OrderError> {
-        let rec = self.orders.get_mut(&u.client_order_id).ok_or_else(|| OrderError::Unknown(u.client_order_id.clone()))?;
+        let rec = self
+            .orders
+            .get_mut(&u.client_order_id)
+            .ok_or_else(|| OrderError::Unknown(u.client_order_id.clone()))?;
         if rec.status == u.status && rec.filled == u.filled {
             return Ok(Applied::Unchanged);
         }
         if !allowed(rec.status, u.status) {
-            return Err(OrderError::InvalidTransition { id: rec.client_order_id.clone(), from: rec.status, to: u.status });
+            return Err(OrderError::InvalidTransition {
+                id: rec.client_order_id.clone(),
+                from: rec.status,
+                to: u.status,
+            });
         }
         if u.filled < rec.filled || u.filled > rec.shares {
             return Err(OrderError::InvalidFill(rec.client_order_id.clone()));
@@ -154,7 +175,10 @@ impl OrderManager {
         rec.venue_order_id = u.venue_order_id.clone().or(rec.venue_order_id.take());
         rec.reason = u.reason.clone().or(rec.reason.take());
         rec.updated_at = u.ts;
-        Ok(Applied::Changed { previous, newly_filled })
+        Ok(Applied::Changed {
+            previous,
+            newly_filled,
+        })
     }
 
     pub fn open_orders(&self) -> impl Iterator<Item = &OrderRecord> {

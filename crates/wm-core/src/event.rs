@@ -39,8 +39,18 @@ pub struct EventEnvelope {
 }
 
 impl EventEnvelope {
-    pub fn new(available_at: DateTime<Utc>, source: EventSource, event: WeatherMachineEvent) -> Self {
-        Self { seq: 0, available_at, recorded_at: available_at, source, event }
+    pub fn new(
+        available_at: DateTime<Utc>,
+        source: EventSource,
+        event: WeatherMachineEvent,
+    ) -> Self {
+        Self {
+            seq: 0,
+            available_at,
+            recorded_at: available_at,
+            source,
+            event,
+        }
     }
 }
 

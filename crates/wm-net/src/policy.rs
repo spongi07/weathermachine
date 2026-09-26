@@ -20,7 +20,9 @@ pub mod secs_f64 {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         let v = f64::deserialize(d)?;
         if !v.is_finite() || v < 0.0 {
-            return Err(serde::de::Error::custom("duration must be a non-negative number of seconds"));
+            return Err(serde::de::Error::custom(
+                "duration must be a non-negative number of seconds",
+            ));
         }
         Ok(Duration::from_secs_f64(v))
     }
@@ -79,9 +81,18 @@ impl ProviderClass {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
     #[error("{field} = {value:?} is below the {class:?} floor of {floor:?}")]
-    BelowFloor { field: &'static str, value: Duration, floor: Duration, class: ProviderClass },
+    BelowFloor {
+        field: &'static str,
+        value: Duration,
+        floor: Duration,
+        class: ProviderClass,
+    },
     #[error("max_concurrency {value} exceeds the {class:?} cap of {cap}")]
-    ConcurrencyAboveCap { value: u32, cap: u32, class: ProviderClass },
+    ConcurrencyAboveCap {
+        value: u32,
+        cap: u32,
+        class: ProviderClass,
+    },
     #[error("{0}")]
     Invalid(String),
 }
@@ -227,7 +238,11 @@ impl RateLimitPolicy {
             return Err(PolicyError::Invalid("max_concurrency must be >= 1".into()));
         }
         if self.max_concurrency > cap {
-            return Err(PolicyError::ConcurrencyAboveCap { value: self.max_concurrency, cap, class: self.class });
+            return Err(PolicyError::ConcurrencyAboveCap {
+                value: self.max_concurrency,
+                cap,
+                class: self.class,
+            });
         }
         if self.class.must_respect_retry_after() && !self.respect_retry_after {
             return Err(PolicyError::Invalid(format!(
@@ -239,16 +254,24 @@ impl RateLimitPolicy {
             return Err(PolicyError::Invalid("timeouts must be positive".into()));
         }
         if self.backoff_base.is_zero() || self.backoff_max < self.backoff_base {
-            return Err(PolicyError::Invalid("backoff_max must be >= backoff_base > 0".into()));
+            return Err(PolicyError::Invalid(
+                "backoff_max must be >= backoff_base > 0".into(),
+            ));
         }
         if self.circuit_failure_threshold == 0 {
-            return Err(PolicyError::Invalid("circuit_failure_threshold must be >= 1".into()));
+            return Err(PolicyError::Invalid(
+                "circuit_failure_threshold must be >= 1".into(),
+            ));
         }
         if self.circuit_open_max < self.circuit_open_base {
-            return Err(PolicyError::Invalid("circuit_open_max must be >= circuit_open_base".into()));
+            return Err(PolicyError::Invalid(
+                "circuit_open_max must be >= circuit_open_base".into(),
+            ));
         }
         if self.politeness_factor == 0 {
-            return Err(PolicyError::Invalid("politeness_factor must be >= 1".into()));
+            return Err(PolicyError::Invalid(
+                "politeness_factor must be >= 1".into(),
+            ));
         }
         if self.max_body_bytes == 0 {
             return Err(PolicyError::Invalid("max_body_bytes must be > 0".into()));
@@ -264,7 +287,9 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         RateLimitPolicy::nws_conservative().validate().unwrap();
-        RateLimitPolicy::public_data_conservative().validate().unwrap();
+        RateLimitPolicy::public_data_conservative()
+            .validate()
+            .unwrap();
         RateLimitPolicy::polymarket_rest().validate().unwrap();
         RateLimitPolicy::local_test().validate().unwrap();
     }
@@ -276,7 +301,10 @@ mod tests {
         assert!(matches!(p.validate(), Err(PolicyError::BelowFloor { .. })));
         let mut p = RateLimitPolicy::nws_conservative();
         p.max_concurrency = 2;
-        assert!(matches!(p.validate(), Err(PolicyError::ConcurrencyAboveCap { .. })));
+        assert!(matches!(
+            p.validate(),
+            Err(PolicyError::ConcurrencyAboveCap { .. })
+        ));
         let mut p = RateLimitPolicy::nws_conservative();
         p.respect_retry_after = false;
         assert!(p.validate().is_err());

@@ -5,7 +5,9 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wm_core::health::ProviderHealthState;
-use wm_core::ids::{ClientOrderId, DecisionId, EventSlug, LocationId, StationId, StrategyId, TokenId};
+use wm_core::ids::{
+    ClientOrderId, DecisionId, EventSlug, LocationId, StationId, StrategyId, TokenId,
+};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side, TemperatureBucket};
 use wm_core::portfolio::PositionBook;
 use wm_core::trading::{IntentKind, RunMode, TimeInForce, TradeIntent};
@@ -36,6 +38,11 @@ pub struct RiskConfig {
     #[serde(with = "decimal_serde::price")]
     pub min_price: Price,
     pub max_weather_age_minutes: i64,
+    /// Largest tolerated hole in the local day's observation series (from local
+    /// midnight to the latest report). A day with a hole may have missed the
+    /// true high, so it is never traded (fail closed).
+    #[serde(default = "default_max_observation_gap_minutes")]
+    pub max_observation_gap_minutes: i64,
     pub max_book_age_ms: i64,
     /// After a correction to the current day's data, block new weather positions this long.
     pub correction_cooldown_minutes: i64,
@@ -58,12 +65,18 @@ impl Default for RiskConfig {
             max_price: Price::saturating_from_micros(990_000),
             min_price: Price::saturating_from_micros(10_000),
             max_weather_age_minutes: 40,
+            max_observation_gap_minutes: default_max_observation_gap_minutes(),
             max_book_age_ms: 15_000,
             correction_cooldown_minutes: 10,
             max_orders_per_minute: 6,
             require_approved_resolution_spec: false,
         }
     }
+}
+
+/// Routine METARs are half-hourly: one missed report plus a margin.
+pub const fn default_max_observation_gap_minutes() -> i64 {
+    75
 }
 
 /// Configuration errors.
@@ -78,13 +91,20 @@ impl RiskConfig {
             return Err(RiskConfigError("sizes must be positive".into()));
         }
         if pos > self.global_max_exposure_usd {
-            return Err(RiskConfigError("position_size_usd exceeds global_max_exposure_usd".into()));
+            return Err(RiskConfigError(
+                "position_size_usd exceeds global_max_exposure_usd".into(),
+            ));
         }
         if self.min_price >= self.max_price {
             return Err(RiskConfigError("min_price must be < max_price".into()));
         }
         if self.max_orders_per_minute == 0 {
             return Err(RiskConfigError("max_orders_per_minute must be ≥ 1".into()));
+        }
+        if self.max_observation_gap_minutes < 30 {
+            return Err(RiskConfigError(
+                "max_observation_gap_minutes must be ≥ 30 (half-hourly reports)".into(),
+            ));
         }
         Ok(())
     }
@@ -102,6 +122,7 @@ pub enum CheckId {
     Execution,
     WeatherHealth,
     WeatherFreshness,
+    WeatherCoverage,
     CorrectionCooldown,
     MarketData,
     MarketStatus,
@@ -163,7 +184,10 @@ impl ApprovedIntent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiskDecision {
     Approved(ApprovedIntent),
-    Rejected { intent: TradeIntent, reasons: Vec<RiskRejection> },
+    Rejected {
+        intent: TradeIntent,
+        reasons: Vec<RiskRejection>,
+    },
 }
 
 impl RiskDecision {
@@ -181,6 +205,9 @@ pub struct WeatherStatus {
     pub health: ProviderHealthState,
     /// Most recent correction/revision affecting the station.
     pub last_correction_at: Option<DateTime<Utc>>,
+    /// Largest gap (minutes) in the current local day's series, counted from
+    /// local midnight to the latest observation. `None` = no observation today.
+    pub max_gap_minutes: Option<i64>,
 }
 
 /// A live (unfilled) order, counted as exposure if it is a buy.
@@ -249,7 +276,13 @@ pub struct ExposureSummary {
 
 impl RiskEngine {
     pub fn new(config: RiskConfig, run: &wm_core::ids::RunId) -> Self {
-        Self { config, daily: DailyCounters::default(), recent_orders: VecDeque::new(), seen_decisions: HashSet::new(), run_short: run.short() }
+        Self {
+            config,
+            daily: DailyCounters::default(),
+            recent_orders: VecDeque::new(),
+            seen_decisions: HashSet::new(),
+            run_short: run.short(),
+        }
     }
 
     pub fn config(&self) -> &RiskConfig {
@@ -273,25 +306,46 @@ impl RiskEngine {
     fn roll_day(&mut self, now: DateTime<Utc>) {
         let d = now.date_naive();
         if self.daily.date != Some(d) {
-            self.daily = DailyCounters { date: Some(d), ..DailyCounters::default() };
+            self.daily = DailyCounters {
+                date: Some(d),
+                ..DailyCounters::default()
+            };
         }
     }
 
     /// Legs per event: positions plus pending buys (treated as filled at limit).
-    fn legs_by_event(p: &PortfolioView<'_>) -> HashMap<EventSlug, Vec<(Leg, LocationId, Option<StrategyId>)>> {
-        let mut map: HashMap<EventSlug, Vec<(Leg, LocationId, Option<StrategyId>)>> = HashMap::new();
+    fn legs_by_event(
+        p: &PortfolioView<'_>,
+    ) -> HashMap<EventSlug, Vec<(Leg, LocationId, Option<StrategyId>)>> {
+        let mut map: HashMap<EventSlug, Vec<(Leg, LocationId, Option<StrategyId>)>> =
+            HashMap::new();
         for pos in p.positions.open_positions() {
-            let loc = p.markets.get(&pos.instrument.event_slug).map(|m| m.location.clone());
+            let loc = p
+                .markets
+                .get(&pos.instrument.event_slug)
+                .map(|m| m.location.clone());
             let Some(loc) = loc else { continue };
-            map.entry(pos.instrument.event_slug.clone()).or_default().push((
-                Leg { bucket: pos.instrument.bucket, side: pos.instrument.outcome_side, shares: pos.shares, cost: pos.cost_basis },
-                loc,
-                p.position_strategy.get(&pos.instrument.token).cloned(),
-            ));
+            map.entry(pos.instrument.event_slug.clone())
+                .or_default()
+                .push((
+                    Leg {
+                        bucket: pos.instrument.bucket,
+                        side: pos.instrument.outcome_side,
+                        shares: pos.shares,
+                        cost: pos.cost_basis,
+                    },
+                    loc,
+                    p.position_strategy.get(&pos.instrument.token).cloned(),
+                ));
         }
         for o in p.open_orders.iter().filter(|o| o.side == Side::Buy) {
             map.entry(o.event_slug.clone()).or_default().push((
-                Leg { bucket: o.bucket, side: o.outcome_side, shares: o.remaining, cost: notional(o.limit_price, o.remaining, Rounding::Up) },
+                Leg {
+                    bucket: o.bucket,
+                    side: o.outcome_side,
+                    shares: o.remaining,
+                    cost: notional(o.limit_price, o.remaining, Rounding::Up),
+                },
                 o.location.clone(),
                 Some(o.strategy.clone()),
             ));
@@ -305,7 +359,9 @@ impl RiskEngine {
         let mut s = ExposureSummary::default();
         let mut per_loc: HashMap<LocationId, Usd> = HashMap::new();
         for (slug, ls) in &legs {
-            let Some(m) = p.markets.get(slug) else { continue };
+            let Some(m) = p.markets.get(slug) else {
+                continue;
+            };
             let only: Vec<Leg> = ls.iter().map(|(l, _, _)| *l).collect();
             let e = event_exposure(m, &only);
             s.global_worst_case += e.worst_case_loss;
@@ -330,16 +386,28 @@ impl RiskEngine {
 
         // -- System gates ------------------------------------------------------
         if let Some(reason) = inp.kill_switch {
-            fail(CheckId::KillSwitch, format!("kill switch engaged: {reason}"));
+            fail(
+                CheckId::KillSwitch,
+                format!("kill switch engaged: {reason}"),
+            );
         }
         if inp.mode == RunMode::Live {
-            fail(CheckId::Mode, "live trading is not enabled in this build (Phase 14 gate)".into());
+            fail(
+                CheckId::Mode,
+                "live trading is not enabled in this build (Phase 14 gate)".into(),
+            );
         }
         if intent.research_only && inp.mode != RunMode::Backtest {
-            fail(CheckId::ResearchOnly, "research-only strategy outside backtest".into());
+            fail(
+                CheckId::ResearchOnly,
+                "research-only strategy outside backtest".into(),
+            );
         }
         if inp.mode == RunMode::Live && !inp.compliance_ok {
-            fail(CheckId::Compliance, "jurisdiction/compliance gate not satisfied".into());
+            fail(
+                CheckId::Compliance,
+                "jurisdiction/compliance gate not satisfied".into(),
+            );
         }
         if inp.mode != RunMode::Backtest && !inp.storage_ok {
             fail(CheckId::Storage, "audit storage unavailable".into());
@@ -351,22 +419,53 @@ impl RiskEngine {
         // -- Weather gates (new weather-dependent positions only) ---------------
         if opening && intent.weather_dependent {
             match inp.weather {
-                None => fail(CheckId::WeatherHealth, "no weather status for station".into()),
+                None => fail(
+                    CheckId::WeatherHealth,
+                    "no weather status for station".into(),
+                ),
                 Some(w) => {
                     if !w.health.allows_new_weather_positions() {
-                        fail(CheckId::WeatherHealth, format!("observation source {}", w.health));
+                        fail(
+                            CheckId::WeatherHealth,
+                            format!("observation source {}", w.health),
+                        );
                     }
                     match w.last_observation_at {
                         None => fail(CheckId::WeatherFreshness, "no observation yet".into()),
                         Some(t) => {
                             let age = (inp.now - t).num_minutes();
                             if age > cfg.max_weather_age_minutes {
-                                fail(CheckId::WeatherFreshness, format!("latest observation {age} min old > {}", cfg.max_weather_age_minutes));
+                                fail(
+                                    CheckId::WeatherFreshness,
+                                    format!(
+                                        "latest observation {age} min old > {}",
+                                        cfg.max_weather_age_minutes
+                                    ),
+                                );
                             }
                             if t > inp.now + Duration::minutes(5) {
-                                fail(CheckId::WeatherFreshness, "observation time in the future".into());
+                                fail(
+                                    CheckId::WeatherFreshness,
+                                    "observation time in the future".into(),
+                                );
                             }
                         }
+                    }
+                    match w.max_gap_minutes {
+                        None => fail(
+                            CheckId::WeatherCoverage,
+                            "no observation for the local day yet".into(),
+                        ),
+                        Some(g) if g > cfg.max_observation_gap_minutes => {
+                            fail(
+                                CheckId::WeatherCoverage,
+                                format!(
+                                    "day series has a {g} min gap > {} (high may be missed)",
+                                    cfg.max_observation_gap_minutes
+                                ),
+                            );
+                        }
+                        Some(_) => {}
                     }
                     if let Some(c) = w.last_correction_at
                         && inp.now - c < Duration::minutes(cfg.correction_cooldown_minutes)
@@ -383,7 +482,10 @@ impl RiskEngine {
             Some(b) => {
                 let age = b.age_ms(inp.now);
                 if opening && age > cfg.max_book_age_ms {
-                    fail(CheckId::MarketData, format!("order book {age} ms old > {}", cfg.max_book_age_ms));
+                    fail(
+                        CheckId::MarketData,
+                        format!("order book {age} ms old > {}", cfg.max_book_age_ms),
+                    );
                 }
                 if b.token != intent.token {
                     fail(CheckId::MarketData, "book/token mismatch".into());
@@ -391,7 +493,9 @@ impl RiskEngine {
                 if opening {
                     match b.spread() {
                         None => fail(CheckId::Spread, "one-sided book".into()),
-                        Some(sp) if sp > cfg.max_spread => fail(CheckId::Spread, format!("spread {sp} > {}", cfg.max_spread)),
+                        Some(sp) if sp > cfg.max_spread => {
+                            fail(CheckId::Spread, format!("spread {sp} > {}", cfg.max_spread))
+                        }
                         _ => {}
                     }
                     // Marketable orders need displayed depth now; passive orders
@@ -400,24 +504,46 @@ impl RiskEngine {
                     if intent.side == Side::Buy && marketable {
                         let (depth, _) = b.ask_depth_up_to(intent.limit_price);
                         if depth < intent.shares {
-                            fail(CheckId::Liquidity, format!("ask depth {depth} < {} shares at ≤ {}", intent.shares, intent.limit_price));
+                            fail(
+                                CheckId::Liquidity,
+                                format!(
+                                    "ask depth {depth} < {} shares at ≤ {}",
+                                    intent.shares, intent.limit_price
+                                ),
+                            );
                         }
                     }
                 }
                 if !intent.limit_price.is_on_tick(b.tick_size) {
-                    fail(CheckId::Tick, format!("price {} not on tick {}", intent.limit_price, b.tick_size));
+                    fail(
+                        CheckId::Tick,
+                        format!("price {} not on tick {}", intent.limit_price, b.tick_size),
+                    );
                 }
             }
         }
-        let outcome = inp.market.outcomes.iter().find(|o| o.yes_token == intent.token || o.no_token == intent.token);
+        let outcome = inp
+            .market
+            .outcomes
+            .iter()
+            .find(|o| o.yes_token == intent.token || o.no_token == intent.token);
         match outcome {
             None => fail(CheckId::MarketStatus, "token not in market".into()),
             Some(o) => {
                 if o.closed || !o.accepting_orders || inp.market.closed {
-                    fail(CheckId::MarketStatus, "market closed or not accepting orders".into());
+                    fail(
+                        CheckId::MarketStatus,
+                        "market closed or not accepting orders".into(),
+                    );
                 }
                 if intent.shares < o.min_order_size {
-                    fail(CheckId::MinSize, format!("{} shares < market minimum {}", intent.shares, o.min_order_size));
+                    fail(
+                        CheckId::MinSize,
+                        format!(
+                            "{} shares < market minimum {}",
+                            intent.shares, o.min_order_size
+                        ),
+                    );
                 }
             }
         }
@@ -427,14 +553,28 @@ impl RiskEngine {
             fail(CheckId::MarketStatus, "market end time passed".into());
         }
         if opening && (intent.limit_price > cfg.max_price || intent.limit_price < cfg.min_price) {
-            fail(CheckId::PriceBounds, format!("price {} outside [{}, {}]", intent.limit_price, cfg.min_price, cfg.max_price));
+            fail(
+                CheckId::PriceBounds,
+                format!(
+                    "price {} outside [{}, {}]",
+                    intent.limit_price, cfg.min_price, cfg.max_price
+                ),
+            );
         }
         if opening {
             if !inp.market.resolution.is_machine_tradable() {
-                fail(CheckId::ResolutionSpec, "resolution rules not machine-tradable (review required)".into());
+                fail(
+                    CheckId::ResolutionSpec,
+                    "resolution rules not machine-tradable (review required)".into(),
+                );
             }
-            if cfg.require_approved_resolution_spec && inp.market.resolution.review != wm_core::resolution::SpecReviewStatus::Approved {
-                fail(CheckId::ResolutionSpec, "resolution spec not human-approved".into());
+            if cfg.require_approved_resolution_spec
+                && inp.market.resolution.review != wm_core::resolution::SpecReviewStatus::Approved
+            {
+                fail(
+                    CheckId::ResolutionSpec,
+                    "resolution spec not human-approved".into(),
+                );
             }
             if let Err(e) = inp.market.validate_partition() {
                 fail(CheckId::Partition, e.to_string());
@@ -442,20 +582,41 @@ impl RiskEngine {
         }
 
         // -- Duplicates and sizing ----------------------------------------------------
-        if inp.portfolio.open_orders.iter().any(|o| o.token == intent.token) {
-            fail(CheckId::Duplicate, "live order already exists on token".into());
+        if inp
+            .portfolio
+            .open_orders
+            .iter()
+            .any(|o| o.token == intent.token)
+        {
+            fail(
+                CheckId::Duplicate,
+                "live order already exists on token".into(),
+            );
         }
-        if self.seen_decisions.contains(&(intent.decision_id, intent.token.clone())) {
+        if self
+            .seen_decisions
+            .contains(&(intent.decision_id, intent.token.clone()))
+        {
             fail(CheckId::Duplicate, "decision already processed".into());
         }
         let cost = notional(intent.limit_price, intent.shares, Rounding::Up);
         if opening && cost > cfg.position_size_usd {
-            fail(CheckId::PositionSize, format!("cost {cost} > position size {}", cfg.position_size_usd));
+            fail(
+                CheckId::PositionSize,
+                format!("cost {cost} > position size {}", cfg.position_size_usd),
+            );
         }
         if intent.side == Side::Sell {
-            let held = inp.portfolio.positions.get(&intent.token).map_or(Shares::ZERO, |p| p.shares);
+            let held = inp
+                .portfolio
+                .positions
+                .get(&intent.token)
+                .map_or(Shares::ZERO, |p| p.shares);
             if intent.shares > held {
-                fail(CheckId::Oversell, format!("sell {} > held {held}", intent.shares));
+                fail(
+                    CheckId::Oversell,
+                    format!("sell {} > held {held}", intent.shares),
+                );
             }
         }
 
@@ -466,7 +627,12 @@ impl RiskEngine {
             let bucket = outcome.map(|o| o.bucket);
             if let Some(bucket) = bucket {
                 legs.entry(intent.event_slug.clone()).or_default().push((
-                    Leg { bucket, side: intent.outcome_side, shares: intent.shares, cost },
+                    Leg {
+                        bucket,
+                        side: intent.outcome_side,
+                        shares: intent.shares,
+                        cost,
+                    },
                     intent.location.clone(),
                     Some(intent.strategy.clone()),
                 ));
@@ -475,7 +641,11 @@ impl RiskEngine {
             let mut per_strategy: HashMap<StrategyId, Usd> = HashMap::new();
             let mut this_event = Usd::ZERO;
             for (slug, ls) in &legs {
-                let market = if slug == &inp.market.event_slug { Some(inp.market) } else { inp.portfolio.markets.get(slug) };
+                let market = if slug == &inp.market.event_slug {
+                    Some(inp.market)
+                } else {
+                    inp.portfolio.markets.get(slug)
+                };
                 let Some(m) = market else { continue };
                 let only: Vec<Leg> = ls.iter().map(|(l, _, _)| *l).collect();
                 let e = event_exposure(m, &only);
@@ -491,34 +661,61 @@ impl RiskEngine {
                 }
             }
             if post_global > cfg.global_max_exposure_usd {
-                fail(CheckId::GlobalExposure, format!("post-trade worst-case {post_global} > {}", cfg.global_max_exposure_usd));
+                fail(
+                    CheckId::GlobalExposure,
+                    format!(
+                        "post-trade worst-case {post_global} > {}",
+                        cfg.global_max_exposure_usd
+                    ),
+                );
             }
             if let Some(max) = cfg.max_market_exposure_usd
                 && this_event > max
             {
-                fail(CheckId::MarketExposure, format!("event worst-case {this_event} > {max}"));
+                fail(
+                    CheckId::MarketExposure,
+                    format!("event worst-case {this_event} > {max}"),
+                );
             }
             if let Some(max) = cfg.max_location_exposure_usd {
                 let l = per_loc.get(&intent.location).copied().unwrap_or(Usd::ZERO);
                 if l > max {
-                    fail(CheckId::LocationExposure, format!("location worst-case {l} > {max}"));
+                    fail(
+                        CheckId::LocationExposure,
+                        format!("location worst-case {l} > {max}"),
+                    );
                 }
             }
             if let Some(max) = cfg.max_strategy_exposure_usd {
-                let sx = per_strategy.get(&intent.strategy).copied().unwrap_or(Usd::ZERO);
+                let sx = per_strategy
+                    .get(&intent.strategy)
+                    .copied()
+                    .unwrap_or(Usd::ZERO);
                 if sx > max {
-                    fail(CheckId::StrategyExposure, format!("strategy capital {sx} > {max}"));
+                    fail(
+                        CheckId::StrategyExposure,
+                        format!("strategy capital {sx} > {max}"),
+                    );
                 }
             }
             if let Some(max) = cfg.max_daily_new_exposure_usd
                 && self.daily.new_exposure + cost > max
             {
-                fail(CheckId::DailyNewExposure, format!("daily new exposure {} + {cost} > {max}", self.daily.new_exposure));
+                fail(
+                    CheckId::DailyNewExposure,
+                    format!(
+                        "daily new exposure {} + {cost} > {max}",
+                        self.daily.new_exposure
+                    ),
+                );
             }
             if let Some(max) = cfg.max_daily_loss_usd
                 && self.daily.realized_pnl <= -max
             {
-                fail(CheckId::DailyLoss, format!("daily loss {} reached limit {max}", self.daily.realized_pnl));
+                fail(
+                    CheckId::DailyLoss,
+                    format!("daily loss {} reached limit {max}", self.daily.realized_pnl),
+                );
             }
         }
 
@@ -538,11 +735,22 @@ impl RiskEngine {
             return RiskDecision::Rejected { intent, reasons: r };
         }
         self.recent_orders.push_back(inp.now);
-        self.seen_decisions.insert((intent.decision_id, intent.token.clone()));
+        self.seen_decisions
+            .insert((intent.decision_id, intent.token.clone()));
         if opening {
             self.daily.new_exposure += cost;
         }
-        let client_order_id = ClientOrderId::from_static_string(format!("wm-{}-{}-{}", self.run_short, intent.decision_id.0, &intent.token.as_str()[..intent.token.as_str().len().min(10)]));
-        RiskDecision::Approved(ApprovedIntent { intent, client_order_id, approved_at: inp.now, post_trade_global_exposure: post_global })
+        let client_order_id = ClientOrderId::from_static_string(format!(
+            "wm-{}-{}-{}",
+            self.run_short,
+            intent.decision_id.0,
+            &intent.token.as_str()[..intent.token.as_str().len().min(10)]
+        ));
+        RiskDecision::Approved(ApprovedIntent {
+            intent,
+            client_order_id,
+            approved_at: inp.now,
+            post_trade_global_exposure: post_global,
+        })
     }
 }

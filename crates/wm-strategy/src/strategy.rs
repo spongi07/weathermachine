@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use wm_core::ids::{ConditionId, LocationId, StrategyId, TokenId};
-use wm_core::market::{DailyTemperatureMarket, MarketOutcome, OrderBook, OutcomeSide, Side, TemperatureBucket};
+use wm_core::market::{
+    DailyTemperatureMarket, MarketOutcome, OrderBook, OutcomeSide, Side, TemperatureBucket,
+};
 use wm_core::portfolio::PositionBook;
 use wm_core::trading::{IntentKind, RunMode, TimeInForce};
 use wm_core::units::{Price, Rounding, Shares, Usd, round_shares_to_lot, shares_for_notional};
@@ -114,17 +116,29 @@ pub fn common_high(views: &[ViewEvaluation]) -> Result<i32, String> {
 
 /// Minimum observed minutes since the high across views.
 pub fn min_minutes_since_high(views: &[ViewEvaluation]) -> i64 {
-    views.iter().map(|v| v.assessment.features.minutes_since_high).min().unwrap_or(0)
+    views
+        .iter()
+        .map(|v| v.assessment.features.minutes_since_high)
+        .min()
+        .unwrap_or(0)
 }
 
 /// Maximum data age across views.
 pub fn max_data_age(views: &[ViewEvaluation]) -> i64 {
-    views.iter().map(|v| v.assessment.features.data_age_minutes).max().unwrap_or(i64::MAX)
+    views
+        .iter()
+        .map(|v| v.assessment.features.data_age_minutes)
+        .max()
+        .unwrap_or(i64::MAX)
 }
 
 /// Conservative P(final ∈ bucket) as a *win* probability: minimum lower bound
 /// across views, plus the minimum model support. `None` if any view lacks a model.
-pub fn min_p_in_bucket(views: &[ViewEvaluation], high: i32, bucket: &TemperatureBucket) -> Option<(f64, u32)> {
+pub fn min_p_in_bucket(
+    views: &[ViewEvaluation],
+    high: i32,
+    bucket: &TemperatureBucket,
+) -> Option<(f64, u32)> {
     let mut p = f64::INFINITY;
     let mut support = u32::MAX;
     for v in views {
@@ -136,7 +150,11 @@ pub fn min_p_in_bucket(views: &[ViewEvaluation], high: i32, bucket: &Temperature
 }
 
 /// Conservative P(final ∈ bucket) as a *loss* probability: maximum upper bound.
-pub fn max_p_in_bucket(views: &[ViewEvaluation], high: i32, bucket: &TemperatureBucket) -> Option<(f64, u32)> {
+pub fn max_p_in_bucket(
+    views: &[ViewEvaluation],
+    high: i32,
+    bucket: &TemperatureBucket,
+) -> Option<(f64, u32)> {
     let mut p: f64 = 0.0;
     let mut support = u32::MAX;
     let mut any = false;
@@ -157,7 +175,11 @@ pub fn size_for(notional: Usd, price: Price, min_size: Shares) -> Option<Shares>
 }
 
 fn holds_or_pending(ctx: &StrategyContext<'_>, token: &TokenId) -> bool {
-    ctx.pending_tokens.contains(token) || ctx.positions.get(token).is_some_and(|p| p.shares.micros() > 0)
+    ctx.pending_tokens.contains(token)
+        || ctx
+            .positions
+            .get(token)
+            .is_some_and(|p| p.shares.micros() > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +226,10 @@ pub struct BuyYesFinalHigh {
 
 impl BuyYesFinalHigh {
     pub fn new(config: BuyYesConfig) -> Self {
-        Self { id: StrategyId::from_static("A_buy_yes_final_high"), config }
+        Self {
+            id: StrategyId::from_static("A_buy_yes_final_high"),
+            config,
+        }
     }
 }
 
@@ -224,7 +249,9 @@ impl Strategy for BuyYesFinalHigh {
             Ok(h) => h,
             Err(_) => return out,
         };
-        let Some(outcome) = ctx.market.outcome_for_value(high) else { return out };
+        let Some(outcome) = ctx.market.outcome_for_value(high) else {
+            return out;
+        };
         let token = &outcome.yes_token;
         let book = ctx.books.get(token);
         let ask = book.and_then(OrderBook::best_ask);
@@ -235,9 +262,16 @@ impl Strategy for BuyYesFinalHigh {
         let (ev, be) = match (p, price) {
             (Some((pw, _)), Some(pr)) => (
                 Some(ev_per_share(pw, pr, &fees, self.config.slippage_allowance)),
-                Some(break_even_probability(pr, &fees, self.config.slippage_allowance)),
+                Some(break_even_probability(
+                    pr,
+                    &fees,
+                    self.config.slippage_allowance,
+                )),
             ),
-            _ => (None, price.map(|pr| break_even_probability(pr, &fees, self.config.slippage_allowance))),
+            _ => (
+                None,
+                price.map(|pr| break_even_probability(pr, &fees, self.config.slippage_allowance)),
+            ),
         };
         if !self.config.enabled {
             blockers.push("strategy disabled".into());
@@ -248,11 +282,17 @@ impl Strategy for BuyYesFinalHigh {
         if let Some((_, support)) = p
             && support < self.config.min_model_support
         {
-            blockers.push(format!("model support {support} < {}", self.config.min_model_support));
+            blockers.push(format!(
+                "model support {support} < {}",
+                self.config.min_model_support
+            ));
         }
         let msh = min_minutes_since_high(ctx.views);
         if msh < self.config.min_confirmation_minutes {
-            blockers.push(format!("confirmation {msh}m < {}m", self.config.min_confirmation_minutes));
+            blockers.push(format!(
+                "confirmation {msh}m < {}m",
+                self.config.min_confirmation_minutes
+            ));
         }
         if max_data_age(ctx.views) > self.config.max_data_age_minutes {
             blockers.push("weather data too old".into());
@@ -265,7 +305,10 @@ impl Strategy for BuyYesFinalHigh {
                     blockers.push("order book stale".into());
                 }
                 if pr < self.config.min_price || pr > self.config.max_price {
-                    blockers.push(format!("ask {pr} outside [{}, {}]", self.config.min_price, self.config.max_price));
+                    blockers.push(format!(
+                        "ask {pr} outside [{}, {}]",
+                        self.config.min_price, self.config.max_price
+                    ));
                 }
             }
         }
@@ -280,7 +323,8 @@ impl Strategy for BuyYesFinalHigh {
         if !outcome.accepting_orders || outcome.closed {
             blockers.push("market not accepting orders".into());
         }
-        let shares = price.and_then(|pr| size_for(self.config.notional, pr, outcome.min_order_size));
+        let shares =
+            price.and_then(|pr| size_for(self.config.notional, pr, outcome.min_order_size));
         if price.is_some() && shares.is_none() {
             blockers.push("size below market minimum".into());
         }
@@ -299,7 +343,8 @@ impl Strategy for BuyYesFinalHigh {
             blockers,
         });
         if signal
-            && let (Some((pw, support)), Some(pr), Some(sh), Some(e), Some(b)) = (p, price, shares, ev, be)
+            && let (Some((pw, support)), Some(pr), Some(sh), Some(e), Some(b)) =
+                (p, price, shares, ev, be)
         {
             out.proposals.push(Proposal {
                 strategy: self.id.clone(),
@@ -374,7 +419,10 @@ pub struct BuyNoAboveHigh {
 
 impl BuyNoAboveHigh {
     pub fn new(config: BuyNoConfig) -> Self {
-        Self { id: StrategyId::from_static("B_buy_no_above_high"), config }
+        Self {
+            id: StrategyId::from_static("B_buy_no_above_high"),
+            config,
+        }
     }
 }
 
@@ -389,22 +437,41 @@ impl Strategy for BuyNoAboveHigh {
 
     fn evaluate(&mut self, ctx: &StrategyContext<'_>) -> StrategyOutput {
         let mut out = StrategyOutput::default();
-        let Ok(high) = common_high(ctx.views) else { return out };
+        let Ok(high) = common_high(ctx.views) else {
+            return out;
+        };
         let msh = min_minutes_since_high(ctx.views);
         let mut seen: HashSet<ConditionId> = HashSet::new();
         for k in &self.config.distances {
-            let Some(outcome) = ctx.market.outcome_for_value(high + k) else { continue };
+            let Some(outcome) = ctx.market.outcome_for_value(high + k) else {
+                continue;
+            };
             if outcome.bucket.contains(high) || !seen.insert(outcome.condition_id.clone()) {
                 continue; // bucket also contains the current high, or already evaluated
             }
-            out.evaluations.push(self.evaluate_bucket(ctx, outcome, high, msh, *k, &mut out.proposals));
+            out.evaluations.push(self.evaluate_bucket(
+                ctx,
+                outcome,
+                high,
+                msh,
+                *k,
+                &mut out.proposals,
+            ));
         }
         out
     }
 }
 
 impl BuyNoAboveHigh {
-    fn evaluate_bucket(&self, ctx: &StrategyContext<'_>, outcome: &MarketOutcome, high: i32, msh: i64, k: i32, proposals: &mut Vec<Proposal>) -> BucketEvaluation {
+    fn evaluate_bucket(
+        &self,
+        ctx: &StrategyContext<'_>,
+        outcome: &MarketOutcome,
+        high: i32,
+        msh: i64,
+        k: i32,
+        proposals: &mut Vec<Proposal>,
+    ) -> BucketEvaluation {
         let fees = ctx.market.fees;
         let token = &outcome.no_token;
         let book = ctx.books.get(token);
@@ -413,7 +480,9 @@ impl BuyNoAboveHigh {
         let loss = max_p_in_bucket(ctx.views, high, &outcome.bucket);
         let p_win = loss.map(|(pl, _)| 1.0 - pl);
         let ev = match (p_win, price) {
-            (Some(pw), Some(pr)) => Some(ev_per_share(pw, pr, &fees, self.config.slippage_allowance)),
+            (Some(pw), Some(pr)) => {
+                Some(ev_per_share(pw, pr, &fees, self.config.slippage_allowance))
+            }
             _ => None,
         };
         let be = price.map(|pr| break_even_probability(pr, &fees, self.config.slippage_allowance));
@@ -423,11 +492,17 @@ impl BuyNoAboveHigh {
         }
         match loss {
             None => blockers.push("no probability model".into()),
-            Some((_, s)) if s < self.config.min_model_support => blockers.push(format!("model support {s} < {}", self.config.min_model_support)),
+            Some((_, s)) if s < self.config.min_model_support => blockers.push(format!(
+                "model support {s} < {}",
+                self.config.min_model_support
+            )),
             _ => {}
         }
         if msh < self.config.min_confirmation_minutes {
-            blockers.push(format!("confirmation {msh}m < {}m", self.config.min_confirmation_minutes));
+            blockers.push(format!(
+                "confirmation {msh}m < {}m",
+                self.config.min_confirmation_minutes
+            ));
         }
         if max_data_age(ctx.views) > self.config.max_data_age_minutes {
             blockers.push("weather data too old".into());
@@ -440,7 +515,10 @@ impl BuyNoAboveHigh {
                     blockers.push("order book stale".into());
                 }
                 if pr < self.config.min_price || pr > self.config.max_price {
-                    blockers.push(format!("ask {pr} outside [{}, {}]", self.config.min_price, self.config.max_price));
+                    blockers.push(format!(
+                        "ask {pr} outside [{}, {}]",
+                        self.config.min_price, self.config.max_price
+                    ));
                 }
             }
         }
@@ -455,7 +533,8 @@ impl BuyNoAboveHigh {
         if !outcome.accepting_orders || outcome.closed {
             blockers.push("market not accepting orders".into());
         }
-        let shares = price.and_then(|pr| size_for(self.config.notional, pr, outcome.min_order_size));
+        let shares =
+            price.and_then(|pr| size_for(self.config.notional, pr, outcome.min_order_size));
         if price.is_some() && shares.is_none() {
             blockers.push("size below market minimum".into());
         }
@@ -480,7 +559,13 @@ impl BuyNoAboveHigh {
                 ev_per_share: e,
                 break_even: b,
                 research_only: false,
-                rationale: vec![format!("NO on high+{k} ({}) ; high {high} confirmed {msh}m", outcome.label), format!("p_win {pw:.4} vs break-even {b:.4}")],
+                rationale: vec![
+                    format!(
+                        "NO on high+{k} ({}) ; high {high} confirmed {msh}m",
+                        outcome.label
+                    ),
+                    format!("p_win {pw:.4} vs break-even {b:.4}"),
+                ],
             });
         }
         BucketEvaluation {
@@ -540,7 +625,10 @@ pub struct SplitUnwind {
 
 impl SplitUnwind {
     pub fn new(config: SplitUnwindConfig) -> Self {
-        Self { id: StrategyId::from_static("C_split_unwind"), config }
+        Self {
+            id: StrategyId::from_static("C_split_unwind"),
+            config,
+        }
     }
 }
 
@@ -562,18 +650,42 @@ impl Strategy for SplitUnwind {
         if !self.config.enabled {
             return out;
         }
-        let Ok(high) = common_high(ctx.views) else { return out };
-        if min_minutes_since_high(ctx.views) >= self.config.max_confirmation_minutes || max_data_age(ctx.views) > self.config.max_data_age_minutes {
+        let Ok(high) = common_high(ctx.views) else {
+            return out;
+        };
+        if min_minutes_since_high(ctx.views) >= self.config.max_confirmation_minutes
+            || max_data_age(ctx.views) > self.config.max_data_age_minutes
+        {
             return out;
         }
-        let (Some(a), Some(b)) = (ctx.market.outcome_for_value(high), ctx.market.outcome_for_value(high + 1)) else { return out };
+        let (Some(a), Some(b)) = (
+            ctx.market.outcome_for_value(high),
+            ctx.market.outcome_for_value(high + 1),
+        ) else {
+            return out;
+        };
         if a.condition_id == b.condition_id {
             return out;
         }
-        let asks: Vec<Option<Price>> = [a, b].iter().map(|o| ctx.books.get(&o.yes_token).and_then(OrderBook::best_ask).map(|l| l.price)).collect();
-        let (Some(pa), Some(pb)) = (asks[0], asks[1]) else { return out };
+        let asks: Vec<Option<Price>> = [a, b]
+            .iter()
+            .map(|o| {
+                ctx.books
+                    .get(&o.yes_token)
+                    .and_then(OrderBook::best_ask)
+                    .map(|l| l.price)
+            })
+            .collect();
+        let (Some(pa), Some(pb)) = (asks[0], asks[1]) else {
+            return out;
+        };
         let combined = pa.saturating_add(pb);
-        let (Some((p_a, _)), Some((p_b, _))) = (min_p_in_bucket(ctx.views, high, &a.bucket), min_p_in_bucket(ctx.views, high, &b.bucket)) else { return out };
+        let (Some((p_a, _)), Some((p_b, _))) = (
+            min_p_in_bucket(ctx.views, high, &a.bucket),
+            min_p_in_bucket(ctx.views, high, &b.bucket),
+        ) else {
+            return out;
+        };
         if p_a + p_b < self.config.min_combined_p || combined > self.config.max_combined_price {
             return out;
         }
@@ -599,7 +711,11 @@ impl Strategy for SplitUnwind {
                     ev_per_share: p - pr.as_f64(),
                     break_even: pr.as_f64(),
                     research_only: true,
-                    rationale: vec![format!("pre-confirmation straddle {high}/{}; combined p {:.3} ask {combined}", high + 1, p_a + p_b)],
+                    rationale: vec![format!(
+                        "pre-confirmation straddle {high}/{}; combined p {:.3} ask {combined}",
+                        high + 1,
+                        p_a + p_b
+                    )],
                 });
             }
         }

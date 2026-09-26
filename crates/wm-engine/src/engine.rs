@@ -6,9 +6,13 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use wm_core::event::{EventEnvelope, OperatorCommand, OrderUpdateEvent, TimerKind, WeatherMachineEvent};
+use wm_core::event::{
+    EventEnvelope, OperatorCommand, OrderUpdateEvent, TimerKind, WeatherMachineEvent,
+};
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
-use wm_core::ids::{DecisionId, EventSlug, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId};
+use wm_core::ids::{
+    DecisionId, EventSlug, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId,
+};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, TradePrint};
 use wm_core::portfolio::PositionBook;
 use wm_core::resolution::ObservationFilter;
@@ -16,10 +20,13 @@ use wm_core::time::local_date;
 use wm_core::trading::{DecisionRecord, RunMode, TradeIntent};
 use wm_core::units::{Probability, Rounding, Usd, notional};
 use wm_execution::{Applied, OrderManager};
-use wm_risk::{ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus};
+use wm_risk::{
+    ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus,
+};
 use wm_strategy::{
-    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, PeakConfig, PeakDetectionEngine, ProbabilityModel, Proposal,
-    SplitUnwind, SplitUnwindConfig, Strategy, StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
+    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, PeakConfig,
+    PeakDetectionEngine, ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig, Strategy,
+    StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
 };
 
 /// A location the engine trades.
@@ -47,6 +54,15 @@ pub struct EngineConfig {
     pub unwind: UnwindConfig,
     pub evaluate_on_book_updates: bool,
     pub decision_log_capacity: usize,
+    /// Identical rejected proposals (same strategy, token, side, price and
+    /// reasons) within this window are counted but not re-recorded, so fast
+    /// market data cannot flood the decision log. 0 disables suppression.
+    #[serde(default = "default_rejection_dedup_secs")]
+    pub rejection_dedup_secs: i64,
+}
+
+pub const fn default_rejection_dedup_secs() -> i64 {
+    60
 }
 
 /// Engine hint for a station's collector (never a request by itself).
@@ -65,6 +81,9 @@ pub struct EngineStats {
     pub proposals_total: u64,
     pub approvals_total: u64,
     pub rejections_total: u64,
+    /// Rejections not re-recorded (identical to one inside the dedup window).
+    #[serde(default)]
+    pub rejections_suppressed: u64,
     pub fills_total: u64,
     pub last_handle_micros: u64,
     pub max_handle_micros: u64,
@@ -111,6 +130,20 @@ pub struct Engine {
     hints: HashMap<StationId, StationHint>,
     stats: EngineStats,
     realized_pnl_total: Usd,
+    recent_rejections: HashMap<String, DateTime<Utc>>,
+}
+
+/// Largest hole (minutes) in a day series, counting local midnight → first
+/// report. `None` when the series is empty.
+fn max_gap_minutes(day_start: DateTime<Utc>, points: &[wm_strategy::ObsPoint]) -> Option<i64> {
+    let mut prev = day_start;
+    let mut max = None;
+    for p in points {
+        let gap = (p.observed_at - prev).num_minutes().max(0);
+        max = Some(max.map_or(gap, |m: i64| m.max(gap)));
+        prev = prev.max(p.observed_at);
+    }
+    max
 }
 
 fn view_of(filter: ObservationFilter) -> ViewKind {
@@ -163,6 +196,7 @@ impl Engine {
             hints: HashMap::new(),
             stats: EngineStats::default(),
             realized_pnl_total: Usd::ZERO,
+            recent_rejections: HashMap::new(),
             cfg,
         }
     }
@@ -218,11 +252,17 @@ impl Engine {
     }
 
     fn location_index_for_station(&self, station: &StationId) -> Option<usize> {
-        self.cfg.locations.iter().position(|l| &l.station == station)
+        self.cfg
+            .locations
+            .iter()
+            .position(|l| &l.station == station)
     }
 
     fn location_index(&self, location: &LocationId) -> Option<usize> {
-        self.cfg.locations.iter().position(|l| &l.location == location)
+        self.cfg
+            .locations
+            .iter()
+            .position(|l| &l.location == location)
     }
 
     /// Handle one event.
@@ -239,7 +279,11 @@ impl Engine {
             self.stats.last_seq = self.stats.last_seq.max(env.seq);
         }
         self.stats.events_total += 1;
-        *self.stats.events_by_kind.entry(env.event.kind().to_owned()).or_insert(0) += 1;
+        *self
+            .stats
+            .events_by_kind
+            .entry(env.event.kind().to_owned())
+            .or_insert(0) += 1;
 
         match &env.event {
             WeatherMachineEvent::WeatherObservation(o) => {
@@ -250,8 +294,14 @@ impl Engine {
             }
             WeatherMachineEvent::WeatherCorrection(c) => {
                 self.temps.apply_correction(c);
-                self.corrections.insert(c.current.key.station.clone(), self.now);
-                out.alerts.push(format!("correction {} v{} → v{}", c.current.key.fingerprint(), c.previous.version, c.current.version));
+                self.corrections
+                    .insert(c.current.key.station.clone(), self.now);
+                out.alerts.push(format!(
+                    "correction {} v{} → v{}",
+                    c.current.key.fingerprint(),
+                    c.previous.version,
+                    c.current.version
+                ));
                 if let Some(i) = self.location_index_for_station(&c.current.key.station) {
                     self.evaluate_location(i, true, &mut out);
                 }
@@ -260,8 +310,10 @@ impl Engine {
             WeatherMachineEvent::MarketSnapshot(m) => {
                 let m = m.market.clone();
                 for o in &m.outcomes {
-                    self.token_index.insert(o.yes_token.clone(), m.event_slug.clone());
-                    self.token_index.insert(o.no_token.clone(), m.event_slug.clone());
+                    self.token_index
+                        .insert(o.yes_token.clone(), m.event_slug.clone());
+                    self.token_index
+                        .insert(o.no_token.clone(), m.event_slug.clone());
                 }
                 let loc = m.location.clone();
                 self.markets.insert(m.event_slug.clone(), m);
@@ -273,14 +325,19 @@ impl Engine {
                 let token = b.book.token.clone();
                 self.books.insert(token.clone(), b.book.clone());
                 if self.cfg.evaluate_on_book_updates
-                    && let Some(loc) = self.token_index.get(&token).and_then(|s| self.markets.get(s)).map(|m| m.location.clone())
+                    && let Some(loc) = self
+                        .token_index
+                        .get(&token)
+                        .and_then(|s| self.markets.get(s))
+                        .map(|m| m.location.clone())
                     && let Some(i) = self.location_index(&loc)
                 {
                     self.evaluate_location(i, false, &mut out);
                 }
             }
             WeatherMachineEvent::MarketTrade(t) => {
-                self.last_trades.insert(t.trade.token.clone(), t.trade.clone());
+                self.last_trades
+                    .insert(t.trade.token.clone(), t.trade.clone());
             }
             WeatherMachineEvent::OrderUpdate(u) => self.apply_order_update(u, &mut out),
             WeatherMachineEvent::Timer(t) => match &t.kind {
@@ -301,7 +358,11 @@ impl Engine {
             }
             WeatherMachineEvent::Operator(OperatorCommand::KillSwitch { engaged, reason }) => {
                 self.kill_switch = engaged.then(|| reason.clone());
-                out.alerts.push(if *engaged { format!("KILL SWITCH ENGAGED: {reason}") } else { "kill switch released".into() });
+                out.alerts.push(if *engaged {
+                    format!("KILL SWITCH ENGAGED: {reason}")
+                } else {
+                    "kill switch released".into()
+                });
             }
         }
 
@@ -323,7 +384,9 @@ impl Engine {
                         Ok(()) => {
                             self.stats.fills_total += 1;
                             if fill.side == wm_core::market::Side::Buy {
-                                self.position_strategy.entry(fill.token.clone()).or_insert(rec.strategy.clone());
+                                self.position_strategy
+                                    .entry(fill.token.clone())
+                                    .or_insert(rec.strategy.clone());
                                 self.unwind.note_entry(&fill.token, fill.ts);
                             }
                             let delta = self.positions.total_realized_pnl() - before;
@@ -331,7 +394,11 @@ impl Engine {
                                 self.risk.record_realized_pnl(delta, self.now);
                                 self.realized_pnl_total += delta;
                             }
-                            if self.positions.get(&fill.token).is_some_and(|p| p.shares.is_zero()) {
+                            if self
+                                .positions
+                                .get(&fill.token)
+                                .is_some_and(|p| p.shares.is_zero())
+                            {
                                 self.unwind.forget(&fill.token);
                             }
                         }
@@ -345,7 +412,11 @@ impl Engine {
     }
 
     /// Candidate views for a location (and whether they are all evaluable).
-    fn build_views(&self, loc: &crate::engine::EngineLocation, market: Option<&DailyTemperatureMarket>) -> (Vec<ViewEvaluation>, Vec<ViewSnapshot>, bool) {
+    fn build_views(
+        &self,
+        loc: &crate::engine::EngineLocation,
+        market: Option<&DailyTemperatureMarket>,
+    ) -> (Vec<ViewEvaluation>, Vec<ViewSnapshot>, bool) {
         let today = local_date(self.now, loc.timezone);
         let filters: Vec<ObservationFilter> = match (loc.confirmed_filter, market) {
             (Some(f), _) => vec![f],
@@ -359,17 +430,28 @@ impl Engine {
         for f in filters {
             let view = view_of(f);
             let state = self.temps.day_state(&loc.station, today, view, self.now);
-            let assessment = state.as_ref().and_then(|s| peak.assess(s, loc.timezone, self.now));
-            let distribution = assessment.as_ref().and_then(|a| self.model.distribution(&a.features));
+            let assessment = state
+                .as_ref()
+                .and_then(|s| peak.assess(s, loc.timezone, self.now));
+            let distribution = assessment
+                .as_ref()
+                .and_then(|a| self.model.distribution(&a.features));
             snaps.push(ViewSnapshot {
                 label: view.label(),
                 state: state.clone(),
                 features: assessment.as_ref().map(|a| a.features.clone()),
-                windows_met: assessment.as_ref().map(|a| a.windows_met.clone()).unwrap_or_default(),
+                windows_met: assessment
+                    .as_ref()
+                    .map(|a| a.windows_met.clone())
+                    .unwrap_or_default(),
                 distribution: distribution.clone(),
             });
             match assessment {
-                Some(a) => evals.push(ViewEvaluation { view, assessment: a, distribution }),
+                Some(a) => evals.push(ViewEvaluation {
+                    view,
+                    assessment: a,
+                    distribution,
+                }),
                 None => complete = false,
             }
         }
@@ -386,29 +468,58 @@ impl Engine {
             .unwrap_or(ProviderHealthState::Unavailable);
         let tz = self.temps.timezone(station).unwrap_or(chrono_tz::UTC);
         let today = local_date(self.now, tz);
-        let last = self
+        let today_state = self
             .temps
-            .day_state(station, today, ViewKind::All, self.now)
-            .and_then(|s| s.last_observation_at)
-            .or_else(|| self.temps.day_state(station, today.pred_opt().unwrap_or(today), ViewKind::All, self.now).and_then(|s| s.last_observation_at));
-        WeatherStatus { station: station.clone(), last_observation_at: last, health, last_correction_at: self.corrections.get(station).copied() }
+            .day_state(station, today, ViewKind::All, self.now);
+        let max_gap_minutes = today_state
+            .as_ref()
+            .and_then(|s| max_gap_minutes(wm_core::time::local_day_start(today, tz), &s.points));
+        let last = today_state.and_then(|s| s.last_observation_at).or_else(|| {
+            self.temps
+                .day_state(
+                    station,
+                    today.pred_opt().unwrap_or(today),
+                    ViewKind::All,
+                    self.now,
+                )
+                .and_then(|s| s.last_observation_at)
+        });
+        WeatherStatus {
+            station: station.clone(),
+            last_observation_at: last,
+            health,
+            last_correction_at: self.corrections.get(station).copied(),
+            max_gap_minutes,
+        }
     }
 
     fn today_market(&self, loc: &EngineLocation) -> Option<DailyTemperatureMarket> {
         let today = local_date(self.now, loc.timezone);
-        self.markets.values().find(|m| m.location == loc.location && m.local_date == today && !m.closed).cloned()
+        self.markets
+            .values()
+            .find(|m| m.location == loc.location && m.local_date == today && !m.closed)
+            .cloned()
     }
 
     fn evaluate_location(&mut self, idx: usize, from_weather: bool, out: &mut EngineOutput) {
-        let Some(loc) = self.cfg.locations.get(idx).cloned() else { return };
+        let Some(loc) = self.cfg.locations.get(idx).cloned() else {
+            return;
+        };
         self.stats.evaluations_total += 1;
         let market = self.today_market(&loc);
         let (views, _snaps, complete) = self.build_views(&loc, market.as_ref());
 
         let has_exposure = market.as_ref().is_some_and(|m| {
-            self.positions.for_event(&m.event_slug).next().is_some() || self.orders.open_orders().any(|o| o.event_slug == m.event_slug)
+            self.positions.for_event(&m.event_slug).next().is_some()
+                || self
+                    .orders
+                    .open_orders()
+                    .any(|o| o.event_slug == m.event_slug)
         });
-        let hint = StationHint { peak_watch: views.iter().any(|v| v.assessment.peak_watch), has_exposure };
+        let hint = StationHint {
+            peak_watch: views.iter().any(|v| v.assessment.peak_watch),
+            has_exposure,
+        };
         if self.hints.get(&loc.station) != Some(&hint) {
             self.hints.insert(loc.station.clone(), hint);
             out.hints.push((loc.station.clone(), hint));
@@ -440,15 +551,39 @@ impl Engine {
             }
         }
         // Unwind runs even when views are incomplete (exits are risk-reducing).
-        let unwind_views = if views.is_empty() { Vec::new() } else { views.clone() };
-        proposals.extend(self.unwind.evaluate(&market, &self.positions, &self.books, &unwind_views, &pending, self.now));
-        self.evaluations.insert(market.event_slug.clone(), evaluations.clone());
+        let unwind_views = if views.is_empty() {
+            Vec::new()
+        } else {
+            views.clone()
+        };
+        proposals.extend(self.unwind.evaluate(
+            &market,
+            &self.positions,
+            &self.books,
+            &unwind_views,
+            &pending,
+            self.now,
+        ));
+        self.evaluations
+            .insert(market.event_slug.clone(), evaluations.clone());
 
         if from_weather {
             let id = self.alloc_decision();
             let blockers: Vec<String> = evaluations
                 .iter()
-                .map(|e| format!("{} {} {}: {}", e.strategy, e.bucket_label, e.outcome_side.as_str(), if e.signal { "SIGNAL".to_owned() } else { e.blockers.join("; ") }))
+                .map(|e| {
+                    format!(
+                        "{} {} {}: {}",
+                        e.strategy,
+                        e.bucket_label,
+                        e.outcome_side.as_str(),
+                        if e.signal {
+                            "SIGNAL".to_owned()
+                        } else {
+                            e.blockers.join("; ")
+                        }
+                    )
+                })
                 .collect();
             let rec = DecisionRecord {
                 decision_id: id,
@@ -456,7 +591,11 @@ impl Engine {
                 at: self.now,
                 location: loc.location.clone(),
                 event_slug: Some(market.event_slug.clone()),
-                summary: if complete { format!("evaluated {} bucket(s)", evaluations.len()) } else { "resolution views incomplete — no trading".to_owned() },
+                summary: if complete {
+                    format!("evaluated {} bucket(s)", evaluations.len())
+                } else {
+                    "resolution views incomplete — no trading".to_owned()
+                },
                 inputs: serde_json::json!({ "views": views.iter().map(|v| serde_json::json!({
                     "view": v.view.label(),
                     "high_whole": v.assessment.features.high_whole,
@@ -491,7 +630,13 @@ impl Engine {
         }
     }
 
-    fn process_proposal(&mut self, p: Proposal, market: &DailyTemperatureMarket, loc: &EngineLocation, out: &mut EngineOutput) {
+    fn process_proposal(
+        &mut self,
+        p: Proposal,
+        market: &DailyTemperatureMarket,
+        loc: &EngineLocation,
+        out: &mut EngineOutput,
+    ) {
         self.stats.proposals_total += 1;
         let decision_id = self.alloc_decision();
         let intent = TradeIntent {
@@ -531,13 +676,47 @@ impl Engine {
             weather: Some(&weather),
             market,
             book,
-            portfolio: PortfolioView { positions: &self.positions, open_orders: &open, markets: &self.markets, position_strategy: &self.position_strategy },
+            portfolio: PortfolioView {
+                positions: &self.positions,
+                open_orders: &open,
+                markets: &self.markets,
+                position_strategy: &self.position_strategy,
+            },
         };
         let decision = self.risk.evaluate(intent.clone(), &inputs);
         let (approved, reasons) = match &decision {
             RiskDecision::Approved(_) => (true, Vec::new()),
-            RiskDecision::Rejected { reasons, .. } => (false, reasons.iter().map(|r| format!("{:?}: {}", r.check, r.detail)).collect()),
+            RiskDecision::Rejected { reasons, .. } => (
+                false,
+                reasons
+                    .iter()
+                    .map(|r| format!("{:?}: {}", r.check, r.detail))
+                    .collect::<Vec<String>>(),
+            ),
         };
+        if !approved && self.cfg.rejection_dedup_secs > 0 {
+            let window = Duration::seconds(self.cfg.rejection_dedup_secs);
+            let key = format!(
+                "{}|{}|{:?}|{}|{}",
+                p.strategy,
+                p.token,
+                p.side,
+                p.limit_price,
+                reasons.join(";")
+            );
+            if self
+                .recent_rejections
+                .get(&key)
+                .is_some_and(|t| self.now - *t < window)
+            {
+                self.stats.rejections_total += 1;
+                self.stats.rejections_suppressed += 1;
+                return;
+            }
+            let now = self.now;
+            self.recent_rejections.retain(|_, t| now - *t < window);
+            self.recent_rejections.insert(key, now);
+        }
         let rec = DecisionRecord {
             decision_id,
             strategy: p.strategy.clone(),
@@ -615,10 +794,19 @@ impl Engine {
     /// (first) view — used by backtests to settle.
     pub fn final_value(&self, slug: &EventSlug) -> Option<i32> {
         let m = self.markets.get(slug)?;
-        let loc = self.cfg.locations.iter().find(|l| l.location == m.location)?;
-        let filter = loc.confirmed_filter.or_else(|| m.resolution.filters.first().copied()).unwrap_or(ObservationFilter::AllRows);
+        let loc = self
+            .cfg
+            .locations
+            .iter()
+            .find(|l| l.location == m.location)?;
+        let filter = loc
+            .confirmed_filter
+            .or_else(|| m.resolution.filters.first().copied())
+            .unwrap_or(ObservationFilter::AllRows);
         let (_, end) = wm_core::time::local_day_bounds(m.local_date, m.timezone);
-        let s = self.temps.day_state(&m.station, m.local_date, view_of(filter), end)?;
+        let s = self
+            .temps
+            .day_state(&m.station, m.local_date, view_of(filter), end)?;
         s.high.map(|h| h.value.round_half_up_whole())
     }
 
@@ -633,12 +821,25 @@ impl Engine {
             let market = self.today_market(loc);
             let (_, snaps, _) = self.build_views(loc, market.as_ref());
             let today = local_date(self.now, loc.timezone);
-            let series = self.temps.day_state(&loc.station, today, ViewKind::All, self.now).map(|s| s.points).unwrap_or_default();
+            let series = self
+                .temps
+                .day_state(&loc.station, today, ViewKind::All, self.now)
+                .map(|s| s.points)
+                .unwrap_or_default();
             let books = market
                 .as_ref()
-                .map(|m| m.outcomes.iter().flat_map(|o| [o.yes_token.clone(), o.no_token.clone()]).filter_map(|t| self.books.get(&t).cloned()).collect())
+                .map(|m| {
+                    m.outcomes
+                        .iter()
+                        .flat_map(|o| [o.yes_token.clone(), o.no_token.clone()])
+                        .filter_map(|t| self.books.get(&t).cloned())
+                        .collect()
+                })
                 .unwrap_or_default();
-            let evaluations = market.as_ref().and_then(|m| self.evaluations.get(&m.event_slug).cloned()).unwrap_or_default();
+            let evaluations = market
+                .as_ref()
+                .and_then(|m| self.evaluations.get(&m.event_slug).cloned())
+                .unwrap_or_default();
             locations.push(LocationSnapshot {
                 location: loc.location.clone(),
                 station: loc.station.clone(),
@@ -653,7 +854,12 @@ impl Engine {
             });
         }
         let open = self.orders.open_views();
-        let exposure = self.risk.exposure(&PortfolioView { positions: &self.positions, open_orders: &open, markets: &self.markets, position_strategy: &self.position_strategy });
+        let exposure = self.risk.exposure(&PortfolioView {
+            positions: &self.positions,
+            open_orders: &open,
+            markets: &self.markets,
+            position_strategy: &self.position_strategy,
+        });
         EngineSnapshot {
             now: self.now,
             mode: self.cfg.mode,

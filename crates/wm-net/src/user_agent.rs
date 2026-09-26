@@ -24,7 +24,9 @@ pub fn build_user_agent(template: &str, contact: Option<&str>) -> Result<String,
         return Err(NetError::UserAgent("must be 1..=256 characters".into()));
     }
     if !ua.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-        return Err(NetError::UserAgent("must be printable ASCII without control characters".into()));
+        return Err(NetError::UserAgent(
+            "must be printable ASCII without control characters".into(),
+        ));
     }
     Ok(ua)
 }

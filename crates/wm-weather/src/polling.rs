@@ -29,7 +29,11 @@ pub struct CadenceModel {
 
 impl CadenceModel {
     pub fn eham() -> Self {
-        Self { routine_minutes: vec![25, 55], first_poll_delay_secs: 90, arrival_window_secs: 12 * 60 }
+        Self {
+            routine_minutes: vec![25, 55],
+            first_poll_delay_secs: 90,
+            arrival_window_secs: 12 * 60,
+        }
     }
 
     /// Next nominal routine report time strictly after `after`.
@@ -88,9 +92,21 @@ pub struct PollingParams {
 impl Default for PollingParams {
     fn default() -> Self {
         Self {
-            low: ModeParams { window_interval_secs: 120, background_interval_secs: 15 * 60, max_polls_per_window: 3 },
-            normal: ModeParams { window_interval_secs: 60, background_interval_secs: 10 * 60, max_polls_per_window: 6 },
-            peak: ModeParams { window_interval_secs: 30, background_interval_secs: 5 * 60, max_polls_per_window: 10 },
+            low: ModeParams {
+                window_interval_secs: 120,
+                background_interval_secs: 15 * 60,
+                max_polls_per_window: 3,
+            },
+            normal: ModeParams {
+                window_interval_secs: 60,
+                background_interval_secs: 10 * 60,
+                max_polls_per_window: 6,
+            },
+            peak: ModeParams {
+                window_interval_secs: 30,
+                background_interval_secs: 5 * 60,
+                max_polls_per_window: 10,
+            },
             night_start_minute: 22 * 60,
             night_end_minute: 5 * 60,
             stale_slowdown_after_secs: 2 * 3600,
@@ -168,7 +184,11 @@ impl PollingPolicy {
     pub fn mode(&self, i: &PollingInputs) -> PollingMode {
         let minute = local_minute_of_day(i.now, i.tz);
         let (s, e) = (self.params.night_start_minute, self.params.night_end_minute);
-        let night = if s <= e { minute >= s && minute < e } else { minute >= s || minute < e };
+        let night = if s <= e {
+            minute >= s && minute < e
+        } else {
+            minute >= s || minute < e
+        };
         let mut mode = if i.hints.has_exposure || i.hints.peak_watch {
             PollingMode::Peak
         } else if night {
@@ -205,7 +225,10 @@ impl PollingPolicy {
         // The report we are waiting for: the one after the newest observation,
         // unless its window has already closed (report missed), in which case
         // we wait for the next scheduled report instead.
-        let expected = match i.last_observation_time.and_then(|t| self.cadence.next_report_after(t)) {
+        let expected = match i
+            .last_observation_time
+            .and_then(|t| self.cadence.next_report_after(t))
+        {
             Some(e) if i.now <= e + window => Some(e),
             _ => self.cadence.next_report_after(i.now - window),
         };
@@ -217,7 +240,11 @@ impl PollingPolicy {
             (None, _) => (i.now, PollReason::Initial, false),
             (Some(last), _) if long_outage => {
                 // Never hammer a broken feed: poll rarely until data returns.
-                (last + Duration::seconds(self.params.stale_interval_secs), PollReason::StaleSlowdown, false)
+                (
+                    last + Duration::seconds(self.params.stale_interval_secs),
+                    PollReason::StaleSlowdown,
+                    false,
+                )
             }
             (Some(last), None) => (last + background_iv, PollReason::Background, false),
             (Some(last), Some(exp)) => {
@@ -231,7 +258,11 @@ impl PollingPolicy {
                         (w_start, PollReason::ArrivalWindow, true)
                     }
                 } else if i.now <= w_end && i.polls_in_current_window < p.max_polls_per_window {
-                    ((last + window_iv).max(w_start), PollReason::ArrivalWindow, true)
+                    (
+                        (last + window_iv).max(w_start),
+                        PollReason::ArrivalWindow,
+                        true,
+                    )
                 } else {
                     // Window exhausted without the report: fall back to the
                     // background cadence (never faster).
@@ -250,7 +281,13 @@ impl PollingPolicy {
         if at < i.now {
             at = i.now;
         }
-        PollDecision { at, mode, reason, in_window, expected_report: expected }
+        PollDecision {
+            at,
+            mode,
+            reason,
+            in_window,
+            expected_report: expected,
+        }
     }
 }
 
@@ -284,9 +321,18 @@ mod tests {
     #[test]
     fn next_report_times() {
         let c = CadenceModel::eham();
-        assert_eq!(c.next_report_after(utc("2026-09-26T12:55:00Z")), Some(utc("2026-09-26T13:25:00Z")));
-        assert_eq!(c.next_report_after(utc("2026-09-26T13:25:00Z")), Some(utc("2026-09-26T13:55:00Z")));
-        assert_eq!(c.next_report_after(utc("2026-09-26T23:56:00Z")), Some(utc("2026-09-27T00:25:00Z")));
+        assert_eq!(
+            c.next_report_after(utc("2026-09-26T12:55:00Z")),
+            Some(utc("2026-09-26T13:25:00Z"))
+        );
+        assert_eq!(
+            c.next_report_after(utc("2026-09-26T13:25:00Z")),
+            Some(utc("2026-09-26T13:55:00Z"))
+        );
+        assert_eq!(
+            c.next_report_after(utc("2026-09-26T23:56:00Z")),
+            Some(utc("2026-09-27T00:25:00Z"))
+        );
         assert_eq!(c.nominal_interval(), Duration::minutes(30));
     }
 
@@ -300,15 +346,31 @@ mod tests {
     #[test]
     fn waits_for_arrival_window_instead_of_hammering() {
         // Last obs 12:55, last poll 12:58, now 13:00 (local 15:00 CEST, normal mode).
-        let d = policy().next_poll(&inputs("2026-09-26T13:00:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T12:58:00Z")));
+        let d = policy().next_poll(&inputs(
+            "2026-09-26T13:00:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T12:58:00Z"),
+        ));
         assert_eq!(d.mode, PollingMode::Normal);
         assert_eq!(d.reason, PollReason::Background);
-        assert_eq!(d.at, utc("2026-09-26T13:08:00Z"), "background poll 10 min after last");
+        assert_eq!(
+            d.at,
+            utc("2026-09-26T13:08:00Z"),
+            "background poll 10 min after last"
+        );
         // Next background would be 13:18 → still before window start 13:26:30.
-        let d = policy().next_poll(&inputs("2026-09-26T13:10:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:08:00Z")));
+        let d = policy().next_poll(&inputs(
+            "2026-09-26T13:10:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:08:00Z"),
+        ));
         assert_eq!(d.at, utc("2026-09-26T13:18:00Z"));
         // From 13:18 the next background (13:28) is after the window start → window start wins.
-        let d = policy().next_poll(&inputs("2026-09-26T13:19:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:18:00Z")));
+        let d = policy().next_poll(&inputs(
+            "2026-09-26T13:19:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:18:00Z"),
+        ));
         assert_eq!(d.reason, PollReason::ArrivalWindow);
         assert_eq!(d.at, utc("2026-09-26T13:26:30Z"));
         assert_eq!(d.expected_report, Some(utc("2026-09-26T13:25:00Z")));
@@ -316,7 +378,11 @@ mod tests {
 
     #[test]
     fn inside_window_polls_at_window_interval_and_caps_polls() {
-        let mut i = inputs("2026-09-26T13:27:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:26:30Z"));
+        let mut i = inputs(
+            "2026-09-26T13:27:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:26:30Z"),
+        );
         i.polls_in_current_window = 1;
         let d = policy().next_poll(&i);
         assert!(d.in_window);
@@ -329,14 +395,22 @@ mod tests {
 
     #[test]
     fn peak_mode_polls_faster_but_only_in_window() {
-        let mut i = inputs("2026-09-26T13:27:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:26:30Z"));
+        let mut i = inputs(
+            "2026-09-26T13:27:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:26:30Z"),
+        );
         i.hints.peak_watch = true;
         i.polls_in_current_window = 1;
         let d = policy().next_poll(&i);
         assert_eq!(d.mode, PollingMode::Peak);
         assert_eq!(d.at, utc("2026-09-26T13:27:00Z"));
         // Outside the window peak mode still uses the slow background interval.
-        let mut i = inputs("2026-09-26T13:05:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T12:58:00Z"));
+        let mut i = inputs(
+            "2026-09-26T13:05:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T12:58:00Z"),
+        );
         i.hints.peak_watch = true;
         let d = policy().next_poll(&i);
         assert_eq!(d.at, utc("2026-09-26T13:03:00Z").max(i.now));
@@ -347,30 +421,50 @@ mod tests {
     fn missed_reports_do_not_speed_up_polling() {
         // 13:25 and 13:55 never arrived; at 14:10 we wait for the 14:25 window
         // at the normal background cadence — no faster.
-        let d = policy().next_poll(&inputs("2026-09-26T14:10:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T14:08:00Z")));
+        let d = policy().next_poll(&inputs(
+            "2026-09-26T14:10:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T14:08:00Z"),
+        ));
         assert_eq!(d.expected_report, Some(utc("2026-09-26T14:25:00Z")));
         assert_eq!(d.reason, PollReason::Background);
         assert_eq!(d.at, utc("2026-09-26T14:18:00Z"));
         // Window of a missed report exhausted: back to background cadence.
-        let mut i = inputs("2026-09-26T13:35:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:34:30Z"));
+        let mut i = inputs(
+            "2026-09-26T13:35:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:34:30Z"),
+        );
         i.polls_in_current_window = 6;
         let d = policy().next_poll(&i);
         assert_eq!(d.reason, PollReason::Overdue);
         assert_eq!(d.at, utc("2026-09-26T13:44:30Z"));
         // Long outage (> 2 h since the newest observation): slow down further.
-        let d = policy().next_poll(&inputs("2026-09-26T17:00:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T16:58:00Z")));
+        let d = policy().next_poll(&inputs(
+            "2026-09-26T17:00:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T16:58:00Z"),
+        ));
         assert_eq!(d.reason, PollReason::StaleSlowdown);
         assert_eq!(d.at, utc("2026-09-26T17:18:00Z"));
     }
 
     #[test]
     fn gate_and_throttling_win() {
-        let mut i = inputs("2026-09-26T13:27:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:26:30Z"));
+        let mut i = inputs(
+            "2026-09-26T13:27:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:26:30Z"),
+        );
         i.gate_not_before = Some(utc("2026-09-26T13:40:00Z"));
         let d = policy().next_poll(&i);
         assert_eq!(d.reason, PollReason::GateBlocked);
         assert_eq!(d.at, utc("2026-09-26T13:40:00Z"));
-        let mut i = inputs("2026-09-26T13:27:00Z", Some("2026-09-26T12:55:00Z"), Some("2026-09-26T13:26:30Z"));
+        let mut i = inputs(
+            "2026-09-26T13:27:00Z",
+            Some("2026-09-26T12:55:00Z"),
+            Some("2026-09-26T13:26:30Z"),
+        );
         i.hints.has_exposure = true;
         i.throttled_recently = true;
         assert_eq!(policy().mode(&i), PollingMode::Normal);
@@ -379,7 +473,11 @@ mod tests {
     #[test]
     fn night_uses_low_mode() {
         // 00:30 CEST = 22:30 UTC previous day.
-        let i = inputs("2026-09-25T22:30:00Z", Some("2026-09-25T22:25:00Z"), Some("2026-09-25T22:27:00Z"));
+        let i = inputs(
+            "2026-09-25T22:30:00Z",
+            Some("2026-09-25T22:25:00Z"),
+            Some("2026-09-25T22:27:00Z"),
+        );
         assert_eq!(policy().mode(&i), PollingMode::Low);
     }
 

@@ -59,7 +59,8 @@ impl MetarReport {
         if let Some(t) = self.temperature_tenths {
             return Some((TempC::from_tenths(t), TempPrecision::Tenth));
         }
-        self.temperature_whole.map(|t| (TempC::from_whole(t), TempPrecision::WholeDegree))
+        self.temperature_whole
+            .map(|t| (TempC::from_whole(t), TempPrecision::WholeDegree))
     }
 
     pub fn dewpoint(&self) -> Option<TempC> {
@@ -77,7 +78,12 @@ impl MetarReport {
 }
 
 /// Resolve a METAR day/hour/minute to a full UTC timestamp near `reference`.
-pub fn resolve_day_time(day: u8, hour: u8, minute: u8, reference: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn resolve_day_time(
+    day: u8,
+    hour: u8,
+    minute: u8,
+    reference: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
     if !(1..=31).contains(&day) || hour > 23 || minute > 59 {
         return None;
     }
@@ -105,7 +111,11 @@ pub fn resolve_day_time(day: u8, hour: u8, minute: u8, reference: DateTime<Utc>)
         && reference - t > Duration::days(25)
     {
         // Probably next month with a skewed reference (e.g. reference 30th 23:59, report on the 1st).
-        let (ny, nm) = if reference.month() == 12 { (reference.year() + 1, 1) } else { (reference.year(), reference.month() + 1) };
+        let (ny, nm) = if reference.month() == 12 {
+            (reference.year() + 1, 1)
+        } else {
+            (reference.year(), reference.month() + 1)
+        };
         if let Some(n) = make(ny, nm, day, hour, minute)
             && n - reference <= Duration::days(1)
         {
@@ -181,7 +191,11 @@ fn parse_t_group(token: &str) -> Option<(i32, Option<i32>)> {
     };
     let num = |s: &[u8]| -> Option<i32> { std::str::from_utf8(s).ok()?.parse().ok() };
     let t = sign(b[1])? * num(&b[2..5])?;
-    let d = if b.len() == 9 { Some(sign(b[5])? * num(&b[6..9])?) } else { None };
+    let d = if b.len() == 9 {
+        Some(sign(b[5])? * num(&b[6..9])?)
+    } else {
+        None
+    };
     Some((t, d))
 }
 
@@ -198,7 +212,9 @@ fn parse_day_time(token: &str) -> Option<(u8, u8, u8)> {
 fn is_station(token: &str) -> bool {
     token.len() == 4
         && token.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
-        && token.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// Canonical text used for hashing: prefix removed, whitespace collapsed,
@@ -245,7 +261,10 @@ pub fn parse_metar(raw: &str) -> Result<MetarReport, MetarError> {
         _ => return Err(MetarError::MissingStation),
     };
     idx += 1;
-    let (day, hour, minute) = tokens.get(idx).and_then(|t| parse_day_time(t)).ok_or(MetarError::MissingTime)?;
+    let (day, hour, minute) = tokens
+        .get(idx)
+        .and_then(|t| parse_day_time(t))
+        .ok_or(MetarError::MissingTime)?;
     idx += 1;
 
     let mut report = MetarReport {
@@ -319,7 +338,10 @@ pub fn parse_metar(raw: &str) -> Result<MetarReport, MetarError> {
     // A T-group must agree with the whole-degree group (±0.5 °C after ICAO
     // rounding); if it does not, trust the main body and drop the tenths.
     if let (Some(tenths), Some(whole)) = (report.temperature_tenths, report.temperature_whole)
-        && TempC::from_tenths(tenths).round_half_up_whole().abs_diff(whole) > 1
+        && TempC::from_tenths(tenths)
+            .round_half_up_whole()
+            .abs_diff(whole)
+            > 1
     {
         report.temperature_tenths = None;
         report.dewpoint_tenths = None;
@@ -347,7 +369,10 @@ mod tests {
         assert_eq!(r.dewpoint_whole, Some(12));
         assert_eq!(r.qnh_hpa, Some(1016));
         assert_eq!(r.temperature().unwrap().0, TempC::from_whole(18));
-        assert_eq!(r.canonical, "EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG");
+        assert_eq!(
+            r.canonical,
+            "EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG"
+        );
     }
 
     #[test]
@@ -381,18 +406,26 @@ mod tests {
 
     #[test]
     fn speci_and_cor_variants() {
-        let r = parse_metar("SPECI EHAM 261307Z 25015G27KT 3000 TSRA BKN012CB 16/14 Q1017").unwrap();
+        let r =
+            parse_metar("SPECI EHAM 261307Z 25015G27KT 3000 TSRA BKN012CB 16/14 Q1017").unwrap();
         assert_eq!(r.report_type, ReportType::Speci);
         assert_eq!(r.temperature_whole, Some(16));
         let r = parse_metar("METAR COR EHAM 261255Z 24012KT 9999 FEW030 17/12 Q1016").unwrap();
         assert!(r.cor);
-        let r = parse_metar("KJFK 261251Z COR 18010KT 10SM FEW250 24/13 A3002 RMK AO2 T02440133").unwrap();
+        let r = parse_metar("KJFK 261251Z COR 18010KT 10SM FEW250 24/13 A3002 RMK AO2 T02440133")
+            .unwrap();
         assert!(r.cor);
         assert_eq!(r.temperature_whole, Some(24));
         assert_eq!(r.temperature_tenths, Some(244));
         assert_eq!(r.dewpoint_tenths, Some(133));
         assert_eq!(r.altimeter_inhg_hundredths, Some(3002));
-        assert_eq!(r.temperature().unwrap(), (TempC::from_tenths(244), wm_core::weather::TempPrecision::Tenth));
+        assert_eq!(
+            r.temperature().unwrap(),
+            (
+                TempC::from_tenths(244),
+                wm_core::weather::TempPrecision::Tenth
+            )
+        );
     }
 
     #[test]
@@ -405,14 +438,16 @@ mod tests {
 
     #[test]
     fn inconsistent_t_group_is_dropped() {
-        let r = parse_metar("KJFK 261251Z 18010KT 10SM FEW250 24/13 A3002 RMK AO2 T01440133").unwrap();
+        let r =
+            parse_metar("KJFK 261251Z 18010KT 10SM FEW250 24/13 A3002 RMK AO2 T01440133").unwrap();
         assert_eq!(r.temperature_whole, Some(24));
         assert_eq!(r.temperature_tenths, None);
     }
 
     #[test]
     fn negative_t_group() {
-        let r = parse_metar("KMSP 151253Z 31012KT 10SM CLR M12/M20 A3050 RMK AO2 T11221200").unwrap();
+        let r =
+            parse_metar("KMSP 151253Z 31012KT 10SM CLR M12/M20 A3050 RMK AO2 T11221200").unwrap();
         assert_eq!(r.temperature_tenths, Some(-122));
         assert_eq!(r.dewpoint_tenths, Some(-200));
     }
@@ -426,9 +461,18 @@ mod tests {
     #[test]
     fn errors() {
         assert_eq!(parse_metar("   "), Err(MetarError::Empty));
-        assert_eq!(parse_metar("METAR 261255Z"), Err(MetarError::MissingStation));
-        assert_eq!(parse_metar("EHAM 26125Z 18/12"), Err(MetarError::MissingTime));
-        assert_eq!(parse_metar("EHAM 321255Z 18/12"), Err(MetarError::MissingTime));
+        assert_eq!(
+            parse_metar("METAR 261255Z"),
+            Err(MetarError::MissingStation)
+        );
+        assert_eq!(
+            parse_metar("EHAM 26125Z 18/12"),
+            Err(MetarError::MissingTime)
+        );
+        assert_eq!(
+            parse_metar("EHAM 321255Z 18/12"),
+            Err(MetarError::MissingTime)
+        );
     }
 
     #[test]
@@ -442,17 +486,32 @@ mod tests {
     #[test]
     fn day_time_resolution_handles_month_rollover() {
         let r = utc("2026-10-01T00:05:00Z");
-        assert_eq!(resolve_day_time(30, 23, 55, r), Some(utc("2026-09-30T23:55:00Z")));
-        assert_eq!(resolve_day_time(1, 0, 0, r), Some(utc("2026-10-01T00:00:00Z")));
+        assert_eq!(
+            resolve_day_time(30, 23, 55, r),
+            Some(utc("2026-09-30T23:55:00Z"))
+        );
+        assert_eq!(
+            resolve_day_time(1, 0, 0, r),
+            Some(utc("2026-10-01T00:00:00Z"))
+        );
         // Day 31 after a 30-day month: go back two months (Aug 31).
         let r = utc("2026-10-01T00:05:00Z");
-        assert_eq!(resolve_day_time(31, 23, 55, r), Some(utc("2026-08-31T23:55:00Z")));
+        assert_eq!(
+            resolve_day_time(31, 23, 55, r),
+            Some(utc("2026-08-31T23:55:00Z"))
+        );
         // Slightly skewed reference before the report.
         let r = utc("2026-09-30T23:59:00Z");
-        assert_eq!(resolve_day_time(1, 0, 25, r), Some(utc("2026-10-01T00:25:00Z")));
+        assert_eq!(
+            resolve_day_time(1, 0, 25, r),
+            Some(utc("2026-10-01T00:25:00Z"))
+        );
         // Year rollover.
         let r = utc("2027-01-01T00:10:00Z");
-        assert_eq!(resolve_day_time(31, 23, 55, r), Some(utc("2026-12-31T23:55:00Z")));
+        assert_eq!(
+            resolve_day_time(31, 23, 55, r),
+            Some(utc("2026-12-31T23:55:00Z"))
+        );
         assert_eq!(resolve_day_time(0, 0, 0, r), None);
     }
 

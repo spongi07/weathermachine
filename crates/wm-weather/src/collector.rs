@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use wm_core::event::{CorrectionEvent, EventEnvelope, EventSource, ObservationEvent, ProviderHealthEvent, WeatherMachineEvent};
+use wm_core::event::{
+    CorrectionEvent, EventEnvelope, EventSource, ObservationEvent, ProviderHealthEvent,
+    WeatherMachineEvent,
+};
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{LocationId, ProviderId, StationId};
 use wm_core::ingest::{IngestBatch, IngestSink};
@@ -66,11 +69,24 @@ pub struct CollectorStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PollOutcome {
     /// Request made; counts of what it produced.
-    Fetched { provider: ProviderId, new: usize, out_of_order: usize, duplicates: usize, corrections: usize },
+    Fetched {
+        provider: ProviderId,
+        new: usize,
+        out_of_order: usize,
+        duplicates: usize,
+        corrections: usize,
+    },
     /// The provider gate refused (rate limit / backoff / circuit). No request made.
-    GateClosed { provider: ProviderId, retry_in: Duration },
+    GateClosed {
+        provider: ProviderId,
+        retry_in: Duration,
+    },
     /// Request failed (network, HTTP status, malformed payload).
-    Failed { provider: ProviderId, detail: String, throttled: bool },
+    Failed {
+        provider: ProviderId,
+        detail: String,
+        throttled: bool,
+    },
 }
 
 struct Slot {
@@ -114,7 +130,12 @@ impl StationCollector {
         let slots: Vec<Slot> = sources
             .into_iter()
             .map(|s| Slot {
-                health: HealthTracker::new(s.provider().clone(), cfg.station.clone(), cfg.health.clone(), now),
+                health: HealthTracker::new(
+                    s.provider().clone(),
+                    cfg.station.clone(),
+                    cfg.health.clone(),
+                    now,
+                ),
                 source: s,
             })
             .collect();
@@ -160,7 +181,13 @@ impl StationCollector {
     pub fn warm_start(&mut self, observations: Vec<Observation>) {
         let mut sorted = observations;
         sorted.sort_by_key(|o| (o.key.observed_at, o.version));
-        self.status.recent_observations = sorted.iter().rev().take(RECENT_KEEP).rev().cloned().collect();
+        self.status.recent_observations = sorted
+            .iter()
+            .rev()
+            .take(RECENT_KEEP)
+            .rev()
+            .cloned()
+            .collect();
         self.status.last_observation = sorted.last().cloned();
         self.ledger.warm_start(sorted);
     }
@@ -176,8 +203,14 @@ impl StationCollector {
 
     fn active_index(&self) -> usize {
         let unusable = |s: &Slot| {
-            matches!(s.health.state(), ProviderHealthState::Throttled | ProviderHealthState::Unavailable)
-                || s.source.gate().not_before_utc().is_some_and(|t| t > self.clock.now() + chrono::Duration::minutes(5))
+            matches!(
+                s.health.state(),
+                ProviderHealthState::Throttled | ProviderHealthState::Unavailable
+            ) || s
+                .source
+                .gate()
+                .not_before_utc()
+                .is_some_and(|t| t > self.clock.now() + chrono::Duration::minutes(5))
         };
         if self.slots.is_empty() {
             return 0;
@@ -220,13 +253,24 @@ impl StationCollector {
     }
 
     fn remember(&mut self, obs: &Observation) {
-        if self.status.last_observation.as_ref().is_none_or(|l| obs.key.observed_at >= l.key.observed_at) {
+        if self
+            .status
+            .last_observation
+            .as_ref()
+            .is_none_or(|l| obs.key.observed_at >= l.key.observed_at)
+        {
             self.status.last_observation = Some(obs.clone());
         }
         self.status.recent_observations.retain(|o| o.key != obs.key);
         self.status.recent_observations.push(obs.clone());
-        self.status.recent_observations.sort_by_key(|o| o.key.observed_at);
-        let excess = self.status.recent_observations.len().saturating_sub(RECENT_KEEP);
+        self.status
+            .recent_observations
+            .sort_by_key(|o| o.key.observed_at);
+        let excess = self
+            .status
+            .recent_observations
+            .len()
+            .saturating_sub(RECENT_KEEP);
         self.status.recent_observations.drain(..excess);
     }
 
@@ -247,19 +291,28 @@ impl StationCollector {
         let idx = self.active_index();
         let failover = idx != 0;
         let Some(slot) = self.slots.get(idx) else {
-            return PollOutcome::Failed { provider: ProviderId::replay(), detail: "no sources configured".into(), throttled: false };
+            return PollOutcome::Failed {
+                provider: ProviderId::replay(),
+                detail: "no sources configured".into(),
+                throttled: false,
+            };
         };
         let source = Arc::clone(&slot.source);
         let provider = source.provider().clone();
         self.status.active_provider = Some(provider.clone());
-        let result = source.fetch(&self.cfg.station, self.cfg.max_gate_wait).await;
+        let result = source
+            .fetch(&self.cfg.station, self.cfg.max_gate_wait)
+            .await;
         let now = self.clock.now();
         let gate = Arc::clone(source.gate());
 
         let outcome = match result {
             Err(SourceError::Fetch(FetchError::GateClosed(w))) => {
                 self.status.gate_closed_total += 1;
-                PollOutcome::GateClosed { provider, retry_in: w.retry_in }
+                PollOutcome::GateClosed {
+                    provider,
+                    retry_in: w.retry_in,
+                }
             }
             Ok(fetch) => {
                 self.last_poll_at = Some(now);
@@ -286,10 +339,12 @@ impl StationCollector {
                                 ooo += 1;
                             }
                             persisted.push((c.observation.clone(), c.class));
-                            events.push(WeatherMachineEvent::WeatherObservation(ObservationEvent {
-                                observation: c.observation.clone(),
-                                class: c.class,
-                            }));
+                            events.push(WeatherMachineEvent::WeatherObservation(
+                                ObservationEvent {
+                                    observation: c.observation.clone(),
+                                    class: c.class,
+                                },
+                            ));
                         }
                         DedupClass::Correction | DedupClass::Revision => {
                             cor += 1;
@@ -318,7 +373,11 @@ impl StationCollector {
                     &stats,
                     blocked,
                 );
-                let prefix = if source.is_noaa() { "nws" } else { "weather_data" };
+                let prefix = if source.is_noaa() {
+                    "nws"
+                } else {
+                    "weather_data"
+                };
                 if new > 0 {
                     metrics::counter!(format!("{prefix}_new_observations_total"), "provider" => provider.to_string(), "station" => self.cfg.station.to_string()).increment(new as u64);
                 }
@@ -344,22 +403,49 @@ impl StationCollector {
                     self.emit(fetch.request.completed_at, e).await;
                 }
                 if let Some(h) = health {
-                    self.emit(now, WeatherMachineEvent::ProviderHealthChanged(h)).await;
+                    self.emit(now, WeatherMachineEvent::ProviderHealthChanged(h))
+                        .await;
                 }
-                PollOutcome::Fetched { provider, new, out_of_order: ooo, duplicates: dup, corrections: cor }
+                PollOutcome::Fetched {
+                    provider,
+                    new,
+                    out_of_order: ooo,
+                    duplicates: dup,
+                    corrections: cor,
+                }
             }
-            Err(SourceError::Malformed { detail, raw, request }) => {
+            Err(SourceError::Malformed {
+                detail,
+                raw,
+                request,
+            }) => {
                 self.last_poll_at = Some(now);
                 self.status.polls_total += 1;
                 self.status.last_poll_at = Some(now);
                 let stats = gate.stats();
-                let health = self.slots[idx].health.on_malformed(now, &detail, &stats, gate.blocked_until_utc());
-                let batch = IngestBatch { request: *request, raw: Some(*raw), observations: Vec::new(), corrections: Vec::new(), health: health.clone() };
+                let health = self.slots[idx].health.on_malformed(
+                    now,
+                    &detail,
+                    &stats,
+                    gate.blocked_until_utc(),
+                );
+                let batch = IngestBatch {
+                    request: *request,
+                    raw: Some(*raw),
+                    observations: Vec::new(),
+                    corrections: Vec::new(),
+                    health: health.clone(),
+                };
                 self.persist(batch).await;
                 if let Some(h) = health {
-                    self.emit(now, WeatherMachineEvent::ProviderHealthChanged(h)).await;
+                    self.emit(now, WeatherMachineEvent::ProviderHealthChanged(h))
+                        .await;
                 }
-                PollOutcome::Failed { provider, detail, throttled: false }
+                PollOutcome::Failed {
+                    provider,
+                    detail,
+                    throttled: false,
+                }
             }
             Err(SourceError::Fetch(err)) => {
                 self.last_poll_at = Some(now);
@@ -369,15 +455,33 @@ impl StationCollector {
                 let status = err.record().and_then(|r| r.status);
                 let stats = gate.stats();
                 let detail = err.to_string();
-                let health = self.slots[idx].health.on_failure(now, status, throttled, &detail, &stats, gate.blocked_until_utc());
+                let health = self.slots[idx].health.on_failure(
+                    now,
+                    status,
+                    throttled,
+                    &detail,
+                    &stats,
+                    gate.blocked_until_utc(),
+                );
                 if let Some(record) = err.record().cloned() {
-                    let batch = IngestBatch { request: record, raw: None, observations: Vec::new(), corrections: Vec::new(), health: health.clone() };
+                    let batch = IngestBatch {
+                        request: record,
+                        raw: None,
+                        observations: Vec::new(),
+                        corrections: Vec::new(),
+                        health: health.clone(),
+                    };
                     self.persist(batch).await;
                 }
                 if let Some(h) = health {
-                    self.emit(now, WeatherMachineEvent::ProviderHealthChanged(h)).await;
+                    self.emit(now, WeatherMachineEvent::ProviderHealthChanged(h))
+                        .await;
                 }
-                PollOutcome::Failed { provider, detail, throttled }
+                PollOutcome::Failed {
+                    provider,
+                    detail,
+                    throttled,
+                }
             }
         };
         self.tick_health(now).await;
@@ -391,23 +495,31 @@ impl StationCollector {
         let mut changed: Vec<ProviderHealthEvent> = Vec::new();
         for slot in &mut self.slots {
             let gate = slot.source.gate();
-            if let Some(ev) = slot.health.on_tick(now, newest, &gate.stats(), gate.blocked_until_utc()) {
+            if let Some(ev) =
+                slot.health
+                    .on_tick(now, newest, &gate.stats(), gate.blocked_until_utc())
+            {
                 changed.push(ev);
             }
         }
         for ev in changed {
-            self.emit(now, WeatherMachineEvent::ProviderHealthChanged(ev)).await;
+            self.emit(now, WeatherMachineEvent::ProviderHealthChanged(ev))
+                .await;
         }
     }
 
     fn publish(&mut self) {
-        self.status.providers = self.slots.iter().map(|s| {
-            let mut snap = s.health.snapshot().clone();
-            let st = s.source.gate().stats();
-            snap.requests_today = st.requests_today;
-            snap.daily_budget = s.source.gate().policy().daily_budget;
-            snap
-        }).collect();
+        self.status.providers = self
+            .slots
+            .iter()
+            .map(|s| {
+                let mut snap = s.health.snapshot().clone();
+                let st = s.source.gate().stats();
+                snap.requests_today = st.requests_today;
+                snap.daily_budget = s.source.gate().policy().daily_budget;
+                snap
+            })
+            .collect();
         self.status.hints = *self.hints.borrow();
         self.status_tx.send_replace(self.status.clone());
     }
@@ -425,7 +537,9 @@ impl StationCollector {
             };
             self.status.next_poll = Some(decision);
             self.publish();
-            let wait = (decision.at - self.clock.now()).to_std().unwrap_or(Duration::ZERO);
+            let wait = (decision.at - self.clock.now())
+                .to_std()
+                .unwrap_or(Duration::ZERO);
             let hints_open = self.hints_open;
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}

@@ -27,7 +27,11 @@ impl RulesText {
             material.push_str(u);
         }
         let sha256 = sha256_hex(material.as_bytes());
-        Self { text, resolution_source_url, sha256 }
+        Self {
+            text,
+            resolution_source_url,
+            sha256,
+        }
     }
 }
 
@@ -188,6 +192,9 @@ mod tests {
         let c = RulesText::new("rules!", Some("https://a".into()));
         assert_ne!(a.sha256, b.sha256);
         assert_ne!(a.sha256, c.sha256);
-        assert_eq!(a.sha256, RulesText::new("rules", Some("https://a".into())).sha256);
+        assert_eq!(
+            a.sha256,
+            RulesText::new("rules", Some("https://a".into())).sha256
+        );
     }
 }

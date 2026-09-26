@@ -17,7 +17,9 @@ use wm_core::ingest::{BoxFuture, IngestBatch, IngestSink, SinkError};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side, TempUnit};
 use wm_core::trading::{DecisionRecord, Fill, Liquidity, RunMode};
 use wm_core::units::TempC;
-use wm_core::weather::{DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision};
+use wm_core::weather::{
+    DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision,
+};
 
 /// Embedded migrations (`/migrations`).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -96,7 +98,10 @@ impl StationLease {
     /// Release explicitly (also happens on drop via connection close).
     pub async fn release(mut self) -> Result<()> {
         if let Some(mut c) = self.conn.take() {
-            sqlx::query("SELECT pg_advisory_unlock($1)").bind(self.key).execute(&mut c).await?;
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(self.key)
+                .execute(&mut c)
+                .await?;
             c.close().await?;
         }
         Ok(())
@@ -105,7 +110,9 @@ impl StationLease {
 
 impl std::fmt::Debug for StationLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StationLease").field("name", &self.name).finish()
+        f.debug_struct("StationLease")
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -153,9 +160,17 @@ impl PgStore {
         let key = lock_key(&name);
         let conn = self.pool.acquire().await?;
         let mut conn = conn.detach();
-        let got: bool = sqlx::query("SELECT pg_try_advisory_lock($1)").bind(key).fetch_one(&mut conn).await?.try_get(0)?;
+        let got: bool = sqlx::query("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(&mut conn)
+            .await?
+            .try_get(0)?;
         if got {
-            Ok(Some(StationLease { conn: Some(conn), key, name }))
+            Ok(Some(StationLease {
+                conn: Some(conn),
+                key,
+                name,
+            }))
         } else {
             conn.close().await?;
             Ok(None)
@@ -258,7 +273,10 @@ impl PgStore {
         Ok(())
     }
 
-    async fn insert_health(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, h: &ProviderHealthEvent) -> Result<()> {
+    async fn insert_health(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        h: &ProviderHealthEvent,
+    ) -> Result<()> {
         sqlx::query("INSERT INTO provider_health_events (provider, station_id, state, previous_state, reason, snapshot, at) VALUES ($1,$2,$3,$4,$5,$6,$7)")
             .bind(h.snapshot.provider.as_str())
             .bind(h.snapshot.scope.as_ref().map(|s| s.as_str()))
@@ -273,7 +291,11 @@ impl PgStore {
     }
 
     /// Latest version of each observation for `station` since `since` (warm start / history).
-    pub async fn observations_since(&self, station: &StationId, since: DateTime<Utc>) -> Result<Vec<Observation>> {
+    pub async fn observations_since(
+        &self,
+        station: &StationId,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<Observation>> {
         let rows = sqlx::query(
             "SELECT station_id, observed_at, report_type, version, temperature_dc, dewpoint_dc, precision, raw_text, content_hash, provider, provider_receipt_at, fetched_at, parser_version, quality
              FROM weather_observations_current WHERE station_id = $1 AND observed_at >= $2 ORDER BY observed_at",
@@ -282,7 +304,9 @@ impl PgStore {
         .bind(since)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(|r| Self::observation_from_row(&r)).collect()
+        rows.into_iter()
+            .map(|r| Self::observation_from_row(&r))
+            .collect()
     }
 
     fn observation_from_row(r: &sqlx::postgres::PgRow) -> Result<Observation> {
@@ -292,27 +316,50 @@ impl PgStore {
         let quality: sqlx::types::Json<QualityFlags> = r.try_get("quality")?;
         Ok(Observation {
             key: ObservationKey {
-                station: StationId::new(station).map_err(|e| StorageError::Invalid(e.to_string()))?,
+                station: StationId::new(station)
+                    .map_err(|e| StorageError::Invalid(e.to_string()))?,
                 observed_at: r.try_get("observed_at")?,
-                report_type: if report == "SPECI" { ReportType::Speci } else { ReportType::Metar },
+                report_type: if report == "SPECI" {
+                    ReportType::Speci
+                } else {
+                    ReportType::Metar
+                },
             },
             version: r.try_get::<i32, _>("version")?.max(1) as u32,
-            temperature: r.try_get::<Option<i32>, _>("temperature_dc")?.map(TempC::from_tenths),
-            dewpoint: r.try_get::<Option<i32>, _>("dewpoint_dc")?.map(TempC::from_tenths),
-            precision: if precision == "tenth" { TempPrecision::Tenth } else { TempPrecision::WholeDegree },
+            temperature: r
+                .try_get::<Option<i32>, _>("temperature_dc")?
+                .map(TempC::from_tenths),
+            dewpoint: r
+                .try_get::<Option<i32>, _>("dewpoint_dc")?
+                .map(TempC::from_tenths),
+            precision: if precision == "tenth" {
+                TempPrecision::Tenth
+            } else {
+                TempPrecision::WholeDegree
+            },
             raw_text: r.try_get("raw_text")?,
             content_hash: r.try_get("content_hash")?,
-            provider: ProviderId::new(r.try_get::<String, _>("provider")?).map_err(|e| StorageError::Invalid(e.to_string()))?,
+            provider: ProviderId::new(r.try_get::<String, _>("provider")?)
+                .map_err(|e| StorageError::Invalid(e.to_string()))?,
             provider_receipt_at: r.try_get("provider_receipt_at")?,
             fetched_at: r.try_get("fetched_at")?,
-            parser_version: r.try_get::<i32, _>("parser_version")?.clamp(0, i32::from(u16::MAX)) as u16,
+            parser_version: r
+                .try_get::<i32, _>("parser_version")?
+                .clamp(0, i32::from(u16::MAX)) as u16,
             quality: quality.0,
         })
     }
 
     // -- Journal -------------------------------------------------------------------
 
-    pub async fn record_run(&self, run: &RunId, mode: RunMode, model_id: &str, config: &serde_json::Value, started_at: DateTime<Utc>) -> Result<()> {
+    pub async fn record_run(
+        &self,
+        run: &RunId,
+        mode: RunMode,
+        model_id: &str,
+        config: &serde_json::Value,
+        started_at: DateTime<Utc>,
+    ) -> Result<()> {
         sqlx::query("INSERT INTO strategy_runs (run_id, mode, started_at, model_id, version, config) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (run_id) DO NOTHING")
             .bind(run.0)
             .bind(mode.as_str())
@@ -355,7 +402,8 @@ impl PgStore {
             .await?;
         rows.into_iter()
             .map(|r| {
-                let payload: sqlx::types::Json<wm_core::event::WeatherMachineEvent> = r.try_get("payload")?;
+                let payload: sqlx::types::Json<wm_core::event::WeatherMachineEvent> =
+                    r.try_get("payload")?;
                 let source: String = r.try_get("source")?;
                 Ok(EventEnvelope {
                     seq: r.try_get::<i64, _>("seq")? as u64,
@@ -374,14 +422,22 @@ impl PgStore {
     }
 
     pub async fn last_journal_seq(&self, run: &RunId) -> Result<u64> {
-        let v: Option<i64> = sqlx::query("SELECT max(seq) FROM event_journal WHERE run_id = $1").bind(run.0).fetch_one(&self.pool).await?.try_get(0)?;
+        let v: Option<i64> = sqlx::query("SELECT max(seq) FROM event_journal WHERE run_id = $1")
+            .bind(run.0)
+            .fetch_one(&self.pool)
+            .await?
+            .try_get(0)?;
         Ok(v.unwrap_or(0).max(0) as u64)
     }
 
     // -- Markets ------------------------------------------------------------------
 
     /// Upsert a market, its outcomes and its verbatim rules (+ raw metadata payload).
-    pub async fn upsert_market(&self, m: &DailyTemperatureMarket, raw: Option<&[u8]>) -> Result<()> {
+    pub async fn upsert_market(
+        &self,
+        m: &DailyTemperatureMarket,
+        raw: Option<&[u8]>,
+    ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO market_rules (rules_sha256, text, resolution_source_url, parsed_spec) VALUES ($1,$2,$3,$4) ON CONFLICT (rules_sha256) DO NOTHING")
             .bind(&m.rules.sha256)
@@ -459,7 +515,10 @@ impl PgStore {
     }
 
     pub async fn rules_review_status(&self, sha256: &str) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT review_status FROM market_rules WHERE rules_sha256 = $1").bind(sha256).fetch_optional(&self.pool).await?;
+        let row = sqlx::query("SELECT review_status FROM market_rules WHERE rules_sha256 = $1")
+            .bind(sha256)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(match row {
             Some(r) => Some(r.try_get("review_status")?),
             None => None,
@@ -596,21 +655,43 @@ impl PgStore {
 
     /// Daily maxima per local date from stored observations (research).
     pub async fn stored_observation_count(&self, station: &StationId) -> Result<i64> {
-        Ok(sqlx::query("SELECT count(*) FROM weather_observations_current WHERE station_id = $1").bind(station.as_str()).fetch_one(&self.pool).await?.try_get(0)?)
+        Ok(
+            sqlx::query("SELECT count(*) FROM weather_observations_current WHERE station_id = $1")
+                .bind(station.as_str())
+                .fetch_one(&self.pool)
+                .await?
+                .try_get(0)?,
+        )
     }
 
-    pub async fn record_system_event(&self, level: &str, kind: &str, message: &str, details: &serde_json::Value) -> Result<()> {
-        sqlx::query("INSERT INTO system_events (level, kind, message, details) VALUES ($1,$2,$3,$4)")
-            .bind(level)
-            .bind(kind)
-            .bind(message)
-            .bind(sqlx::types::Json(details))
-            .execute(&self.pool)
-            .await?;
+    pub async fn record_system_event(
+        &self,
+        level: &str,
+        kind: &str,
+        message: &str,
+        details: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO system_events (level, kind, message, details) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(level)
+        .bind(kind)
+        .bind(message)
+        .bind(sqlx::types::Json(details))
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub async fn record_backtest(&self, run: &RunId, from: NaiveDate, to: NaiveDate, fidelity: &str, parameters: &serde_json::Value, metrics: &serde_json::Value) -> Result<()> {
+    pub async fn record_backtest(
+        &self,
+        run: &RunId,
+        from: NaiveDate,
+        to: NaiveDate,
+        fidelity: &str,
+        parameters: &serde_json::Value,
+        metrics: &serde_json::Value,
+    ) -> Result<()> {
         sqlx::query("INSERT INTO backtest_runs (run_id, from_date, to_date, fidelity, parameters, metrics) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (run_id) DO UPDATE SET metrics = EXCLUDED.metrics")
             .bind(run.0)
             .bind(from)
@@ -626,7 +707,11 @@ impl PgStore {
 
 impl IngestSink for PgStore {
     fn persist(&self, batch: IngestBatch) -> BoxFuture<'_, std::result::Result<(), SinkError>> {
-        Box::pin(async move { self.persist_ingest(&batch).await.map_err(|e| SinkError(e.to_string())) })
+        Box::pin(async move {
+            self.persist_ingest(&batch)
+                .await
+                .map_err(|e| SinkError(e.to_string()))
+        })
     }
 }
 

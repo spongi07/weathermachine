@@ -27,7 +27,11 @@ impl Leg {
             OutcomeSide::Yes => in_bucket,
             OutcomeSide::No => !in_bucket,
         };
-        if wins { Usd::from_micros(self.shares.micros()) } else { Usd::ZERO }
+        if wins {
+            Usd::from_micros(self.shares.micros())
+        } else {
+            Usd::ZERO
+        }
     }
 }
 
@@ -63,7 +67,12 @@ pub struct EventExposure {
 pub fn event_exposure(market: &DailyTemperatureMarket, legs: &[Leg]) -> EventExposure {
     let capital: Usd = legs.iter().map(|l| l.cost).sum();
     if legs.is_empty() {
-        return EventExposure { worst_case_loss: Usd::ZERO, best_case_pnl: Usd::ZERO, capital, scenarios: Vec::new() };
+        return EventExposure {
+            worst_case_loss: Usd::ZERO,
+            best_case_pnl: Usd::ZERO,
+            capital,
+            scenarios: Vec::new(),
+        };
     }
     let mut scenarios = Vec::new();
     let mut worst = Usd::from_micros(i64::MAX);
@@ -74,7 +83,12 @@ pub fn event_exposure(market: &DailyTemperatureMarket, legs: &[Leg]) -> EventExp
         best = best.max(pnl);
         scenarios.push((o.label.clone(), pnl));
     }
-    EventExposure { worst_case_loss: (-worst).max(Usd::ZERO), best_case_pnl: best, capital, scenarios }
+    EventExposure {
+        worst_case_loss: (-worst).max(Usd::ZERO),
+        best_case_pnl: best,
+        capital,
+        scenarios,
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +112,12 @@ mod tests {
     }
 
     fn leg(v: i32, side: OutcomeSide, shares: i64, cost: &str) -> Leg {
-        Leg { bucket: TemperatureBucket::exact(v, TempUnit::Celsius), side, shares: Shares::from_whole(shares), cost: Usd::parse(cost).unwrap() }
+        Leg {
+            bucket: TemperatureBucket::exact(v, TempUnit::Celsius),
+            side,
+            shares: Shares::from_whole(shares),
+            cost: Usd::parse(cost).unwrap(),
+        }
     }
 
     #[test]
@@ -112,7 +131,11 @@ mod tests {
     #[test]
     fn correlated_nos_are_not_additive() {
         // NO 19, NO 20, NO 21 at $9.30, $9.70, $9.85 (10 shares each). At most one loses.
-        let legs = [leg(19, OutcomeSide::No, 10, "9.30"), leg(20, OutcomeSide::No, 10, "9.70"), leg(21, OutcomeSide::No, 10, "9.85")];
+        let legs = [
+            leg(19, OutcomeSide::No, 10, "9.30"),
+            leg(20, OutcomeSide::No, 10, "9.70"),
+            leg(21, OutcomeSide::No, 10, "9.85"),
+        ];
         let e = event_exposure(&market(), &legs);
         // Worst: final = 21 → NO21 loses 9.85, others win +0.70 and +0.30 ⇒ −8.85.
         assert_eq!(e.worst_case_loss, Usd::parse("8.85").unwrap());
@@ -122,7 +145,10 @@ mod tests {
     #[test]
     fn complete_set_has_no_price_risk() {
         // YES 18 + NO 18 (a CTF split) pays exactly 10 in every scenario.
-        let legs = [leg(18, OutcomeSide::Yes, 10, "5.00"), leg(18, OutcomeSide::No, 10, "5.00")];
+        let legs = [
+            leg(18, OutcomeSide::Yes, 10, "5.00"),
+            leg(18, OutcomeSide::No, 10, "5.00"),
+        ];
         let e = event_exposure(&market(), &legs);
         assert_eq!(e.worst_case_loss, Usd::ZERO);
         assert_eq!(e.capital, Usd::from_whole(10));
@@ -130,7 +156,10 @@ mod tests {
 
     #[test]
     fn yes_and_no_on_adjacent_buckets_hedge_partially() {
-        let legs = [leg(18, OutcomeSide::Yes, 10, "9.50"), leg(19, OutcomeSide::No, 10, "9.30")];
+        let legs = [
+            leg(18, OutcomeSide::Yes, 10, "9.50"),
+            leg(19, OutcomeSide::No, 10, "9.30"),
+        ];
         let e = event_exposure(&market(), &legs);
         // final 19: YES18 loses 9.50, NO19 loses 9.30 ⇒ −18.80 (both lose).
         assert_eq!(e.worst_case_loss, Usd::parse("18.80").unwrap());

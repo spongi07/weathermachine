@@ -1,0 +1,35 @@
+# Location #1 — Amsterdam / EHAM. No strategy code depends on this file's values.
+
+[location]
+id = "amsterdam"
+name = "Amsterdam"
+timezone = "Europe/Amsterdam"
+enabled = true
+
+[station]
+id = "EHAM"
+name = "Amsterdam Airport Schiphol"
+wmo_id = "06240"
+latitude = 52.3156
+longitude = 4.7903
+elevation_m = -3.0
+# Routine METARs at HH:25 and HH:55 UTC (Dutch AIP GEN 3.5 — re-verify in Phase 0).
+routine_minutes = [25, 55]
+first_poll_delay_secs = 90
+arrival_window_secs = 720
+
+[market]
+event_slug_template = "highest-temperature-in-amsterdam-on-{month}-{day}-{year}"
+unit = "celsius"
+taker_fee_rate = "0.05"           # Polymarket weather category (2026); overridden by API data when available
+expected_resolution_url = "https://www.weather.gov/wrh/timeseries?site=eham"
+# confirmed_filter = "hourly_nws_faa"   # set ONLY after Phase 0 verifies which WRH rows count
+
+[observation_sources]
+primary = "awc"
+secondary = ["tgftp"]
+
+[peak]
+watch_start_after_noon = -180
+watch_end_after_noon = 300
+watch_margin_tenths = 10

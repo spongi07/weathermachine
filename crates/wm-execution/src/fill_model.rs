@@ -20,12 +20,29 @@ pub struct TakerFill {
 
 /// Walk the book for a taker order: buys consume asks `≤ limit`, sells consume
 /// bids `≥ limit`, best price first. `all_or_none` implements FOK.
-pub fn simulate_taker(book: &OrderBook, side: Side, limit: Price, shares: Shares, fees: &FeeSchedule, all_or_none: bool) -> TakerFill {
+pub fn simulate_taker(
+    book: &OrderBook,
+    side: Side,
+    limit: Price,
+    shares: Shares,
+    fees: &FeeSchedule,
+    all_or_none: bool,
+) -> TakerFill {
     let mut remaining = shares;
     let mut legs = Vec::new();
     let levels: Vec<_> = match side {
-        Side::Buy => book.asks.iter().filter(|l| l.price <= limit).copied().collect(),
-        Side::Sell => book.bids.iter().filter(|l| l.price >= limit).copied().collect(),
+        Side::Buy => book
+            .asks
+            .iter()
+            .filter(|l| l.price <= limit)
+            .copied()
+            .collect(),
+        Side::Sell => book
+            .bids
+            .iter()
+            .filter(|l| l.price >= limit)
+            .copied()
+            .collect(),
     };
     for l in levels {
         if remaining.micros() <= 0 {
@@ -39,19 +56,39 @@ pub fn simulate_taker(book: &OrderBook, side: Side, limit: Price, shares: Shares
     }
     let filled = shares - remaining;
     if all_or_none && remaining.micros() > 0 {
-        return TakerFill { legs: Vec::new(), filled: Shares::ZERO, unfilled: shares, avg_price: None, gross: Usd::ZERO, fee: Usd::ZERO };
+        return TakerFill {
+            legs: Vec::new(),
+            filled: Shares::ZERO,
+            unfilled: shares,
+            avg_price: None,
+            gross: Usd::ZERO,
+            fee: Usd::ZERO,
+        };
     }
-    let rounding = if side == Side::Buy { Rounding::Up } else { Rounding::Down };
+    let rounding = if side == Side::Buy {
+        Rounding::Up
+    } else {
+        Rounding::Down
+    };
     let gross: Usd = legs.iter().map(|(p, s)| notional(*p, *s, rounding)).sum();
     let fee: Usd = legs.iter().map(|(p, s)| fees.taker_fee(*p, *s)).sum();
     let avg_price = if filled.micros() > 0 {
         let num = i128::from(gross.micros()) * 1_000_000;
         let den = i128::from(filled.micros());
-        u32::try_from(num / den).ok().and_then(|m| Price::from_micros(m).ok())
+        u32::try_from(num / den)
+            .ok()
+            .and_then(|m| Price::from_micros(m).ok())
     } else {
         None
     };
-    TakerFill { legs, filled, unfilled: remaining, avg_price, gross, fee }
+    TakerFill {
+        legs,
+        filled,
+        unfilled: remaining,
+        avg_price,
+        gross,
+        fee,
+    }
 }
 
 /// Conservative passive fill from a public trade print.
@@ -59,7 +96,14 @@ pub fn simulate_taker(book: &OrderBook, side: Side, limit: Price, shares: Shares
 /// A resting order at `limit` with `queue_ahead` shares in front of it fills
 /// only from volume that trades *through* its price (fully) or *at* its price
 /// beyond the queue ahead. Returns (fill, new queue ahead).
-pub fn passive_fill_from_trade(side: Side, limit: Price, remaining: Shares, queue_ahead: Shares, trade_price: Price, trade_size: Shares) -> (Shares, Shares) {
+pub fn passive_fill_from_trade(
+    side: Side,
+    limit: Price,
+    remaining: Shares,
+    queue_ahead: Shares,
+    trade_price: Price,
+    trade_size: Shares,
+) -> (Shares, Shares) {
     let through = match side {
         Side::Buy => trade_price < limit,
         Side::Sell => trade_price > limit,
@@ -92,8 +136,26 @@ mod tests {
     fn book() -> OrderBook {
         let mut b = OrderBook {
             token: TokenId::new("t").unwrap(),
-            bids: vec![BookLevel { price: p("0.93"), size: Shares::from_whole(10) }, BookLevel { price: p("0.92"), size: Shares::from_whole(30) }],
-            asks: vec![BookLevel { price: p("0.95"), size: Shares::from_whole(6) }, BookLevel { price: p("0.96"), size: Shares::from_whole(20) }],
+            bids: vec![
+                BookLevel {
+                    price: p("0.93"),
+                    size: Shares::from_whole(10),
+                },
+                BookLevel {
+                    price: p("0.92"),
+                    size: Shares::from_whole(30),
+                },
+            ],
+            asks: vec![
+                BookLevel {
+                    price: p("0.95"),
+                    size: Shares::from_whole(6),
+                },
+                BookLevel {
+                    price: p("0.96"),
+                    size: Shares::from_whole(20),
+                },
+            ],
             tick_size: p("0.01"),
             min_order_size: Shares::from_whole(5),
             exchange_ts: None,
@@ -106,39 +168,108 @@ mod tests {
 
     #[test]
     fn buy_walks_levels_within_limit() {
-        let f = simulate_taker(&book(), Side::Buy, p("0.96"), Shares::from_whole(10), &FeeSchedule::ZERO, false);
+        let f = simulate_taker(
+            &book(),
+            Side::Buy,
+            p("0.96"),
+            Shares::from_whole(10),
+            &FeeSchedule::ZERO,
+            false,
+        );
         assert_eq!(f.filled, Shares::from_whole(10));
-        assert_eq!(f.legs, vec![(p("0.95"), Shares::from_whole(6)), (p("0.96"), Shares::from_whole(4))]);
+        assert_eq!(
+            f.legs,
+            vec![
+                (p("0.95"), Shares::from_whole(6)),
+                (p("0.96"), Shares::from_whole(4))
+            ]
+        );
         assert_eq!(f.gross, Usd::parse("9.54").unwrap());
         assert_eq!(f.avg_price, Some(p("0.954")));
         // Limit below second level: partial fill (FAK), FOK fills nothing.
-        let fak = simulate_taker(&book(), Side::Buy, p("0.95"), Shares::from_whole(10), &FeeSchedule::ZERO, false);
+        let fak = simulate_taker(
+            &book(),
+            Side::Buy,
+            p("0.95"),
+            Shares::from_whole(10),
+            &FeeSchedule::ZERO,
+            false,
+        );
         assert_eq!(fak.filled, Shares::from_whole(6));
         assert_eq!(fak.unfilled, Shares::from_whole(4));
-        let fok = simulate_taker(&book(), Side::Buy, p("0.95"), Shares::from_whole(10), &FeeSchedule::ZERO, true);
+        let fok = simulate_taker(
+            &book(),
+            Side::Buy,
+            p("0.95"),
+            Shares::from_whole(10),
+            &FeeSchedule::ZERO,
+            true,
+        );
         assert_eq!(fok.filled, Shares::ZERO);
     }
 
     #[test]
     fn sell_hits_bids_and_pays_fees() {
-        let f = simulate_taker(&book(), Side::Sell, p("0.92"), Shares::from_whole(15), &FeeSchedule::taker(50_000), false);
+        let f = simulate_taker(
+            &book(),
+            Side::Sell,
+            p("0.92"),
+            Shares::from_whole(15),
+            &FeeSchedule::taker(50_000),
+            false,
+        );
         assert_eq!(f.filled, Shares::from_whole(15));
         assert_eq!(f.gross, Usd::parse("13.9").unwrap());
         assert!(f.fee > Usd::ZERO);
-        let none = simulate_taker(&book(), Side::Sell, p("0.99"), Shares::from_whole(5), &FeeSchedule::ZERO, false);
+        let none = simulate_taker(
+            &book(),
+            Side::Sell,
+            p("0.99"),
+            Shares::from_whole(5),
+            &FeeSchedule::ZERO,
+            false,
+        );
         assert_eq!(none.filled, Shares::ZERO);
         assert_eq!(none.avg_price, None);
     }
 
     #[test]
     fn passive_queue_model() {
-        let (f, q) = passive_fill_from_trade(Side::Buy, p("0.94"), Shares::from_whole(10), Shares::from_whole(50), p("0.94"), Shares::from_whole(30));
+        let (f, q) = passive_fill_from_trade(
+            Side::Buy,
+            p("0.94"),
+            Shares::from_whole(10),
+            Shares::from_whole(50),
+            p("0.94"),
+            Shares::from_whole(30),
+        );
         assert_eq!((f, q), (Shares::ZERO, Shares::from_whole(20)));
-        let (f, q) = passive_fill_from_trade(Side::Buy, p("0.94"), Shares::from_whole(10), Shares::from_whole(20), p("0.94"), Shares::from_whole(25));
+        let (f, q) = passive_fill_from_trade(
+            Side::Buy,
+            p("0.94"),
+            Shares::from_whole(10),
+            Shares::from_whole(20),
+            p("0.94"),
+            Shares::from_whole(25),
+        );
         assert_eq!((f, q), (Shares::from_whole(5), Shares::ZERO));
-        let (f, _) = passive_fill_from_trade(Side::Buy, p("0.94"), Shares::from_whole(10), Shares::from_whole(1000), p("0.93"), Shares::from_whole(1));
+        let (f, _) = passive_fill_from_trade(
+            Side::Buy,
+            p("0.94"),
+            Shares::from_whole(10),
+            Shares::from_whole(1000),
+            p("0.93"),
+            Shares::from_whole(1),
+        );
         assert_eq!(f, Shares::from_whole(10), "traded through our price");
-        let (f, _) = passive_fill_from_trade(Side::Buy, p("0.94"), Shares::from_whole(10), Shares::ZERO, p("0.95"), Shares::from_whole(100));
+        let (f, _) = passive_fill_from_trade(
+            Side::Buy,
+            p("0.94"),
+            Shares::from_whole(10),
+            Shares::ZERO,
+            p("0.95"),
+            Shares::from_whole(100),
+        );
         assert_eq!(f, Shares::ZERO);
     }
 

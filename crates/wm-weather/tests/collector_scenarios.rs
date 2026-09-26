@@ -18,8 +18,9 @@ use wm_core::time::{Clock, ManualClock};
 use wm_core::weather::DedupClass;
 use wm_net::{HttpFetcher, ProviderGate, RateLimitPolicy};
 use wm_weather::{
-    AwcMetarSource, CadenceModel, CollectorConfig, CollectorRegistry, HealthConfig, ObservationSource, PollOutcome,
-    PollingHints, PollingParams, PollingPolicy, StationCollector, TgftpMetarSource,
+    AwcMetarSource, CadenceModel, CollectorConfig, CollectorRegistry, HealthConfig,
+    ObservationSource, PollOutcome, PollingHints, PollingParams, PollingPolicy, StationCollector,
+    TgftpMetarSource,
 };
 
 fn utc(s: &str) -> DateTime<Utc> {
@@ -68,8 +69,14 @@ fn policy() -> RateLimitPolicy {
 }
 
 fn awc_source(server_uri: &str, clock: &ManualClock, provider: &str) -> Arc<dyn ObservationSource> {
-    let gate = ProviderGate::new(ProviderId::new(provider).unwrap(), policy(), Arc::new(clock.clone()), 11);
-    let fetcher = Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap());
+    let gate = ProviderGate::new(
+        ProviderId::new(provider).unwrap(),
+        policy(),
+        Arc::new(clock.clone()),
+        11,
+    );
+    let fetcher =
+        Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap());
     Arc::new(AwcMetarSource::new(fetcher, server_uri, 3))
 }
 
@@ -87,8 +94,22 @@ fn harness(sources: Vec<Arc<dyn ObservationSource>>, clock: ManualClock) -> Harn
         health: HealthConfig::default(),
         max_gate_wait: Duration::ZERO,
     };
-    let collector = StationCollector::new(claim, cfg, sources, sink.clone(), tx, hints_rx, Arc::new(clock.clone()));
-    Harness { collector, events: rx, sink, clock, _hints: hints_tx }
+    let collector = StationCollector::new(
+        claim,
+        cfg,
+        sources,
+        sink.clone(),
+        tx,
+        hints_rx,
+        Arc::new(clock.clone()),
+    );
+    Harness {
+        collector,
+        events: rx,
+        sink,
+        clock,
+        _hints: hints_tx,
+    }
 }
 
 fn drain(rx: &mut mpsc::Receiver<EventEnvelope>) -> Vec<WeatherMachineEvent> {
@@ -103,7 +124,9 @@ fn observation_events(events: &[WeatherMachineEvent]) -> Vec<(DedupClass, i32)> 
     events
         .iter()
         .filter_map(|e| match e {
-            WeatherMachineEvent::WeatherObservation(o) => Some((o.class, o.observation.temperature.unwrap().tenths())),
+            WeatherMachineEvent::WeatherObservation(o) => {
+                Some((o.class, o.observation.temperature.unwrap().tenths()))
+            }
             _ => None,
         })
         .collect()
@@ -123,7 +146,11 @@ async fn mount(server: &MockServer, body: String) {
     server.reset().await;
     Mock::given(method("GET"))
         .and(path("/api/data/metar"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body).insert_header("content-type", "application/json"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(body)
+                .insert_header("content-type", "application/json"),
+        )
         .mount(server)
         .await;
 }
@@ -131,14 +158,42 @@ async fn mount(server: &MockServer, body: String) {
 #[tokio::test]
 async fn http_200_new_observations_are_emitted_and_persisted_with_raw_payload() {
     let server = MockServer::start().await;
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR"), ("METAR EHAM 261225Z 23011KT 9999 FEW028 17/12 Q1016", T1225, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[
+            (
+                "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+                T1255,
+                "METAR",
+            ),
+            (
+                "METAR EHAM 261225Z 23011KT 9999 FEW028 17/12 Q1016",
+                T1225,
+                "METAR",
+            ),
+        ]),
+    )
+    .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     let out = h.collector.poll_once().await;
-    assert!(matches!(out, PollOutcome::Fetched { new: 2, duplicates: 0, .. }), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            PollOutcome::Fetched {
+                new: 2,
+                duplicates: 0,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
     let events = drain(&mut h.events);
     // Emitted in observation-time order.
-    assert_eq!(observation_events(&events), vec![(DedupClass::New, 170), (DedupClass::New, 180)]);
+    assert_eq!(
+        observation_events(&events),
+        vec![(DedupClass::New, 170), (DedupClass::New, 180)]
+    );
     assert_eq!(health_states(&events), vec![ProviderHealthState::Healthy]);
     let batches = h.sink.batches();
     assert_eq!(batches.len(), 1);
@@ -151,30 +206,77 @@ async fn http_200_new_observations_are_emitted_and_persisted_with_raw_payload() 
 #[tokio::test]
 async fn duplicate_response_produces_no_new_observation_events() {
     let server = MockServer::start().await;
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     h.collector.poll_once().await;
     drain(&mut h.events);
     h.clock.advance(Duration::from_secs(60));
     let out = h.collector.poll_once().await;
-    assert!(matches!(out, PollOutcome::Fetched { new: 0, duplicates: 1, .. }), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            PollOutcome::Fetched {
+                new: 0,
+                duplicates: 1,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
     let events = drain(&mut h.events);
-    assert!(observation_events(&events).is_empty(), "HTTP poll completed but no new observation ⇒ no WeatherEvent");
+    assert!(
+        observation_events(&events).is_empty(),
+        "HTTP poll completed but no new observation ⇒ no WeatherEvent"
+    );
 }
 
 #[tokio::test]
 async fn corrected_observation_emits_correction_and_preserves_versions() {
     let server = MockServer::start().await;
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     h.collector.poll_once().await;
     drain(&mut h.events);
-    mount(&server, awc_json(&[("METAR COR EHAM 261255Z 24012KT 9999 FEW030 17/12 Q1016", T1255, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR COR EHAM 261255Z 24012KT 9999 FEW030 17/12 Q1016",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
     h.clock.advance(Duration::from_secs(60));
     let out = h.collector.poll_once().await;
-    assert!(matches!(out, PollOutcome::Fetched { corrections: 1, new: 0, .. }), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            PollOutcome::Fetched {
+                corrections: 1,
+                new: 0,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
     let events = drain(&mut h.events);
     let corr = events
         .iter()
@@ -195,16 +297,42 @@ async fn corrected_observation_emits_correction_and_preserves_versions() {
 #[tokio::test]
 async fn out_of_order_observation_is_flagged() {
     let server = MockServer::start().await;
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     h.collector.poll_once().await;
     drain(&mut h.events);
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR"), ("METAR EHAM 261225Z 23011KT 9999 FEW028 17/12 Q1016", T1225, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[
+            (
+                "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+                T1255,
+                "METAR",
+            ),
+            (
+                "METAR EHAM 261225Z 23011KT 9999 FEW028 17/12 Q1016",
+                T1225,
+                "METAR",
+            ),
+        ]),
+    )
+    .await;
     h.clock.advance(Duration::from_secs(60));
     h.collector.poll_once().await;
     let events = drain(&mut h.events);
-    assert_eq!(observation_events(&events), vec![(DedupClass::OutOfOrder, 170)]);
+    assert_eq!(
+        observation_events(&events),
+        vec![(DedupClass::OutOfOrder, 170)]
+    );
 }
 
 #[tokio::test]
@@ -217,7 +345,16 @@ async fn http_429_retry_after_throttles_without_retry_storm_or_observation_event
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     let out = h.collector.poll_once().await;
-    assert!(matches!(out, PollOutcome::Failed { throttled: true, .. }), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            PollOutcome::Failed {
+                throttled: true,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
     let events = drain(&mut h.events);
     assert!(observation_events(&events).is_empty());
     assert!(health_states(&events).contains(&ProviderHealthState::Throttled));
@@ -238,13 +375,25 @@ async fn http_429_retry_after_throttles_without_retry_storm_or_observation_event
 #[tokio::test]
 async fn repeated_http_500_makes_provider_unavailable_and_opens_circuit() {
     let server = MockServer::start().await;
-    Mock::given(method("GET")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     let mut states = Vec::new();
     for _ in 0..3 {
         let out = h.collector.poll_once().await;
-        assert!(matches!(out, PollOutcome::Failed { throttled: false, .. }), "{out:?}");
+        assert!(
+            matches!(
+                out,
+                PollOutcome::Failed {
+                    throttled: false,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
         states.extend(health_states(&drain(&mut h.events)));
         h.clock.advance(Duration::from_secs(700));
     }
@@ -256,18 +405,35 @@ async fn repeated_http_500_makes_provider_unavailable_and_opens_circuit() {
 async fn timeout_and_connection_failures_are_failures_not_data() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("[]").set_delay(Duration::from_secs(3)))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("[]")
+                .set_delay(Duration::from_secs(3)),
+        )
         .mount(&server)
         .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
-    let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock.clone());
+    let mut h = harness(
+        vec![awc_source(&server.uri(), &clock, "awc")],
+        clock.clone(),
+    );
     let out = h.collector.poll_once().await;
-    assert!(matches!(&out, PollOutcome::Failed { detail, .. } if detail.contains("timed out")), "{out:?}");
+    assert!(
+        matches!(&out, PollOutcome::Failed { detail, .. } if detail.contains("timed out")),
+        "{out:?}"
+    );
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut h2 = harness(vec![awc_source(&format!("http://127.0.0.1:{port}"), &clock, "awc")], clock);
+    let mut h2 = harness(
+        vec![awc_source(
+            &format!("http://127.0.0.1:{port}"),
+            &clock,
+            "awc",
+        )],
+        clock,
+    );
     let out = h2.collector.poll_once().await;
     assert!(matches!(out, PollOutcome::Failed { .. }), "{out:?}");
     assert!(observation_events(&drain(&mut h2.events)).is_empty());
@@ -276,7 +442,15 @@ async fn timeout_and_connection_failures_are_failures_not_data() {
 #[tokio::test]
 async fn malformed_response_is_preserved_and_degrades_health() {
     let server = MockServer::start().await;
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     h.collector.poll_once().await;
@@ -292,14 +466,24 @@ async fn malformed_response_is_preserved_and_degrades_health() {
     let events = drain(&mut h.events);
     assert_eq!(health_states(&events), vec![ProviderHealthState::Degraded]);
     let last = h.sink.batches().last().unwrap().clone();
-    let raw = last.raw.expect("raw payload preserved for later reprocessing");
+    let raw = last
+        .raw
+        .expect("raw payload preserved for later reprocessing");
     assert_eq!(&raw.body[..], b"<html>maintenance</html>");
 }
 
 #[tokio::test]
 async fn long_outage_goes_stale_then_recovers() {
     let server = MockServer::start().await;
-    mount(&server, awc_json(&[("METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016", T1255, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let mut h = harness(vec![awc_source(&server.uri(), &clock, "awc")], clock);
     h.collector.poll_once().await;
@@ -310,7 +494,15 @@ async fn long_outage_goes_stale_then_recovers() {
     let events = drain(&mut h.events);
     assert!(health_states(&events).contains(&ProviderHealthState::Stale));
     // A new report arrives: healthy again.
-    mount(&server, awc_json(&[("METAR EHAM 261325Z 24012KT 9999 FEW030 18/12 Q1016", T1325, "METAR")])).await;
+    mount(
+        &server,
+        awc_json(&[(
+            "METAR EHAM 261325Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1325,
+            "METAR",
+        )]),
+    )
+    .await;
     h.clock.advance(Duration::from_secs(60));
     h.collector.poll_once().await;
     let events = drain(&mut h.events);
@@ -320,10 +512,18 @@ async fn long_outage_goes_stale_then_recovers() {
 #[tokio::test]
 async fn circuit_recovers_after_open_period() {
     let server = MockServer::start().await;
-    Mock::given(method("GET")).respond_with(ResponseTemplate::new(503)).up_to_n_times(3).mount(&server).await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(3)
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         // A report that is fresh at recovery time (13:55; recovery happens ≈14:22).
-        .respond_with(ResponseTemplate::new(200).set_body_string(awc_json(&[("METAR EHAM 261355Z 24012KT 9999 FEW030 18/12 Q1016", T1355, "METAR")])))
+        .respond_with(ResponseTemplate::new(200).set_body_string(awc_json(&[(
+            "METAR EHAM 261355Z 24012KT 9999 FEW030 18/12 Q1016",
+            T1355,
+            "METAR",
+        )])))
         .mount(&server)
         .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
@@ -343,7 +543,10 @@ async fn circuit_recovers_after_open_period() {
     // After the open period a half-open probe succeeds and the provider recovers.
     h.clock.advance(Duration::from_secs(3600));
     let out = h.collector.poll_once().await;
-    assert!(matches!(out, PollOutcome::Fetched { new: 1, .. }), "{out:?}");
+    assert!(
+        matches!(out, PollOutcome::Fetched { new: 1, .. }),
+        "{out:?}"
+    );
     let events = drain(&mut h.events);
     assert!(health_states(&events).contains(&ProviderHealthState::Healthy));
 }
@@ -358,20 +561,33 @@ async fn fails_over_to_secondary_when_primary_is_throttled() {
     let secondary = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/data/observations/metar/stations/EHAM.TXT"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("2026/09/26 12:55\nEHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG\n"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "2026/09/26 12:55\nEHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG\n",
+        ))
         .mount(&secondary)
         .await;
     let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
     let tg_gate = ProviderGate::new(ProviderId::tgftp(), policy(), Arc::new(clock.clone()), 12);
-    let tg_fetcher = Arc::new(HttpFetcher::new(tg_gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap());
-    let tg: Arc<dyn ObservationSource> = Arc::new(TgftpMetarSource::new(tg_fetcher, secondary.uri()));
+    let tg_fetcher = Arc::new(
+        HttpFetcher::new(tg_gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap(),
+    );
+    let tg: Arc<dyn ObservationSource> =
+        Arc::new(TgftpMetarSource::new(tg_fetcher, secondary.uri()));
     let mut h = harness(vec![awc_source(&primary.uri(), &clock, "awc"), tg], clock);
     let out = h.collector.poll_once().await;
-    assert!(matches!(out, PollOutcome::Failed { throttled: true, .. }));
+    assert!(matches!(
+        out,
+        PollOutcome::Failed {
+            throttled: true,
+            ..
+        }
+    ));
     h.clock.advance(Duration::from_secs(60));
     let out = h.collector.poll_once().await;
     match out {
-        PollOutcome::Fetched { provider, new: 1, .. } => assert_eq!(provider, ProviderId::tgftp()),
+        PollOutcome::Fetched {
+            provider, new: 1, ..
+        } => assert_eq!(provider, ProviderId::tgftp()),
         o => panic!("unexpected {o:?}"),
     }
     let events = drain(&mut h.events);
@@ -383,7 +599,11 @@ async fn fails_over_to_secondary_when_primary_is_throttled() {
         })
         .unwrap();
     assert!(obs.quality.from_failover);
-    assert_eq!(primary.received_requests().await.unwrap().len(), 1, "throttled primary not retried");
+    assert_eq!(
+        primary.received_requests().await.unwrap().len(),
+        1,
+        "throttled primary not retried"
+    );
 }
 
 #[test]
@@ -413,9 +633,16 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
         fn gate(&self) -> &Arc<ProviderGate> {
             &self.gate
         }
-        fn fetch<'a>(&'a self, station: &'a StationId, _w: Duration) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
+        fn fetch<'a>(
+            &'a self,
+            station: &'a StationId,
+            _w: Duration,
+        ) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
             Box::pin(async move {
-                let permit = self.gate.try_acquire().map_err(|w| SourceError::Fetch(wm_net::FetchError::GateClosed(w)))?;
+                let permit = self
+                    .gate
+                    .try_acquire()
+                    .map_err(|w| SourceError::Fetch(wm_net::FetchError::GateClosed(w)))?;
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let now = self.clock.now();
                 // Newest report published 3 minutes after nominal time.
@@ -427,7 +654,10 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
                     }
                     t = n;
                 }
-                let raw = format!("METAR EHAM {} 24012KT 9999 FEW030 18/12 Q1016", t.format("%d%H%MZ"));
+                let raw = format!(
+                    "METAR EHAM {} 24012KT 9999 FEW030 18/12 Q1016",
+                    t.format("%d%H%MZ")
+                );
                 let m = metar::parse_metar(&raw).unwrap();
                 permit.complete(wm_net::RequestOutcome::Success { status: 200 });
                 let request = wm_core::ingest::ProviderRequestRecord {
@@ -446,9 +676,25 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
                     gate_wait_ms: 0,
                     payload_sha256: None,
                 };
-                let rawrec = wm_weather::source::raw_record(self.provider(), station, "/scripted", now, 200, None, raw.as_bytes());
+                let rawrec = wm_weather::source::raw_record(
+                    self.provider(),
+                    station,
+                    "/scripted",
+                    now,
+                    200,
+                    None,
+                    raw.as_bytes(),
+                );
                 Ok(SourceFetch {
-                    reports: vec![ParsedReport { station: station.clone(), observed_at: t, report_type: m.report_type, raw_text: raw.clone(), metar: Some(m), provider_temp_tenths: None, provider_receipt_at: None }],
+                    reports: vec![ParsedReport {
+                        station: station.clone(),
+                        observed_at: t,
+                        report_type: m.report_type,
+                        raw_text: raw.clone(),
+                        metar: Some(m),
+                        provider_temp_tenths: None,
+                        provider_receipt_at: None,
+                    }],
                     raw: rawrec,
                     request,
                     cache: wm_core::ingest::CacheOutcome::Miss,
@@ -459,12 +705,24 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
     }
 
     let clock: Arc<dyn Clock> = Arc::new(wm_net::TokioClock::new(utc("2026-09-26T08:00:00Z")));
-    let gate = ProviderGate::new(ProviderId::awc(), RateLimitPolicy::nws_conservative(), Arc::clone(&clock), 5);
+    let gate = ProviderGate::new(
+        ProviderId::awc(),
+        RateLimitPolicy::nws_conservative(),
+        Arc::clone(&clock),
+        5,
+    );
     let calls = Arc::new(AtomicU32::new(0));
-    let source: Arc<dyn ObservationSource> = Arc::new(Scripted { gate, clock: Arc::clone(&clock), calls: Arc::clone(&calls) });
+    let source: Arc<dyn ObservationSource> = Arc::new(Scripted {
+        gate,
+        clock: Arc::clone(&clock),
+        calls: Arc::clone(&calls),
+    });
     let registry = CollectorRegistry::new();
     let (tx, mut rx) = mpsc::channel(4096);
-    let (_hints_tx, hints_rx) = watch::channel(PollingHints { peak_watch: true, has_exposure: false });
+    let (_hints_tx, hints_rx) = watch::channel(PollingHints {
+        peak_watch: true,
+        has_exposure: false,
+    });
     let cfg = CollectorConfig {
         station: eham(),
         location: LocationId::new("amsterdam").unwrap(),
@@ -473,7 +731,15 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
         health: HealthConfig::default(),
         max_gate_wait: Duration::ZERO,
     };
-    let collector = StationCollector::new(registry.claim(&eham()).unwrap(), cfg, vec![source], Arc::new(MemoryIngestSink::new()), tx, hints_rx, Arc::clone(&clock));
+    let collector = StationCollector::new(
+        registry.claim(&eham()).unwrap(),
+        cfg,
+        vec![source],
+        Arc::new(MemoryIngestSink::new()),
+        tx,
+        hints_rx,
+        Arc::clone(&clock),
+    );
     let (stop_tx, stop_rx) = watch::channel(false);
     let handle = tokio::spawn(collector.run(stop_rx));
     tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
@@ -491,5 +757,8 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
             new_obs += 1;
         }
     }
-    assert!((11..=13).contains(&new_obs), "each routine report emitted once, got {new_obs}");
+    assert!(
+        (11..=13).contains(&new_obs),
+        "each routine report emitted once, got {new_obs}"
+    );
 }

@@ -27,7 +27,9 @@ pub struct SystemClock {
 
 impl SystemClock {
     pub fn new() -> Self {
-        Self { origin: Instant::now() }
+        Self {
+            origin: Instant::now(),
+        }
     }
 }
 
@@ -61,7 +63,12 @@ struct ManualState {
 
 impl ManualClock {
     pub fn new(start: DateTime<Utc>) -> Self {
-        Self { inner: Arc::new(Mutex::new(ManualState { now: start, mono: Duration::ZERO })) }
+        Self {
+            inner: Arc::new(Mutex::new(ManualState {
+                now: start,
+                mono: Duration::ZERO,
+            })),
+        }
     }
 
     /// Advance both wall and monotonic time.
@@ -84,7 +91,9 @@ impl ManualClock {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ManualState> {
         // A poisoned lock only means another test thread panicked; the data is still valid.
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -217,7 +226,8 @@ mod tests {
 
     #[test]
     fn amsterdam_day_bounds_regular_summer_day() {
-        let (start, end) = local_day_bounds(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), Amsterdam);
+        let (start, end) =
+            local_day_bounds(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), Amsterdam);
         assert_eq!(start, utc("2026-06-30T22:00:00Z"));
         assert_eq!(end, utc("2026-07-01T22:00:00Z"));
     }
@@ -234,9 +244,15 @@ mod tests {
     #[test]
     fn local_date_and_minutes() {
         let t = utc("2026-09-25T22:30:00Z"); // 00:30 CEST on the 26th
-        assert_eq!(local_date(t, Amsterdam), NaiveDate::from_ymd_opt(2026, 9, 26).unwrap());
+        assert_eq!(
+            local_date(t, Amsterdam),
+            NaiveDate::from_ymd_opt(2026, 9, 26).unwrap()
+        );
         assert_eq!(local_minute_of_day(t, Amsterdam), 30);
-        assert_eq!(local_minute_of_hour(utc("2026-09-26T12:55:00Z"), Amsterdam), 55);
+        assert_eq!(
+            local_minute_of_hour(utc("2026-09-26T12:55:00Z"), Amsterdam),
+            55
+        );
     }
 
     #[test]
@@ -261,11 +277,23 @@ mod tests {
 
     #[test]
     fn amsterdam_solar_noon_is_about_1340_in_summer_and_1240_in_winter() {
-        let summer =
-            solar_noon_local_minutes(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), 4.76, Amsterdam);
-        let winter =
-            solar_noon_local_minutes(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(), 4.76, Amsterdam);
-        assert!((summer - (13.0 * 60.0 + 44.0)).abs() < 5.0, "summer {summer}");
-        assert!((winter - (12.0 * 60.0 + 50.0)).abs() < 5.0, "winter {winter}");
+        let summer = solar_noon_local_minutes(
+            NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            4.76,
+            Amsterdam,
+        );
+        let winter = solar_noon_local_minutes(
+            NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            4.76,
+            Amsterdam,
+        );
+        assert!(
+            (summer - (13.0 * 60.0 + 44.0)).abs() < 5.0,
+            "summer {summer}"
+        );
+        assert!(
+            (winter - (12.0 * 60.0 + 50.0)).abs() < 5.0,
+            "winter {winter}"
+        );
     }
 }

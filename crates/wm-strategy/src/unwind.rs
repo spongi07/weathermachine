@@ -25,7 +25,11 @@ pub enum UnwindStyle {
     /// Rest `offset` above the best bid (GTC, maker).
     Passive { offset: Price },
     /// Start `start_offset` above the bid, step down by `step` every `step_secs`.
-    Progressive { start_offset: Price, step: Price, step_secs: i64 },
+    Progressive {
+        start_offset: Price,
+        step: Price,
+        step_secs: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,7 +44,12 @@ pub struct UnwindConfig {
 
 impl Default for UnwindConfig {
     fn default() -> Self {
-        Self { enabled: true, style: UnwindStyle::BestBid, exit_below_probability: 0.50, max_hold_minutes: None }
+        Self {
+            enabled: true,
+            style: UnwindStyle::BestBid,
+            exit_below_probability: 0.50,
+            max_hold_minutes: None,
+        }
     }
 }
 
@@ -55,7 +64,12 @@ pub struct UnwindEngine {
 
 impl UnwindEngine {
     pub fn new(config: UnwindConfig) -> Self {
-        Self { id: StrategyId::from_static("U_unwind"), config, entries: HashMap::new(), first_signal: HashMap::new() }
+        Self {
+            id: StrategyId::from_static("U_unwind"),
+            config,
+            entries: HashMap::new(),
+            first_signal: HashMap::new(),
+        }
     }
 
     pub fn id(&self) -> &StrategyId {
@@ -75,7 +89,12 @@ impl UnwindEngine {
 
     /// Current conservative win probability of a held leg, using deterministic
     /// facts first (a YES bucket entirely below the observed high cannot win).
-    pub fn p_win(views: &[ViewEvaluation], high: i32, side: OutcomeSide, bucket: &wm_core::market::TemperatureBucket) -> Option<f64> {
+    pub fn p_win(
+        views: &[ViewEvaluation],
+        high: i32,
+        side: OutcomeSide,
+        bucket: &wm_core::market::TemperatureBucket,
+    ) -> Option<f64> {
         let below_high = bucket.upper.is_some_and(|hi| hi < high);
         match side {
             OutcomeSide::Yes if below_high => Some(0.0),
@@ -85,9 +104,18 @@ impl UnwindEngine {
         }
     }
 
-    fn exit_price(&mut self, token: &TokenId, book: &OrderBook, now: DateTime<Utc>) -> Option<(Price, TimeInForce)> {
+    fn exit_price(
+        &mut self,
+        token: &TokenId,
+        book: &OrderBook,
+        now: DateTime<Utc>,
+    ) -> Option<(Price, TimeInForce)> {
         let bid = book.best_bid()?.price;
-        let tick = if book.tick_size.micros() == 0 { Price::saturating_from_micros(10_000) } else { book.tick_size };
+        let tick = if book.tick_size.micros() == 0 {
+            Price::saturating_from_micros(10_000)
+        } else {
+            book.tick_size
+        };
         let ask_cap = book.best_ask().map(|a| a.price.saturating_sub(tick));
         match &self.config.style {
             UnwindStyle::Marketable { floor } => Some(((*floor).min(bid), TimeInForce::Fak)),
@@ -99,16 +127,25 @@ impl UnwindEngine {
                 }
                 Some((p.floor_to_tick(tick).max(bid), TimeInForce::Gtc))
             }
-            UnwindStyle::Progressive { start_offset, step, step_secs } => {
+            UnwindStyle::Progressive {
+                start_offset,
+                step,
+                step_secs,
+            } => {
                 let first = *self.first_signal.entry(token.clone()).or_insert(now);
                 let steps = ((now - first).num_seconds() / (*step_secs).max(1)).max(0) as u32;
                 let reduction = step.micros().saturating_mul(steps);
-                let offset = Price::saturating_from_micros(start_offset.micros().saturating_sub(reduction));
+                let offset =
+                    Price::saturating_from_micros(start_offset.micros().saturating_sub(reduction));
                 let mut p = bid.saturating_add(offset);
                 if let Some(cap) = ask_cap {
                     p = p.min(cap).max(bid);
                 }
-                let tif = if offset.micros() == 0 { TimeInForce::Fak } else { TimeInForce::Gtc };
+                let tif = if offset.micros() == 0 {
+                    TimeInForce::Fak
+                } else {
+                    TimeInForce::Gtc
+                };
                 Some((p.floor_to_tick(tick).max(bid), tif))
             }
         }
@@ -128,14 +165,21 @@ impl UnwindEngine {
         if !self.config.enabled {
             return out;
         }
-        let Ok(high) = common_high(views) else { return out };
+        let Ok(high) = common_high(views) else {
+            return out;
+        };
         let held: Vec<_> = positions.for_event(&market.event_slug).cloned().collect();
         for pos in held {
             let token = &pos.instrument.token;
             if pending_tokens.contains(token) {
                 continue;
             }
-            let p = Self::p_win(views, high, pos.instrument.outcome_side, &pos.instrument.bucket);
+            let p = Self::p_win(
+                views,
+                high,
+                pos.instrument.outcome_side,
+                &pos.instrument.bucket,
+            );
             let held_too_long = match (self.config.max_hold_minutes, self.entries.get(token)) {
                 (Some(max), Some(at)) => (now - *at).num_minutes() >= max,
                 _ => false,
@@ -145,10 +189,18 @@ impl UnwindEngine {
                 self.first_signal.remove(token);
                 continue;
             }
-            let Some(book) = books.get(token) else { continue };
-            let Some((limit, tif)) = self.exit_price(token, book, now) else { continue };
+            let Some(book) = books.get(token) else {
+                continue;
+            };
+            let Some((limit, tif)) = self.exit_price(token, book, now) else {
+                continue;
+            };
             let reason = if deteriorated {
-                format!("p_win {:.3} < {:.3}", p.unwrap_or(0.0), self.config.exit_below_probability)
+                format!(
+                    "p_win {:.3} < {:.3}",
+                    p.unwrap_or(0.0),
+                    self.config.exit_below_probability
+                )
             } else {
                 "max hold time reached".to_owned()
             };

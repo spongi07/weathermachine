@@ -4,9 +4,13 @@
 //! and must never be mixed with real data. Demo mode shows a banner.
 
 use crate::ids::{ConditionId, EventSlug, LocationId, StationId, TokenId};
-use crate::market::{BookLevel, DailyTemperatureMarket, FeeSchedule, MarketExtreme, MarketOutcome, OrderBook, TempUnit, TemperatureBucket};
+use crate::market::{
+    BookLevel, DailyTemperatureMarket, FeeSchedule, MarketExtreme, MarketOutcome, OrderBook,
+    TempUnit, TemperatureBucket,
+};
 use crate::resolution::{
-    FilterCertainty, ObservationFilter, ResolutionSourceKind, ResolutionSpec, RevisionPolicy, RulesText, SpecReviewStatus,
+    FilterCertainty, ObservationFilter, ResolutionSourceKind, ResolutionSpec, RevisionPolicy,
+    RulesText, SpecReviewStatus,
 };
 use crate::units::{Price, Shares};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -40,14 +44,25 @@ pub fn synthetic_temperature_market(
             closed: false,
         });
     };
-    push(TemperatureBucket::at_or_below(lo, unit), format!("{lo}°C or below"), lo);
+    push(
+        TemperatureBucket::at_or_below(lo, unit),
+        format!("{lo}°C or below"),
+        lo,
+    );
     for v in (lo + 1)..hi {
         push(TemperatureBucket::exact(v, unit), format!("{v}°C"), v);
     }
-    push(TemperatureBucket::at_or_above(hi, unit), format!("{hi}°C or higher"), hi);
+    push(
+        TemperatureBucket::at_or_above(hi, unit),
+        format!("{hi}°C or higher"),
+        hi,
+    );
     let rules = RulesText::new(
         "SYNTHETIC DEMO MARKET — not a real Polymarket market. Resolves to the highest reading under the \"Temp\" column (whole °C).",
-        Some(format!("https://www.weather.gov/wrh/timeseries?site={}", station.as_str().to_ascii_lowercase())),
+        Some(format!(
+            "https://www.weather.gov/wrh/timeseries?site={}",
+            station.as_str().to_ascii_lowercase()
+        )),
     );
     let resolution = ResolutionSpec {
         source: ResolutionSourceKind::NoaaWrhTimeseries {
@@ -59,7 +74,10 @@ pub fn synthetic_temperature_market(
         unit,
         whole_degrees: true,
         day_timezone: tz,
-        filters: vec![ObservationFilter::AllRows, ObservationFilter::WRH_HOURLY_NWS_FAA],
+        filters: vec![
+            ObservationFilter::AllRows,
+            ObservationFilter::WRH_HOURLY_NWS_FAA,
+        ],
         filter_certainty: FilterCertainty::Unconfirmed,
         revision_policy: RevisionPolicy::UntilFirstDatapointOfNextDay,
         rules_sha256: rules.sha256.clone(),
@@ -91,8 +109,19 @@ pub fn synthetic_temperature_market(
 }
 
 /// Two-level synthetic book around `bid`/`ask`.
-pub fn synthetic_book(token: &TokenId, bid: Option<&str>, ask: Option<&str>, size: i64, now: DateTime<Utc>) -> OrderBook {
-    let lvl = |p: &str| Price::parse(p).ok().map(|price| BookLevel { price, size: Shares::from_whole(size) });
+pub fn synthetic_book(
+    token: &TokenId,
+    bid: Option<&str>,
+    ask: Option<&str>,
+    size: i64,
+    now: DateTime<Utc>,
+) -> OrderBook {
+    let lvl = |p: &str| {
+        Price::parse(p).ok().map(|price| BookLevel {
+            price,
+            size: Shares::from_whole(size),
+        })
+    };
     OrderBook {
         token: token.clone(),
         bids: bid.and_then(lvl).into_iter().collect(),
