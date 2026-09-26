@@ -73,7 +73,6 @@ toml = "1.1.6"
 tower-http = { version = "0.7.1", features = ["fs", "trace", "compression-gzip", "set-header", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
-url = "2.5.8"
 uuid = { version = "1.26.1", features = ["v7", "serde"] }
 
 # Dev / test

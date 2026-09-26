@@ -1,0 +1,146 @@
+# 32–37 · Historical data, replay, backtest, simulation, research, overfitting
+
+## 32. Historical-data audit
+
+Status legend: **AVAILABLE**, **PARTIAL**, **UNAVAILABLE**. Everything here is
+**ASSUMPTION** until the listed verification has run, because the build
+environment had no egress to these hosts. Never fabricate what is missing:
+backtests label their data fidelity (§34), and synthetic data is never
+evidence.
+
+| Dataset | Status | Source | Retention / granularity | Timestamp semantics | Limits / limitations | Verification |
+|---|---|---|---|---|---|---|
+| EHAM METAR history | AVAILABLE | IEM ASOS/METAR archive, network `NL__ASOS` (CSV `station,valid,metar`) | Multi-year; every METAR/SPECI | `valid` = observation time (UTC). **Publication time absent** → knowledge time modelled as observation + delay (`--publication-delay-min`, default 5) | Mirror, not the resolution source; gaps possible; corrections usually only final versions | Download once, store locally; `import_iem_csv` reports every skipped row |
+| EHAM recent METARs | PARTIAL | AWC Data API (`hours` parameter) | Recent window only | `obsTime` (observation), `receiptTime` (receipt at AWC) | Documented 100 req/min; we use ≪ 1/min | `collect --once` |
+| NCEI ISD Global Hourly (06240099999) | PARTIAL | NCEI | Long archive; hourly-ish synoptic + METAR | Observation time | Processed dataset with days of latency; cross-check only | Manual download |
+| KNMI station observations | PARTIAL | KNMI Data Platform (API key) | 10-minute in-situ data | Observation time | Different measurement than METAR (not the settlement values of NOAA markets) | Phase 11 |
+| WRH / Synoptic time series | PARTIAL | Synoptic API (own token) | Depends on plan | Observation time as displayed by WRH | Token required; the WRH page's token is not ours | Only if AWC ≠ WRH (§8) |
+| Polymarket historical markets + rules | AVAILABLE | Gamma (closed events) | All listed events | Creation / end dates | Rules text may differ between days (KNOWN FACT for Amsterdam) → store per market | `markets discover --date` |
+| Historical prices | PARTIAL | CLOB `/prices-history` | Price points at a chosen fidelity (minutes) | Point time | No depth, no spread → **approximate price backtest only** | Research phase 5 |
+| Historical trades | PARTIAL | Polymarket data API / on-chain fills | Trade prints | Trade time | Trades imply prices, not resting liquidity | Phase 5 |
+| Historical order books | **UNAVAILABLE** (venue) | Reported: the order-book-history endpoint stopped producing snapshots around Feb 2026 | — | — | True order-book backtests need **our own recorder** (enabled: `record_orderbooks`) or a commercial archive | From deployment onwards |
+| Final resolutions | AVAILABLE | Gamma closed markets (resolved outcome prices) | Per market | Resolution time | Occasional disputes (UMA) must be respected | Phase 5 |
+| Historical forecasts | PARTIAL | GFS (NOAA archives), ECMWF open data (recent window; archive licensed), KNMI Harmonie | Varies | **Issue time must be stored** to avoid forecast look-ahead | Licensing and volume | Phase 11 |
+
+## 33. ReplayEngine
+
+**PURPOSE.** Feed the *same* event types to the *same* kernel in knowledge-time order.
+
+```rust
+pub struct SimulationSession { .. }   // Engine + SimulatedExchange + knowledge-time queue
+impl SimulationSession {
+    pub fn new(cfg: EngineConfig, sim: SimConfig, settle_grace: Duration, model: Arc<dyn ProbabilityModel>) -> Self;
+    pub fn push(&mut self, env: EventEnvelope);                 // also schedules market settlement checks
+    pub fn run_until(&mut self, t: DateTime<Utc>) -> SessionOutput;
+    pub fn run_all(&mut self) -> SessionOutput;
+    pub fn next_due(&self) -> Option<DateTime<Utc>>;
+}
+```
+
+The session is used by backtests, demo mode **and** the live paper runtime:
+one loop, three drivers. Inputs come from synthetic days, IEM imports, or a
+recorded run's journal (`weather-machine backtest --journal <run-id>`, with
+execution re-simulated).
+
+**KNOWN FACT (tests).** Events are released by `(available_at, priority,
+insertion)`; the clock never runs backwards (debug assertion). The
+**prefix-stability test** runs a backtest on days 1…N and on 1…N+k, then
+asserts the decisions of days 1…N are identical, so no future event
+influenced a past decision.
+
+**FAILURE MODES.** Knowledge time must be modelled for imported history (IEM
+has no publication time). An unrealistically short delay would leak future
+information, so the default is conservative and the delay is a reported
+parameter.
+
+## 34. BacktestEngine
+
+**PURPOSE.** Measure strategies with honest execution and honest statistics.
+`run_backtest(inputs, &BacktestConfig, model) -> (BacktestReport, Engine)`.
+
+`BacktestReport`: fidelity, events, decisions, approvals, fills, trades (with
+fees), settled markets, realized PnL, daily PnL, winning/losing days, max
+drawdown, **95 % bootstrap CI of mean daily PnL** (seeded), PnL by strategy,
+alerts, and the full decision log (approved and rejected, with reasons).
+
+**Fidelity labels (KNOWN FACT, enforced in the report).**
+`TrueOrderBook` (recorded books), `TradesOnly`, `PriceOnly` (approximate price
+backtest) and `Synthetic` (plumbing only, **not evidence**). The CLI prints the
+label, and journal backtests choose `TrueOrderBook` only when recorded books
+exist.
+
+Settlement uses the day's final value under the market's primary view,
+after local midnight plus a grace period.
+**TESTING.** `synthetic_backtest_runs_end_to_end_and_is_deterministic`
+(20 days, all settle, determinism, consistent accounting) and
+`no_look_ahead_decisions_are_prefix_stable`.
+
+## 35. Execution simulator
+
+**PURPOSE.** Fills that could have happened, never better.
+`SimulatedExchange { submit, cancel, process_due, on_book, on_trade, expire }`
+with `SimConfig { latency_ms: 250, adverse_ticks: 0 }`.
+* **Latency.** An order becomes executable `latency_ms` after submission,
+  against the book *at that time*.
+* **Taker orders (FAK/FOK).** They walk the book level by level at prices at
+  or better than the limit. Partial fills are allowed; FOK is all-or-none.
+  **Never a mid-price fill.**
+* **Maker orders (GTC/GTD).** They rest *behind* the displayed size at their
+  price (queue position) and fill only from subsequent trade prints at or
+  through the price, after the queue ahead is consumed. They expire at their
+  GTD time.
+* **Fees.** Exact per fill, rounded up; the average price and fees are tracked
+  per order.
+* **Pessimism knob.** `adverse_ticks` shifts the opposite side against us for
+  robustness runs.
+* Network costs (gas for redeem/split/merge) are modelled in the CTF
+  economics; paper fills on the CLOB carry no gas.
+
+**TESTING.** `wm-execution/tests/simulated_exchange.rs`:
+`fak_fills_after_latency_against_current_book`,
+`liquidity_can_vanish_during_latency`,
+`fok_is_all_or_nothing_and_missing_book_rejects`,
+`gtc_rests_then_fills_from_trades_after_queue`,
+`gtc_crossed_by_book_fills_as_maker_and_gtd_expires` and
+`invalid_transitions_and_fills_are_rejected`, plus fill-model property tests.
+
+## 36. Parameter research
+
+**Dimensions.** Season, month, local time, confirmation window, slope, drop
+from high, retest count, trajectory class, forecast remaining maximum (Phase
+11), YES price threshold (0.90…0.99), NO price, outcome distance (+1/+2/+3),
+split timing, unwind style/timing, exit price.
+
+**First strategy experiment (brief §38).**
+```text
+weather-machine research peak-survival --csv eham_iem.csv --station EHAM \
+    [--filter all|hourly-nws-faa|hourly-other] --model-out eham.json --report-out survival.md
+```
+The command produces **P(observed high is final | no higher observation for
+N minutes)** for N ∈ {30, 45, 60, 75, 90, 105, 120, 150, 180}. It stratifies by
+`season=`, `hour=`, `drop=` and `trajectory=`, each with sample counts and
+95 % Wilson intervals, and trains the empirical model in the same pass. Order
+of work, per the brief:
+1. survival table on history;
+2. does a forecast improve it (Phase 11);
+3. only then join with historical prices (Phases 8–10).
+
+**Protocol.** Walk-forward splits (`walk_forward_splits(dates, train,
+embargo, test)`): train on past days, skip an embargo, test on the next
+block, and roll forward. No test day ever precedes its training data. Report
+train, validation and out-of-sample results separately, where there are
+enough days.
+
+## 37. Overfitting safeguards
+
+| Safeguard | Mechanism |
+|---|---|
+| Minimum evidence | Strategies require model support ≥ 50 samples in the most specific cell; hierarchical smoothing shrinks sparse cells |
+| Uncertainty always shown | Wilson intervals (survival); bootstrap CI of mean daily PnL (backtests) |
+| No look-ahead | Knowledge-time replay, prefix-stability test, walk-forward with embargo, forecast issue times |
+| Stable regions over peaks | Parameter grids report neighbourhoods; a threshold is acceptable only if adjacent values are also positive out of sample (ASSUMPTION: rule to be applied when sweeps run) |
+| Few parameters | Strategies expose a handful of thresholds; the model has fixed hierarchy levels, not free features |
+| Honest execution | Book-walk fills, latency, fees rounded up, `adverse_ticks` stress, fidelity labels |
+| Objective | Robust EV subject to drawdown, sample size, stability and liquidity, never win rate, raw PnL or ROI alone |
+| Audit | Every run stores config, model id and decision log (`strategy_runs`, `backtest_runs`, `decision_snapshots`) |
+| Synthetic ≠ evidence | Synthetic data is labelled in reports, in the UI (DEMO banner) and in market titles |

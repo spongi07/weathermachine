@@ -310,3 +310,48 @@ async fn concurrent_callers_share_one_gate() {
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn connection_reset_mid_response_is_a_failure_not_data() {
+    // The server accepts, reads the request, starts a response and then drops
+    // the connection (reset / truncated body). Nothing may be parsed or cached,
+    // and the gate must record the failure.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\ncontent-type: application/json\r\n\r\n[{\"partial\":").await;
+            drop(s); // abrupt close before the promised 1000 bytes
+        }
+    });
+    let f = fetcher(RateLimitPolicy::local_test());
+    let r = FetchRequest::get(format!("http://{addr}/metar"), "/metar")
+        .max_gate_wait(Duration::from_secs(1));
+    let err = f.get(&r).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FetchError::Transport { .. } | FetchError::Connect { .. }
+        ),
+        "{err:?}"
+    );
+    let rec = err.record().expect("failed requests are audited");
+    // The audit keeps the status line the server really sent, classified as a failure.
+    assert!(
+        rec.error_class.is_some(),
+        "truncated transfer must carry an error class: {rec:?}"
+    );
+    assert!(
+        rec.payload_sha256.is_none(),
+        "no payload hash for a broken body"
+    );
+    assert!(
+        f.cached(&format!("http://{addr}/metar")).is_none(),
+        "nothing cached from a broken response"
+    );
+    assert!(f.gate().stats().failures_total >= 1);
+}

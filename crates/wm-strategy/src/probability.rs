@@ -408,3 +408,44 @@ mod tests {
         assert_eq!(back, m);
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+    use wm_core::market::TempUnit;
+
+    proptest! {
+        /// For every distribution and every bucket partition of the integers,
+        /// the conservative bounds bracket the truth: each lower ≤ upper,
+        /// Σ lower ≤ 1 ≤ Σ upper. (YES uses the lower bound, NO the upper.)
+        #[test]
+        fn bucket_bounds_bracket_any_distribution(
+            raw in prop::collection::vec(0.0f64..1.0, 2..7),
+            high in -10i32..35,
+            lo in -15i32..25,
+            width in 2i32..15,
+        ) {
+            let total: f64 = raw.iter().sum();
+            prop_assume!(total > 1e-6);
+            let d = IncrementDistribution { probs: raw.iter().map(|p| p / total).collect(), support: 100, source: "prop".into() };
+            let hi = lo + width;
+            let mut buckets = vec![TemperatureBucket::at_or_below(lo, TempUnit::Celsius)];
+            for v in lo + 1..hi {
+                buckets.push(TemperatureBucket::exact(v, TempUnit::Celsius));
+            }
+            buckets.push(TemperatureBucket::at_or_above(hi, TempUnit::Celsius));
+            let (mut sum_lower, mut sum_upper) = (0.0, 0.0);
+            for b in &buckets {
+                let l = d.p_in_bucket_lower(high, b);
+                let u = d.p_in_bucket_upper(high, b);
+                prop_assert!((0.0..=1.0).contains(&l) && (0.0..=1.0).contains(&u));
+                prop_assert!(l <= u + 1e-12, "lower {l} > upper {u} for {b:?}");
+                sum_lower += l;
+                sum_upper += u;
+            }
+            prop_assert!(sum_lower <= 1.0 + 1e-9, "Σ lower = {sum_lower}");
+            prop_assert!(sum_upper >= 1.0 - 1e-9, "Σ upper = {sum_upper}");
+        }
+    }
+}

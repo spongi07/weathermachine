@@ -139,7 +139,8 @@ fn max_gap_minutes(day_start: DateTime<Utc>, points: &[wm_strategy::ObsPoint]) -
     let mut prev = day_start;
     let mut max = None;
     for p in points {
-        let gap = (p.observed_at - prev).num_minutes().max(0);
+        // Rounded up: a 75 min 30 s hole exceeds a 75-minute limit.
+        let gap = ((p.observed_at - prev).num_seconds().max(0) + 59) / 60;
         max = Some(max.map_or(gap, |m: i64| m.max(gap)));
         prev = prev.max(p.observed_at);
     }

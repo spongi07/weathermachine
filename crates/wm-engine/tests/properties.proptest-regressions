@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6ea3a5098e5d5bf831ddc76200add901a97054c75329fc208ecd678c190b6a77 # shrinks to start_healthy = false, steps = [Report { delta: 0, delay_min: 1, skip: false }, Report { delta: -1, delay_min: 30, skip: false }, Books { secs: 359 }, Health(Healthy), Books { secs: 241 }, Report { delta: 0, delay_min: 1, skip: false }, Report { delta: 0, delay_min: 1, skip: false }, Report { delta: 0, delay_min: 1, skip: false }, Report { delta: 0, delay_min: 1, skip: false }, Report { delta: 0, delay_min: 1, skip: false }]

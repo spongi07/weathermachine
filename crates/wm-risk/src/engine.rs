@@ -433,8 +433,10 @@ impl RiskEngine {
                     match w.last_observation_at {
                         None => fail(CheckId::WeatherFreshness, "no observation yet".into()),
                         Some(t) => {
-                            let age = (inp.now - t).num_minutes();
-                            if age > cfg.max_weather_age_minutes {
+                            // Exact comparison: 40 min 30 s is older than a 40-minute limit.
+                            let age = inp.now - t;
+                            if age > Duration::minutes(cfg.max_weather_age_minutes) {
+                                let age = age.num_seconds().div_euclid(60);
                                 fail(
                                     CheckId::WeatherFreshness,
                                     format!(
