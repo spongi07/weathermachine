@@ -104,7 +104,9 @@ docker run --rm -v weather-machine_wmdata:/data ghcr.io/spongi07/weathermachine:
 # 3. Set WM_MODEL_PATH=/data/models/eham.json on the stack and redeploy.
 ```
 
-Volume names are prefixed with the stack name (`weather-machine_…`).
+Volume and network names are prefixed with the Portainer stack name
+(`weather-machine_…` above). If you named the stack differently, adjust the
+commands; *Volumes* in Portainer lists the actual names.
 
 ### Other one-off commands
 
@@ -145,6 +147,7 @@ path prefix.
 |---|---|
 | Stack fails: `required variable WM_DB_PASSWORD is missing` | Set the required variables in the stack's environment section. |
 | Stack fails to clone: reference not found | The repository reference must be an existing branch or tag: `refs/heads/claude/great-wright-xvo6io`. |
+| `failed to bind host port 0.0.0.0:8080/tcp: address already in use` | Another service already uses host port 8080. Set `WM_HTTP_PORT` to a free port (e.g. `8090`) and redeploy; the dashboard is then at `http://<host>:8090/`. The demo stack uses `WM_DEMO_PORT` (default 8081) the same way. |
 | Image pull `denied` | Make the GHCR package public or add GHCR credentials under *Registries*. |
 | Container unhealthy, logs show `database not reachable yet` | PostgreSQL still initialising (first start) — it retries for 90 s; check the `postgres` service logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
