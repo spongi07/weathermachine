@@ -1,5 +1,6 @@
 [package]
 name = "wm-execution"
+description = "Weather Machine execution: order lifecycle, fill models, simulated exchange (backtest/paper), disabled live venue."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +9,16 @@ publish.workspace = true
 
 [dependencies]
 wm-core.workspace = true
+wm-risk.workspace = true
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+chrono-tz.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+chrono.workspace = true
 
 [lints]
 workspace = true

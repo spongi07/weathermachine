@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use wm_core::ids::{ConditionId, LocationId, StrategyId, TokenId};
-use wm_core::market::{DailyTemperatureMarket, FeeSchedule, MarketOutcome, OrderBook, OutcomeSide, Side, TemperatureBucket};
+use wm_core::market::{DailyTemperatureMarket, MarketOutcome, OrderBook, OutcomeSide, Side, TemperatureBucket};
 use wm_core::portfolio::PositionBook;
 use wm_core::trading::{IntentKind, RunMode, TimeInForce};
 use wm_core::units::{Price, Rounding, Shares, Usd, round_shares_to_lot, shares_for_notional};
@@ -200,12 +200,11 @@ impl Default for BuyYesConfig {
 pub struct BuyYesFinalHigh {
     id: StrategyId,
     pub config: BuyYesConfig,
-    fees: FeeSchedule,
 }
 
 impl BuyYesFinalHigh {
-    pub fn new(config: BuyYesConfig, fees: FeeSchedule) -> Self {
-        Self { id: StrategyId::from_static("A_buy_yes_final_high"), config, fees }
+    pub fn new(config: BuyYesConfig) -> Self {
+        Self { id: StrategyId::from_static("A_buy_yes_final_high"), config }
     }
 }
 
@@ -220,6 +219,7 @@ impl Strategy for BuyYesFinalHigh {
 
     fn evaluate(&mut self, ctx: &StrategyContext<'_>) -> StrategyOutput {
         let mut out = StrategyOutput::default();
+        let fees = ctx.market.fees;
         let high = match common_high(ctx.views) {
             Ok(h) => h,
             Err(_) => return out,
@@ -234,10 +234,10 @@ impl Strategy for BuyYesFinalHigh {
         let price = ask.map(|a| a.price);
         let (ev, be) = match (p, price) {
             (Some((pw, _)), Some(pr)) => (
-                Some(ev_per_share(pw, pr, &self.fees, self.config.slippage_allowance)),
-                Some(break_even_probability(pr, &self.fees, self.config.slippage_allowance)),
+                Some(ev_per_share(pw, pr, &fees, self.config.slippage_allowance)),
+                Some(break_even_probability(pr, &fees, self.config.slippage_allowance)),
             ),
-            _ => (None, price.map(|pr| break_even_probability(pr, &self.fees, self.config.slippage_allowance))),
+            _ => (None, price.map(|pr| break_even_probability(pr, &fees, self.config.slippage_allowance))),
         };
         if !self.config.enabled {
             blockers.push("strategy disabled".into());
@@ -370,12 +370,11 @@ impl Default for BuyNoConfig {
 pub struct BuyNoAboveHigh {
     id: StrategyId,
     pub config: BuyNoConfig,
-    fees: FeeSchedule,
 }
 
 impl BuyNoAboveHigh {
-    pub fn new(config: BuyNoConfig, fees: FeeSchedule) -> Self {
-        Self { id: StrategyId::from_static("B_buy_no_above_high"), config, fees }
+    pub fn new(config: BuyNoConfig) -> Self {
+        Self { id: StrategyId::from_static("B_buy_no_above_high"), config }
     }
 }
 
@@ -406,6 +405,7 @@ impl Strategy for BuyNoAboveHigh {
 
 impl BuyNoAboveHigh {
     fn evaluate_bucket(&self, ctx: &StrategyContext<'_>, outcome: &MarketOutcome, high: i32, msh: i64, k: i32, proposals: &mut Vec<Proposal>) -> BucketEvaluation {
+        let fees = ctx.market.fees;
         let token = &outcome.no_token;
         let book = ctx.books.get(token);
         let price = book.and_then(OrderBook::best_ask).map(|l| l.price);
@@ -413,10 +413,10 @@ impl BuyNoAboveHigh {
         let loss = max_p_in_bucket(ctx.views, high, &outcome.bucket);
         let p_win = loss.map(|(pl, _)| 1.0 - pl);
         let ev = match (p_win, price) {
-            (Some(pw), Some(pr)) => Some(ev_per_share(pw, pr, &self.fees, self.config.slippage_allowance)),
+            (Some(pw), Some(pr)) => Some(ev_per_share(pw, pr, &fees, self.config.slippage_allowance)),
             _ => None,
         };
-        let be = price.map(|pr| break_even_probability(pr, &self.fees, self.config.slippage_allowance));
+        let be = price.map(|pr| break_even_probability(pr, &fees, self.config.slippage_allowance));
         let mut blockers = Vec::new();
         if !self.config.enabled {
             blockers.push("strategy disabled".into());

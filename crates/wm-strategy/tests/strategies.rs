@@ -113,7 +113,7 @@ fn strategy_a_signals_with_edge_after_confirmation() {
     let b = books(&m);
     let v = views(&confirmed_series(), NOW, Some(good_dist()));
     let (pos, pending, loc) = (PositionBook::new(), HashSet::new(), LocationId::new("amsterdam").unwrap());
-    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default(), m.fees);
+    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default());
     let out = a.evaluate(&ctx(&m, &b, &v, &pos, &pending, &loc));
     assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
     let p = &out.proposals[0];
@@ -132,7 +132,7 @@ fn strategy_a_blockers() {
     let m = market();
     let b = books(&m);
     let (pos, pending, loc) = (PositionBook::new(), HashSet::new(), LocationId::new("amsterdam").unwrap());
-    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default(), m.fees);
+    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default());
     // Not confirmed yet (30 minutes).
     let early = views(&confirmed_series()[..4], "2026-07-01T12:31:00Z", Some(good_dist()));
     let out = a.evaluate(&ctx(&m, &b, &early, &pos, &pending, &loc));
@@ -174,7 +174,7 @@ fn strategy_a_uses_most_conservative_view_and_refuses_disagreement() {
     let m = market();
     let b = books(&m);
     let (pos, pending, loc) = (PositionBook::new(), HashSet::new(), LocationId::new("amsterdam").unwrap());
-    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default(), m.fees);
+    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default());
     let mut v = views(&confirmed_series(), NOW, Some(good_dist()));
     let mut second = v[0].clone();
     second.distribution = Some(dist(&[0.96, 0.03, 0.007, 0.003], 500));
@@ -197,7 +197,7 @@ fn strategy_b_evaluates_each_distance_separately() {
     let b = books(&m);
     let v = views(&confirmed_series(), NOW, Some(good_dist()));
     let (pos, pending, loc) = (PositionBook::new(), HashSet::new(), LocationId::new("amsterdam").unwrap());
-    let mut s = BuyNoAboveHigh::new(BuyNoConfig::default(), m.fees);
+    let mut s = BuyNoAboveHigh::new(BuyNoConfig::default());
     let out = s.evaluate(&ctx(&m, &b, &v, &pos, &pending, &loc));
     assert_eq!(out.evaluations.len(), 3);
     let labels: Vec<_> = out.proposals.iter().map(|p| p.bucket_label.as_str()).collect();
@@ -217,7 +217,7 @@ fn strategy_b_skips_bucket_containing_the_high() {
     let series = vec![("2026-07-01T12:00:00Z", 250), ("2026-07-01T13:30:00Z", 240)];
     let v = views(&series, NOW, Some(good_dist()));
     let (pos, pending, loc) = (PositionBook::new(), HashSet::new(), LocationId::new("amsterdam").unwrap());
-    let mut s = BuyNoAboveHigh::new(BuyNoConfig::default(), m.fees);
+    let mut s = BuyNoAboveHigh::new(BuyNoConfig::default());
     let out = s.evaluate(&ctx(&m, &b, &v, &pos, &pending, &loc));
     assert!(out.evaluations.is_empty(), "≥24 bucket contains the high 25");
 }

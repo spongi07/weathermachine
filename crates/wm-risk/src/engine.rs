@@ -8,7 +8,7 @@ use wm_core::health::ProviderHealthState;
 use wm_core::ids::{ClientOrderId, DecisionId, EventSlug, LocationId, StationId, StrategyId, TokenId};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side, TemperatureBucket};
 use wm_core::portfolio::PositionBook;
-use wm_core::trading::{IntentKind, RunMode, TradeIntent};
+use wm_core::trading::{IntentKind, RunMode, TimeInForce, TradeIntent};
 use wm_core::units::{Price, Rounding, Shares, Usd, decimal_serde, notional};
 
 /// Risk limits. Money/prices are exact decimal strings in configuration.
@@ -394,7 +394,10 @@ impl RiskEngine {
                         Some(sp) if sp > cfg.max_spread => fail(CheckId::Spread, format!("spread {sp} > {}", cfg.max_spread)),
                         _ => {}
                     }
-                    if intent.side == Side::Buy {
+                    // Marketable orders need displayed depth now; passive orders
+                    // (GTC/GTD) rest below the ask by design.
+                    let marketable = matches!(intent.tif, TimeInForce::Fak | TimeInForce::Fok);
+                    if intent.side == Side::Buy && marketable {
                         let (depth, _) = b.ask_depth_up_to(intent.limit_price);
                         if depth < intent.shares {
                             fail(CheckId::Liquidity, format!("ask depth {depth} < {} shares at ≤ {}", intent.shares, intent.limit_price));

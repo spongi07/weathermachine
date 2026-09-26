@@ -1,5 +1,6 @@
 [package]
 name = "wm-polymarket"
+description = "Weather Machine read-only Polymarket adapter: Gamma discovery, rules parsing, bucket mapping, CLOB books, market WebSocket, CTF economics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +9,22 @@ publish.workspace = true
 
 [dependencies]
 wm-core.workspace = true
+wm-net.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true
