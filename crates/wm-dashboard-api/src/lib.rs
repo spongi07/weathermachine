@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 /// API version (bump on breaking changes).
 pub const API_VERSION: u32 = 1;
 
+/// Peak-confirmation windows (minutes of observed data after the last touch
+/// of the high) evaluated by the kernel; mirrored from `wm-strategy` and kept
+/// in sync by a server-side test.
+pub const CONFIRMATION_WINDOWS: [u32; 9] = [30, 45, 60, 75, 90, 105, 120, 150, 180];
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DashboardSnapshot {
     pub api_version: u32,

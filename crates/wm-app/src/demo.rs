@@ -37,6 +37,8 @@ use wm_core::weather::ReportType;
 use wm_dashboard_api::AlertDto;
 use wm_execution::SimConfig;
 use wm_strategy::ProbabilityModel;
+use wm_weather::polling::{PollDecision, PollReason, PollingMode};
+use wm_weather::{CadenceModel, CollectorStatus, PollingHints};
 
 /// Demo options.
 #[derive(Debug, Clone)]
@@ -241,6 +243,96 @@ pub fn train_model(
     Arc::new(model)
 }
 
+/// Collector-style status for the synthetic source, so the dashboard shows
+/// the same panels (tape with raw METARs, counters, next report) as live.
+struct DemoCollector {
+    status: CollectorStatus,
+    cadence: CadenceModel,
+}
+
+impl DemoCollector {
+    fn new(ids: &setup::LocationIds, cadence: CadenceModel) -> Self {
+        let status = CollectorStatus {
+            station: ids.station.clone(),
+            location: ids.location.clone(),
+            providers: Vec::new(),
+            active_provider: Some(ProviderId::synthetic()),
+            next_poll: None,
+            last_poll_at: None,
+            polls_total: 0,
+            gate_closed_total: 0,
+            new_observations_total: 0,
+            duplicates_total: 0,
+            corrections_total: 0,
+            out_of_order_total: 0,
+            persist_failures_total: 0,
+            storage_ok: true,
+            last_observation: None,
+            recent_observations: Vec::new(),
+            hints: PollingHints::default(),
+        };
+        Self { status, cadence }
+    }
+
+    fn remember(&mut self, o: &wm_core::weather::Observation) {
+        let s = &mut self.status;
+        if s.last_observation
+            .as_ref()
+            .is_none_or(|l| o.key.observed_at >= l.key.observed_at)
+        {
+            s.last_observation = Some(o.clone());
+        }
+        s.recent_observations.retain(|x| x.key != o.key);
+        s.recent_observations.push(o.clone());
+        s.recent_observations.sort_by_key(|x| x.key.observed_at);
+        let excess = s.recent_observations.len().saturating_sub(96);
+        s.recent_observations.drain(..excess);
+    }
+
+    fn absorb(
+        &mut self,
+        processed: &[EventEnvelope],
+        hints: Option<PollingHints>,
+        now: DateTime<Utc>,
+    ) {
+        for env in processed {
+            match &env.event {
+                WeatherMachineEvent::WeatherObservation(o) => {
+                    self.status.polls_total += 1;
+                    self.status.new_observations_total += 1;
+                    self.status.last_poll_at = Some(env.available_at);
+                    self.remember(&o.observation);
+                }
+                WeatherMachineEvent::WeatherCorrection(c) => {
+                    self.status.corrections_total += 1;
+                    self.remember(&c.current);
+                }
+                WeatherMachineEvent::ProviderHealthChanged(h) => {
+                    self.status.providers = vec![h.snapshot.clone()];
+                }
+                _ => {}
+            }
+        }
+        if let Some(h) = hints {
+            self.status.hints = h;
+        }
+        let delay = Duration::minutes(PUBLICATION_DELAY_MIN);
+        let expected = self.cadence.next_report_after(now - delay);
+        let peak = self.status.hints.peak_watch || self.status.hints.has_exposure;
+        self.status.next_poll = expected.map(|e| PollDecision {
+            at: e + delay,
+            mode: if peak {
+                PollingMode::Peak
+            } else {
+                PollingMode::Normal
+            },
+            reason: PollReason::ArrivalWindow,
+            in_window: false,
+            expected_report: Some(e),
+        });
+    }
+}
+
 struct VirtualClock {
     wall_start: std::time::Instant,
     virtual_start: DateTime<Utc>,
@@ -282,8 +374,10 @@ pub async fn run(
 
     let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, RunId::new_v7())?;
     let mut session =
-        SimulationSession::new(engine_cfg, SimConfig::default(), Duration::hours(2), model);
+        SimulationSession::new(engine_cfg, SimConfig::default(), Duration::hours(2), model)
+            .with_event_capture(true);
     session.engine_mut().set_storage_ok(true);
+    let mut collector = DemoCollector::new(&ids, setup::cadence(loc));
 
     let clock = VirtualClock {
         wall_start: std::time::Instant::now(),
@@ -295,7 +389,6 @@ pub async fn run(
     let mut day_index = 0u64;
     let mut next_heartbeat = clock.now();
     let mut alerts: VecDeque<AlertDto> = VecDeque::new();
-    let empty_collectors = HashMap::new();
     let empty_filters = HashMap::new();
     let empty_reviews = HashMap::new();
     let mut last_publish = std::time::Instant::now() - opts.snapshot_interval;
@@ -335,6 +428,16 @@ pub async fn run(
             next_heartbeat += Duration::minutes(HEARTBEAT_MIN);
         }
         let out = session.run_until(vnow);
+        let hint = out
+            .hints
+            .iter()
+            .rev()
+            .find(|(st, _)| st == &ids.station)
+            .map(|(_, h)| PollingHints {
+                peak_watch: h.peak_watch,
+                has_exposure: h.has_exposure,
+            });
+        collector.absorb(&out.processed, hint, vnow);
         metrics::counter!("wm_engine_events_total").increment(out.events);
         metrics::counter!("wm_decisions_total").increment(out.decisions.len() as u64);
         metrics::counter!("wm_orders_approved_total").increment(out.approved.len() as u64);
@@ -385,10 +488,11 @@ pub async fn run(
                 0.0
             });
             let alerts_vec: Vec<AlertDto> = alerts.iter().cloned().collect();
+            let collectors = HashMap::from([(ids.station.clone(), collector.status.clone())]);
             let inputs = DtoInputs {
                 demo: true,
                 instance: &cfg.file.app.instance,
-                collectors: &empty_collectors,
+                collectors: &collectors,
                 stream: None,
                 alerts: &alerts_vec,
                 confirmed_filters: &empty_filters,

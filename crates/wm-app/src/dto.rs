@@ -636,3 +636,14 @@ pub fn build(
             .collect(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dashboard_windows_match_the_kernel() {
+        assert_eq!(
+            wm_dashboard_api::CONFIRMATION_WINDOWS,
+            wm_strategy::CONFIRMATION_WINDOWS
+        );
+    }
+}
