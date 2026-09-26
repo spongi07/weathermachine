@@ -151,13 +151,18 @@ jobs:
           done
           docker logs wm-smoke 2>&1 | tail -n 20
           test "$(docker inspect -f '{{.State.Health.Status}}' wm-smoke)" = "healthy"
+          # Download first, then assert (pipefail-safe: no early-exiting readers on pipes).
           curl -fsS http://127.0.0.1:18080/readyz
-          curl -fsS http://127.0.0.1:18080/api/v1/snapshot \
-            | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['demo'] and s['locations'], 'empty snapshot'"
-          curl -fsS -o /dev/null -D - http://127.0.0.1:18080/wm_ui_bg.wasm | grep -i '^content-type: application/wasm'
-          curl -fsS http://127.0.0.1:18080/ | grep -q 'boot.js'
-          curl -fsS http://127.0.0.1:18080/lite | grep -q 'WEATHER MACHINE'
-          docker run --rm weather-machine:ci ev-table | head -n 3
+          curl -fsS -o snapshot.json http://127.0.0.1:18080/api/v1/snapshot
+          python3 -c "import json; s=json.load(open('snapshot.json')); assert s['demo'] and s['locations'], 'empty snapshot'"
+          curl -fsS -o /dev/null -D wasm.headers http://127.0.0.1:18080/wm_ui_bg.wasm
+          grep -i '^content-type: application/wasm' wasm.headers
+          curl -fsS -o index.html http://127.0.0.1:18080/
+          grep -q 'boot.js' index.html
+          curl -fsS -o lite.html http://127.0.0.1:18080/lite
+          grep -q 'WEATHER MACHINE' lite.html
+          docker run --rm weather-machine:ci ev-table > ev-table.txt
+          head -n 3 ev-table.txt
           docker rm -f wm-smoke
       - name: Push to GHCR
         uses: docker/build-push-action@v7

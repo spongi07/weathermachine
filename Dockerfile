@@ -32,7 +32,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     --mount=type=cache,target=/src/ui/target,sharing=locked \
     cargo build --release --locked -p wm-app \
- && mkdir -p /out/data \
+ && mkdir -p /out/data/models /out/data/research \
+ && touch /out/data/models/.keep /out/data/research/.keep \
  && cp target/release/weather-machine /out/weather-machine \
  && ./ui/build.sh \
  && cp -r ui/dist /out/ui \
@@ -47,8 +48,8 @@ WORKDIR /app
 COPY --from=build /out/weather-machine /usr/local/bin/weather-machine
 COPY --from=build /out/ui /app/ui
 COPY configs /app/configs
-# Writable data directory (models, research output) owned by the runtime user,
-# so a fresh named volume mounted at /data inherits the right ownership.
+# Writable data directories (models, research inputs/outputs) owned by the
+# runtime user; a fresh named volume mounted at /data inherits them.
 COPY --from=build --chown=65532:65532 /out/data /data
 ENV WM_CONFIG=/app/configs/weather-machine.toml \
     WM_UI_DIR=/app/ui \

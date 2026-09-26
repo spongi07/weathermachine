@@ -94,10 +94,12 @@ container*, or the Docker CLI on the host):
 
 ```sh
 # 1. Put an IEM ASOS CSV export (columns station,valid,metar) on the data volume.
-docker run --rm -v weather-machine_wmdata:/data -v "$PWD":/in:ro alpine cp /in/eham.csv /data/
+docker run --rm -v weather-machine_wmdata:/data -v "$PWD":/in:ro alpine \
+  sh -c 'cp /in/eham.csv /data/research/ && chown 65532:65532 /data/research/eham.csv'
 # 2. Run the peak-survival study; it prints P(high is final | N minutes) and writes the model.
 docker run --rm -v weather-machine_wmdata:/data ghcr.io/spongi07/weathermachine:latest \
-  research peak-survival --csv /data/eham.csv --station EHAM --model-out /data/models/eham.json --report-out /data/eham-report.md
+  research peak-survival --csv /data/research/eham.csv --station EHAM \
+  --model-out /data/models/eham.json --report-out /data/research/eham-report.md
 # 3. Set WM_MODEL_PATH=/data/models/eham.json on the stack and redeploy.
 ```
 
