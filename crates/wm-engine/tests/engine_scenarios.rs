@@ -419,6 +419,51 @@ fn identical_rejections_are_recorded_once_per_window() {
 }
 
 #[test]
+fn forecasts_never_change_the_observed_high_or_create_trades() {
+    // A (wildly) warmer forecast is a predictive input only: the observed high,
+    // the resolution views and every decision stay exactly the same.
+    let m = market(vec![
+        ObservationFilter::AllRows,
+        ObservationFilter::WRH_HOURLY_NWS_FAA,
+    ]);
+    let model = || Arc::new(FixedModel(vec![0.985, 0.012, 0.002, 0.001]));
+    let mut base = Engine::new(config(RunMode::Paper), model());
+    let base_out = run(
+        &mut base,
+        scenario(&m, Some(ProviderHealthState::Healthy)),
+        m.fees,
+    );
+    let mut with_fc = Engine::new(config(RunMode::Paper), model());
+    let mut events = scenario(&m, Some(ProviderHealthState::Healthy));
+    let forecast = wm_core::event::ForecastEvent {
+        location: loc(),
+        provider: ProviderId::new("knmi").unwrap(),
+        model: "harmonie".into(),
+        issued_at: utc("2026-07-01T12:00:00Z"),
+        predicted_max: Some(TempC::from_whole(30)),
+        hourly: vec![(utc("2026-07-01T13:00:00Z"), TempC::from_whole(30))],
+    };
+    events.insert(
+        10,
+        env(
+            "2026-07-01T12:00:00Z",
+            WeatherMachineEvent::ForecastUpdate(forecast),
+        ),
+    );
+    let fc_out = run(&mut with_fc, events, m.fees);
+    assert_eq!(approvals(&base_out), approvals(&fc_out));
+    let (a, b) = (base.snapshot(), with_fc.snapshot());
+    assert_eq!(
+        a.locations[0].views, b.locations[0].views,
+        "views/high unchanged by forecasts"
+    );
+    assert_eq!(
+        base.final_value(&m.event_slug),
+        with_fc.final_value(&m.event_slug)
+    );
+}
+
+#[test]
 fn stale_weather_blocks_new_positions() {
     let m = market(vec![
         ObservationFilter::AllRows,

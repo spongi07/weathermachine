@@ -36,7 +36,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use wm_core::event::OperatorCommand;
 use wm_dashboard_api::{API_VERSION, DashboardSnapshot, KillSwitchRequest};
 
@@ -243,7 +243,11 @@ pub fn router(state: AppState) -> Router {
             HeaderName::from_static("cross-origin-opener-policy"),
             HeaderValue::from_static("same-origin"),
         ))
-        .layer(TraceLayer::new_for_http())
+        // Probe 503s during startup are expected; keep them out of the error log.
+        .layer(
+            TraceLayer::new_for_http()
+                .on_failure(DefaultOnFailure::new().level(tracing::Level::WARN)),
+        )
 }
 
 async fn require_basic_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {

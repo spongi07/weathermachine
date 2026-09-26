@@ -2,9 +2,11 @@
 //!
 //! Weather observation ingestion: METAR parsing, official NOAA/NWS providers,
 //! normalization, deduplication/correction tracking, provider health, adaptive
-//! schedule-aware polling and the single-per-station collector.
+//! schedule-aware polling, the single-per-station collector, and the separate
+//! forecast port (predictive inputs only, never resolution data).
 
 pub mod collector;
+pub mod forecast;
 pub mod health;
 pub mod ledger;
 pub mod metar;
@@ -14,6 +16,7 @@ pub mod registry;
 pub mod source;
 
 pub use collector::{CollectorConfig, CollectorStatus, PollOutcome, StationCollector};
+pub use forecast::{ForecastError, ForecastProvider, ForecastQuery, StaticForecastProvider};
 pub use health::{HealthConfig, HealthTracker};
 pub use ledger::{Classified, ObservationLedger};
 pub use polling::{

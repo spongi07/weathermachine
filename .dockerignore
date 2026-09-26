@@ -1,0 +1,14 @@
+# Build outputs and local state never enter the build context.
+target/
+ui/target/
+ui/dist/
+.git/
+.github/
+**/*.rs.bk
+.env
+stack.env
+*.local.toml
+data/
+research-output/
+docs/*.png
+.DS_Store

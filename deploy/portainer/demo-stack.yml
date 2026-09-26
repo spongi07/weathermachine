@@ -1,0 +1,45 @@
+# Weather Machine — DEMO stack for Portainer (no database, no secrets, no network
+# access needed). Runs the real engine on synthetic data in accelerated time.
+#
+# Portainer: Stacks → Add stack → Repository, compose path:
+#   deploy/portainer/demo-stack.yml
+# or paste this file into the web editor. Then open http://<host>:8081/
+
+name: weather-machine-demo
+
+services:
+  weather-machine-demo:
+    image: ghcr.io/spongi07/weathermachine:${WM_IMAGE_TAG:-latest}
+    command: ["demo"]
+    environment:
+      # Virtual seconds per real second (60 ⇒ one trading day in 24 minutes).
+      WM_DEMO_SPEED: ${WM_DEMO_SPEED:-60}
+      # Optional: enables the kill-switch button in the demo.
+      WM_ADMIN_TOKEN: ${WM_ADMIN_TOKEN:-}
+      WM_LOG_FORMAT: json
+    ports:
+      - "${WM_DEMO_PORT:-8081}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/weather-machine", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 384m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

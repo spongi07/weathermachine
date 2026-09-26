@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Image platforms (add linux/arm64 for ARM hosts; built under QEMU, slow)"
+        required: false
+        default: "linux/amd64"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ui -> target
+      - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path ui/Cargo.toml -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+
+  test:
+    name: tests (PostgreSQL 18)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: wm
+          POSTGRES_PASSWORD: wm
+          POSTGRES_DB: wm_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wm -d wm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Integration tests create and drop their own databases through this role.
+      WM_TEST_DATABASE_URL: postgres://wm:wm@localhost:5432/wm_test
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - name: Dashboard unit tests (host)
+        run: cargo test --manifest-path ui/Cargo.toml --locked
+
+  ui:
+    name: dashboard (wasm32)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui -> target
+      - name: Install wasm-bindgen CLI (must match the crate version)
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: ./ui/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dashboard-dist
+          path: ui/dist
+          retention-days: 7
+
+  audit:
+    name: dependency audit (advisory)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+      - run: cargo audit --file ui/Cargo.lock
+
+  image:
+    name: container image (GHCR)
+    needs: [lint, test, ui]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PLATFORMS: ${{ inputs.platforms || 'linux/amd64' }}
+      PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v4
+        if: contains(env.PLATFORMS, 'arm64')
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build amd64 image for the smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: weather-machine:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (hardened runtime, health, API, dashboard assets)
+        run: |
+          docker run -d --name wm-smoke -p 18080:8080 --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges:true weather-machine:ci demo --speed 600
+          for i in $(seq 1 60); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' wm-smoke)"
+            echo "health: $status"
+            [ "$status" = "healthy" ] && break
+            sleep 5
+          done
+          docker logs wm-smoke 2>&1 | tail -n 20
+          test "$(docker inspect -f '{{.State.Health.Status}}' wm-smoke)" = "healthy"
+          curl -fsS http://127.0.0.1:18080/readyz
+          curl -fsS http://127.0.0.1:18080/api/v1/snapshot \
+            | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['demo'] and s['locations'], 'empty snapshot'"
+          curl -fsS -o /dev/null -D - http://127.0.0.1:18080/wm_ui_bg.wasm | grep -i '^content-type: application/wasm'
+          curl -fsS http://127.0.0.1:18080/ | grep -q 'boot.js'
+          curl -fsS http://127.0.0.1:18080/lite | grep -q 'WEATHER MACHINE'
+          docker run --rm weather-machine:ci ev-table | head -n 3
+          docker rm -f wm-smoke
+      - name: Push to GHCR
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Redeploy Portainer stack (optional webhook)
+        if: env.PORTAINER_WEBHOOK_URL != '' && github.ref_name == github.event.repository.default_branch
+        run: curl -fsS -X POST "$PORTAINER_WEBHOOK_URL"

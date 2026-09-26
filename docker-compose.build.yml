@@ -1,0 +1,9 @@
+# Build the image from this checkout instead of pulling it from GHCR:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# (In Portainer, the prebuilt GHCR image is recommended; see docs/deployment/portainer.md.)
+services:
+  weather-machine:
+    image: weather-machine:local
+    build:
+      context: .
+      dockerfile: Dockerfile

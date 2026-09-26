@@ -1,0 +1,136 @@
+# Weather Machine — Portainer stack (also works with plain `docker compose`).
+#
+# Portainer: Stacks → Add stack → Repository
+#   Repository URL : https://github.com/spongi07/weathermachine
+#   Compose path   : docker-compose.yml
+#   Environment    : at least WM_DB_PASSWORD, WM_CONTACT, WM_ADMIN_TOKEN
+# Full guide: docs/deployment/portainer.md · variables: stack.env.example
+#
+# Paper trading only: live order placement does not exist in this build.
+
+name: weather-machine
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  logging: *logging
+
+services:
+  postgres:
+    <<: *hardening
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: wm
+      POSTGRES_DB: weather_machine
+      POSTGRES_PASSWORD: ${WM_DB_PASSWORD:?WM_DB_PASSWORD must be set}
+      # Enforce password auth for network connections (default for new clusters).
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      # PostgreSQL 18 images keep the cluster under /var/lib/postgresql/18/docker.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wm -d weather_machine"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    shm_size: 128mb
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  weather-machine:
+    <<: *hardening
+    image: ghcr.io/spongi07/weathermachine:${WM_IMAGE_TAG:-latest}
+    command: ["run"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WM_MODE: paper
+      WM_DB_HOST: postgres
+      WM_DB_USER: wm
+      WM_DB_NAME: weather_machine
+      WM_DB_PASSWORD: ${WM_DB_PASSWORD:?WM_DB_PASSWORD must be set}
+      # NOAA/NWS require an identifying User-Agent with a contact (e-mail or URL).
+      WM_CONTACT: ${WM_CONTACT:?WM_CONTACT must be set (e-mail or URL for the NOAA User-Agent)}
+      # Operator token for the kill switch (dashboard + API). Empty = disabled.
+      WM_ADMIN_TOKEN: ${WM_ADMIN_TOKEN:-}
+      # Optional HTTP Basic auth for the dashboard/API (set both or neither).
+      WM_DASHBOARD_USER: ${WM_DASHBOARD_USER:-}
+      WM_DASHBOARD_PASSWORD: ${WM_DASHBOARD_PASSWORD:-}
+      # Trained model (e.g. /data/models/eham.json); unset = no-edge model (no trades).
+      WM_MODEL_PATH: ${WM_MODEL_PATH:-}
+      WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn,hyper=warn,reqwest=warn,tungstenite=warn}
+    ports:
+      - "${WM_HTTP_PORT:-8080}:8080"
+    volumes:
+      - wmdata:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    user: "65532:65532"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/weather-machine", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 768m
+
+  # Nightly logical backup of the audit database (14 days kept) into the
+  # `backups` volume. Restore: pg_restore -d weather_machine <file>.
+  db-backup:
+    <<: *hardening
+    image: postgres:18-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: wm
+      PGDATABASE: weather_machine
+      PGPASSWORD: ${WM_DB_PASSWORD:?WM_DB_PASSWORD must be set}
+      BACKUP_KEEP_DAYS: ${WM_BACKUP_KEEP_DAYS:-14}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        while true; do
+          f="/backups/weather_machine-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+          if pg_dump --format=custom --file="$$f.partial" && mv "$$f.partial" "$$f"; then
+            echo "backup written: $$f"
+          else
+            echo "backup FAILED" >&2
+            rm -f "$$f.partial"
+          fi
+          find /backups -name 'weather_machine-*.dump' -mtime +"$${BACKUP_KEEP_DAYS}" -delete
+          sleep 86400
+        done
+    volumes:
+      - backups:/backups
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+volumes:
+  pgdata: {}
+  wmdata: {}
+  backups: {}

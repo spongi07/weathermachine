@@ -7,6 +7,8 @@
 //! | `WM_MODE`           | `paper` \| `backtest` \| `live` (live is refused)    |
 //! | `WM_HTTP_BIND`      | dashboard/API bind address                         |
 //! | `WM_DATABASE_URL`   | PostgreSQL URL (absent ⇒ no-db mode, trading off)  |
+//! | `WM_DB_PASSWORD`    | alternative to the URL: password (+ optional       |
+//! |                     | `WM_DB_HOST`/`_PORT`/`_USER`/`_NAME`), URL-encoded |
 //! | `WM_CONTACT`        | contact for the NWS User-Agent (required)          |
 //! | `WM_USER_AGENT`     | full User-Agent override                           |
 //! | `WM_ADMIN_TOKEN`    | bearer token for operator endpoints (kill switch)  |
@@ -249,6 +251,35 @@ pub struct AppConfig {
     pub source_path: PathBuf,
 }
 
+/// Percent-encode a URL component (RFC 3986 unreserved characters pass).
+pub fn url_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Build the PostgreSQL URL from separate variables (container deployments),
+/// so passwords with special characters need no manual URL encoding.
+fn database_url_from_parts() -> Option<String> {
+    let password = env_nonempty("WM_DB_PASSWORD")?;
+    let user = env_nonempty("WM_DB_USER").unwrap_or_else(|| "wm".to_owned());
+    let host = env_nonempty("WM_DB_HOST").unwrap_or_else(|| "postgres".to_owned());
+    let port = env_nonempty("WM_DB_PORT").unwrap_or_else(|| "5432".to_owned());
+    let name = env_nonempty("WM_DB_NAME").unwrap_or_else(|| "weather_machine".to_owned());
+    Some(format!(
+        "postgres://{}:{}@{host}:{port}/{}",
+        url_component(&user),
+        url_component(&password),
+        url_component(&name)
+    ))
+}
+
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -313,7 +344,7 @@ impl AppConfig {
             }
         }
         let env = EnvSettings {
-            database_url: env_nonempty("WM_DATABASE_URL"),
+            database_url: env_nonempty("WM_DATABASE_URL").or_else(database_url_from_parts),
             contact: env_nonempty("WM_CONTACT"),
             user_agent: env_nonempty("WM_USER_AGENT"),
             admin_token: env_nonempty("WM_ADMIN_TOKEN"),
@@ -468,6 +499,13 @@ mod tests {
             AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
         cfg.file.providers.awc.policy.min_interval = std::time::Duration::from_secs(1);
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn url_components_are_encoded() {
+        assert_eq!(url_component("wm"), "wm");
+        assert_eq!(url_component("p@ss:w/rd#1 %"), "p%40ss%3Aw%2Frd%231%20%25");
+        assert_eq!(url_component("a-b.c_d~"), "a-b.c_d~");
     }
 
     #[test]
