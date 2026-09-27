@@ -440,6 +440,7 @@ mod tests {
             observation_count: 30,
             data_age_minutes: 3,
             forecast_rise_tenths: None,
+            high_jump_tenths: Some(5),
         }
     }
 

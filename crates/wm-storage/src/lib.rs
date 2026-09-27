@@ -403,7 +403,8 @@ impl PgStore {
         Ok(())
     }
 
-    /// Delete journal order-book updates older than `before`, in chunks.
+    /// Delete journal order-book updates and market-stream heartbeats older
+    /// than `before`, in chunks.
     /// Recent runs stay exactly replayable; older market history lives on in
     /// the sampled `orderbook_snapshots`. Returns the number of rows deleted.
     pub async fn prune_journal_books(&self, before: DateTime<Utc>) -> Result<u64> {
@@ -412,7 +413,8 @@ impl PgStore {
             let n = sqlx::query(
                 "DELETE FROM event_journal WHERE ctid IN (
                    SELECT ctid FROM event_journal
-                   WHERE kind = 'order_book_update' AND available_at < $1
+                   WHERE kind IN ('order_book_update', 'market_stream_heartbeat')
+                     AND available_at < $1
                    LIMIT 20000)",
             )
             .bind(before)

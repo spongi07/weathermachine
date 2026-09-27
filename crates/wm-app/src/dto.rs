@@ -11,6 +11,7 @@ use wm_core::units::Price;
 use wm_dashboard_api::*;
 use wm_engine::{EngineSnapshot, LocationSnapshot};
 use wm_polymarket::StreamStatus;
+use wm_strategy::Pooling;
 use wm_strategy::ev::{
     break_even_probability, break_even_table, ev_per_share, research_price_grid,
 };
@@ -27,6 +28,9 @@ pub struct DtoInputs<'a> {
     pub extra_providers: &'a [ProviderHealthSnapshot],
     pub rules_review: &'a HashMap<String, String>,
     pub model: &'a ModelDto,
+    /// How strategies A (YES) and B (NO) pool the model with the market.
+    pub yes_pooling: Pooling,
+    pub no_pooling: Pooling,
 }
 
 fn ms(t: DateTime<Utc>) -> i64 {
@@ -228,12 +232,17 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                 };
                 let yes_ask_p = yb.and_then(OrderBook::best_ask).map(|l| l.price);
                 let no_ask_p = nb.and_then(OrderBook::best_ask).map(|l| l.price);
-                let yes_ev = match (model_p, yes_ask_p) {
+                let yes_market = inp.yes_pooling.market_probability(yb, nb, now);
+                let no_market = inp.no_pooling.market_probability(nb, yb, now);
+                let used_p = model_p.map(|p| inp.yes_pooling.win_probability(p, yes_market));
+                let no_used =
+                    model_loss.map(|pl| inp.no_pooling.win_probability(1.0 - pl, no_market));
+                let yes_ev = match (used_p, yes_ask_p) {
                     (Some(p), Some(a)) => Some(ev_per_share(p, a, &fee, slip)),
                     _ => None,
                 };
-                let no_ev = match (model_loss, no_ask_p) {
-                    (Some(pl), Some(a)) => Some(ev_per_share(1.0 - pl, a, &fee, slip)),
+                let no_ev = match (no_used, no_ask_p) {
+                    (Some(p), Some(a)) => Some(ev_per_share(p, a, &fee, slip)),
                     _ => None,
                 };
                 let evals: Vec<_> = l
@@ -283,6 +292,7 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                         .map(|l| l.price.as_f64() * l.size.as_f64()),
                     implied_p: implied,
                     model_p,
+                    used_p,
                     edge: match (model_p, implied) {
                         (Some(p), Some(i)) => Some(p - i),
                         _ => None,

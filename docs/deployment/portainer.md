@@ -159,6 +159,37 @@ Volume and network names are prefixed with the Portainer stack name
 (`weather-machine_…` above). If you named the stack differently, adjust the
 commands; *Volumes* in Portainer lists the actual names.
 
+### Model versus market (research)
+
+Does the model know anything the market does not? Is there anything left
+for strategy D (decided outcomes) after faster traders? Run the study on the
+settled markets (read-only: it trades nothing and changes nothing):
+
+```sh
+docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
+  ghcr.io/spongi07/weathermachine:latest \
+  research market --from 2026-06-01 --to 2026-09-26 --print
+```
+
+It reads each day's event from Gamma and its trades from the Polymarket Data
+API. That is one or two requests per day, two per second at most, and
+settled days are cached in `/data/research/polymarket/EHAM/`. The METAR
+history comes from the training cache. The log shows the verdict and the
+full report, which is also saved as `/data/research/eham-market.md` and
+`.json`.
+
+What each section means and how to act on it is in
+[the edge research](../research/edge-research.md#4-the-measurement-weather-machine-research-market).
+In short:
+
+* If the market predicts best, set `market_weight = 1.0` in
+  `[strategies.buy_yes]` and `[strategies.buy_no]`. A and B then stop
+  trading.
+* The latency section shows whether dead buckets are repriced before the
+  bot could act.
+* The resolution check shows whether the METAR high was the resolved
+  bucket.
+
 ### Other one-off commands
 
 ```sh

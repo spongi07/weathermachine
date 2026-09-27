@@ -1,0 +1,382 @@
+//! `research market`: the model against the market on settled days.
+//!
+//! 1. For each local date, the event is looked up on Gamma by slug; only
+//!    settled events count (every bucket closed, exactly one resolved YES).
+//! 2. The event's trades come from the Data API (taker side, all buckets in
+//!    one query, the local day plus six hours before it).
+//! 3. Settled days are cached under `research/polymarket/<STATION>/` (the raw
+//!    Gamma body and the trades): they never change, so a rerun asks the
+//!    network only for new days. Wallets are stored as short hashes — they
+//!    are used only to count distinct traders.
+//! 4. The METAR history (and the forecast history, when the installed model
+//!    uses the forecast) comes from the training caches, downloaded the same
+//!    way when missing.
+//! 5. [`wm_backtest::market_study`] replays it all prequentially; the report
+//!    is written as Markdown and JSON.
+//!
+//! Read-only: nothing here trades or changes the model.
+
+use crate::training::{self, Progress, TrainPlan};
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use tokio::sync::watch;
+use wm_backtest::{
+    ForecastHistory, MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade, market_study,
+};
+use wm_core::ids::ConditionId;
+use wm_core::market::{DailyTemperatureMarket, OutcomeSide, Side};
+use wm_core::time::local_day_bounds;
+use wm_polymarket::{
+    DataApiClient, GammaClient, GammaEvent, LocationMarketSpec, build_market, event_slug,
+    parse_events,
+};
+use wm_weather::{IemArchive, OpenMeteoPreviousRuns};
+
+/// Longest wait for a gate per request.
+const MAX_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Trades are read from this long before the local day starts.
+const TRADES_BEFORE_DAY: Duration = Duration::hours(6);
+
+/// Everything one study needs.
+#[derive(Debug, Clone)]
+pub struct MarketResearchPlan {
+    /// History and forecast settings, as for training.
+    pub train: TrainPlan,
+    pub spec: LocationMarketSpec,
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    pub study: MarketStudyConfig,
+    /// Evaluate the model with the forecast (as the installed model does).
+    pub use_forecast: bool,
+    pub cache_dir: PathBuf,
+    /// Markdown report; the JSON report is written beside it.
+    pub report_out: PathBuf,
+}
+
+/// The read-only clients a study uses.
+pub struct MarketResearchClients<'a> {
+    pub gamma: &'a GammaClient,
+    pub data: &'a DataApiClient,
+    pub archive: &'a IemArchive,
+    /// Required only when the plan uses the forecast.
+    pub forecast: Option<&'a OpenMeteoPreviousRuns>,
+}
+
+/// Progress callbacks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResearchProgress {
+    Market {
+        date: NaiveDate,
+        done: u32,
+        total: u32,
+    },
+    History(Progress),
+    Studying {
+        market_days: usize,
+    },
+}
+
+/// What a study produced.
+#[derive(Debug, Clone)]
+pub struct MarketResearchOutcome {
+    pub report: MarketStudyReport,
+    pub markdown: PathBuf,
+    pub json: PathBuf,
+    /// Dates without a usable settled market, with the reason.
+    pub unavailable: Vec<(NaiveDate, String)>,
+    pub days_cached: u32,
+    pub days_downloaded: u32,
+}
+
+/// One trade as cached.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct CachedTrade {
+    at: DateTime<Utc>,
+    asset: String,
+    side: Side,
+    price: f64,
+    size: f64,
+    /// Short hash of the taker's wallet.
+    taker: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct CachedTrades {
+    requests: u32,
+    truncated: bool,
+    trades: Vec<CachedTrade>,
+}
+
+fn short_hash(s: &str) -> String {
+    wm_core::hash::sha256_hex(s.as_bytes())[..16].to_owned()
+}
+
+/// Index of the bucket that resolved YES, or why there is none.
+pub fn settled_winner(ev: &GammaEvent, market: &DailyTemperatureMarket) -> Result<usize, String> {
+    if ev.markets.iter().any(|m| m.closed != Some(true)) {
+        return Err("not settled yet (a bucket is still open)".into());
+    }
+    let mut winners = Vec::new();
+    for m in &ev.markets {
+        let yes = m
+            .outcomes
+            .iter()
+            .position(|o| o.eq_ignore_ascii_case("yes"));
+        let price = yes
+            .and_then(|i| m.outcome_prices.get(i))
+            .and_then(|p| p.trim().parse::<f64>().ok());
+        if price.is_some_and(|p| p >= 0.999)
+            && let Some(cond) = m.condition_id.as_deref()
+            && let Some(i) = market
+                .outcomes
+                .iter()
+                .position(|o| o.condition_id.as_str() == cond)
+        {
+            winners.push(i);
+        }
+    }
+    match winners.as_slice() {
+        [w] => Ok(*w),
+        [] => Err("closed without a bucket resolved YES".into()),
+        _ => Err("several buckets resolved YES".into()),
+    }
+}
+
+/// Trades in YES terms, keyed to the market's buckets; unknown assets dropped.
+fn to_market_trades(market: &DailyTemperatureMarket, trades: &[CachedTrade]) -> Vec<MarketTrade> {
+    let mut out: Vec<MarketTrade> = trades
+        .iter()
+        .filter_map(|t| {
+            let (bucket, side) = market.outcomes.iter().enumerate().find_map(|(i, o)| {
+                if o.yes_token.as_str() == t.asset {
+                    Some((i, OutcomeSide::Yes))
+                } else if o.no_token.as_str() == t.asset {
+                    Some((i, OutcomeSide::No))
+                } else {
+                    None
+                }
+            })?;
+            let yes = side == OutcomeSide::Yes;
+            Some(MarketTrade {
+                at: t.at,
+                bucket,
+                yes_price: if yes { t.price } else { 1.0 - t.price },
+                taker_buys_yes: yes == (t.side == Side::Buy),
+                shares: t.size,
+                taker: t.taker.clone(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|t| t.at);
+    out
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// A settled market day, from the cache or the network.
+async fn market_day(
+    gamma: &GammaClient,
+    data: &DataApiClient,
+    plan: &MarketResearchPlan,
+    date: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<(Result<MarketDay, String>, bool)> {
+    let slug = event_slug(&plan.spec.slug_template, date);
+    let event_path = plan.cache_dir.join(format!("{slug}.event.json"));
+    let trades_path = plan.cache_dir.join(format!("{slug}.trades.json"));
+    let cached_event = std::fs::read(&event_path)
+        .ok()
+        .and_then(|b| parse_events(&b).ok().map(|e| (e, b)));
+    let cached_trades: Option<CachedTrades> = read_json(&trades_path);
+    let from_cache = cached_event.is_some() && cached_trades.is_some();
+    let (events, body) = match cached_event {
+        Some(e) if from_cache => e,
+        _ => {
+            let (events, body) = gamma
+                .events_by_slug(&slug, MAX_GATE_WAIT)
+                .await
+                .with_context(|| format!("Gamma event {slug}"))?;
+            (events, body.to_vec())
+        }
+    };
+    let Some(ev) = events.iter().find(|e| e.slug == slug) else {
+        return Ok((Err("no event with this slug".into()), false));
+    };
+    let market = match build_market(ev, &plan.spec, date, now) {
+        Ok(m) => m,
+        Err(e) => return Ok((Err(format!("market mapping failed: {e}")), false)),
+    };
+    let winner = match settled_winner(ev, &market) {
+        Ok(w) => w,
+        Err(why) => return Ok((Err(why), false)),
+    };
+    let trades = match cached_trades.filter(|_| from_cache) {
+        Some(t) => t,
+        None => {
+            let (start, end) = local_day_bounds(date, plan.spec.timezone);
+            let conditions: Vec<ConditionId> = market
+                .outcomes
+                .iter()
+                .map(|o| o.condition_id.clone())
+                .collect();
+            let h = data
+                .trades(&conditions, start - TRADES_BEFORE_DAY, end, MAX_GATE_WAIT)
+                .await
+                .with_context(|| format!("Data API trades of {slug}"))?;
+            if h.skipped > 0 {
+                tracing::warn!(slug, skipped = h.skipped, "unusable trade records skipped");
+            }
+            let cached = CachedTrades {
+                requests: h.requests,
+                truncated: h.truncated,
+                trades: h
+                    .trades
+                    .into_iter()
+                    .map(|t| CachedTrade {
+                        at: t.at,
+                        asset: t.asset.as_str().to_owned(),
+                        side: t.side,
+                        price: t.price,
+                        size: t.size,
+                        taker: t.taker.as_deref().map(short_hash),
+                    })
+                    .collect(),
+            };
+            std::fs::create_dir_all(&plan.cache_dir)
+                .with_context(|| format!("creating {}", plan.cache_dir.display()))?;
+            training::write_atomic(&trades_path, &serde_json::to_vec(&cached)?)?;
+            training::write_atomic(&event_path, &body)?;
+            cached
+        }
+    };
+    let day = MarketDay {
+        date,
+        event_slug: slug,
+        buckets: market.outcomes.iter().map(|o| o.bucket).collect(),
+        labels: market.outcomes.iter().map(|o| o.label.clone()).collect(),
+        winner,
+        trades: to_market_trades(&market, &trades.trades),
+        truncated: trades.truncated,
+    };
+    Ok((Ok(day), from_cache))
+}
+
+/// Run the study and write its reports.
+pub async fn run(
+    clients: &MarketResearchClients<'_>,
+    plan: &MarketResearchPlan,
+    now: DateTime<Utc>,
+    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<MarketResearchOutcome> {
+    if plan.from > plan.to {
+        bail!("--from {} is after --to {}", plan.from, plan.to);
+    }
+    let dates = wm_backtest::date_range(plan.from, plan.to);
+    let total = u32::try_from(dates.len()).unwrap_or(u32::MAX);
+    let mut days = Vec::new();
+    let mut unavailable = Vec::new();
+    let (mut cached, mut downloaded) = (0u32, 0u32);
+    for (i, &date) in dates.iter().enumerate() {
+        if *shutdown.borrow() {
+            bail!("shutting down");
+        }
+        progress(ResearchProgress::Market {
+            date,
+            done: u32::try_from(i).unwrap_or(u32::MAX),
+            total,
+        });
+        let (day, from_cache) = tokio::select! {
+            r = market_day(clients.gamma, clients.data, plan, date, now) => r?,
+            _ = shutdown.changed() => bail!("shutting down"),
+        };
+        match day {
+            Ok(d) => {
+                if from_cache {
+                    cached += 1;
+                } else {
+                    downloaded += 1;
+                }
+                days.push(d);
+            }
+            Err(why) => unavailable.push((date, why)),
+        }
+    }
+    if days.is_empty() {
+        bail!(
+            "no settled market between {} and {} (check the slug template '{}')",
+            plan.from,
+            plan.to,
+            plan.spec.slug_template
+        );
+    }
+
+    let hist_progress = |p: Progress| progress(ResearchProgress::History(p));
+    let history =
+        training::iem_history(clients.archive, &plan.train, None, &hist_progress, shutdown).await?;
+    let forecasts = match (&plan.train.forecast, clients.forecast) {
+        (Some(fp), Some(client)) if plan.use_forecast => {
+            let f =
+                training::forecast_history(client, &plan.train, fp, None, &hist_progress, shutdown)
+                    .await
+                    .context("forecast history (the installed model uses the forecast)")?;
+            Some(ForecastHistory::from_hourly(
+                fp.product.clone(),
+                plan.train.tz,
+                &f.hourly,
+            ))
+        }
+        _ => None,
+    };
+    progress(ResearchProgress::Studying {
+        market_days: days.len(),
+    });
+    let paths: Vec<PathBuf> = history.files.iter().map(|f| f.path.clone()).collect();
+    let station = plan.train.station.clone();
+    let study = plan.study.clone();
+    let report = tokio::task::spawn_blocking(move || -> Result<MarketStudyReport> {
+        let observations = training::import_all(&paths, &station)?;
+        Ok(market_study(
+            &observations,
+            forecasts.as_ref(),
+            &days,
+            &study,
+        ))
+    })
+    .await
+    .context("study task")??;
+
+    let markdown = plan.report_out.clone();
+    let json = markdown.with_extension("json");
+    if let Some(dir) = markdown.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let mut md = report.to_markdown();
+    if !unavailable.is_empty() {
+        md.push_str("\n## Dates without a settled market\n\n");
+        for (d, why) in &unavailable {
+            md.push_str(&format!("* {d}: {why}\n"));
+        }
+    }
+    md.push_str(&format!(
+        "\nSources: Polymarket Gamma events (`{}`), Polymarket Data API trades (taker side), IEM METAR archive; generated {}.\n",
+        plan.spec.slug_template,
+        now.format("%Y-%m-%d %H:%M UTC")
+    ));
+    training::write_atomic(&markdown, md.as_bytes())?;
+    training::write_atomic(&json, &serde_json::to_vec_pretty(&report)?)?;
+    Ok(MarketResearchOutcome {
+        report,
+        markdown,
+        json,
+        unavailable,
+        days_cached: cached,
+        days_downloaded: downloaded,
+    })
+}

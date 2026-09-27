@@ -405,7 +405,7 @@ impl Scorer {
 }
 
 /// 95 % day-block bootstrap interval of Σa / Σb.
-fn ratio_ci(days: &[(f64, f64)], iterations: usize, seed: u64) -> (f64, f64) {
+pub(crate) fn ratio_ci(days: &[(f64, f64)], iterations: usize, seed: u64) -> (f64, f64) {
     if days.is_empty() || iterations == 0 {
         return (0.0, 0.0);
     }

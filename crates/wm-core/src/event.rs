@@ -68,6 +68,7 @@ pub enum WeatherMachineEvent {
     Timer(TimerEvent),
     ProviderHealthChanged(ProviderHealthEvent),
     Operator(OperatorCommand),
+    MarketStreamHeartbeat(StreamHeartbeatEvent),
 }
 
 impl WeatherMachineEvent {
@@ -83,6 +84,7 @@ impl WeatherMachineEvent {
             WeatherMachineEvent::Timer(_) => "timer",
             WeatherMachineEvent::ProviderHealthChanged(_) => "provider_health_changed",
             WeatherMachineEvent::Operator(_) => "operator",
+            WeatherMachineEvent::MarketStreamHeartbeat(_) => "market_stream_heartbeat",
         }
     }
 }
@@ -120,6 +122,14 @@ pub struct ForecastEvent {
     /// same product in training and live). `None`: a single model run.
     #[serde(default)]
     pub lead_days: Option<u8>,
+}
+
+/// The live market feed answered a heartbeat: every book it delivered on the
+/// current connection (received at or after `connected_since`) is still
+/// current, even if it has not changed for a while.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamHeartbeatEvent {
+    pub connected_since: DateTime<Utc>,
 }
 
 /// Market metadata/rules discovered or changed.

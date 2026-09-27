@@ -131,5 +131,6 @@ pub fn synthetic_book(
         exchange_ts: Some(now),
         received_at: now,
         hash: None,
+        confirmed_at: None,
     }
 }

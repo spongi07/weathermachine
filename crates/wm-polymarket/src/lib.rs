@@ -2,7 +2,8 @@
 //!
 //! Read-only Polymarket integration: Gamma discovery, verbatim rules capture
 //! and conservative resolution-spec parsing, temperature bucket mapping, CLOB
-//! books/price history, the market-channel WebSocket and CTF economics.
+//! books/price history, the market-channel WebSocket, CTF economics and the
+//! Data API's public trade history (research).
 //!
 //! There is deliberately **no order placement** in this crate yet: live
 //! execution is Phase 14 and requires signing (EIP-712, V2 order struct,
@@ -10,12 +11,14 @@
 
 pub mod clob;
 pub mod ctf;
+pub mod data;
 pub mod gamma;
 pub mod outcomes;
 pub mod rules;
 pub mod ws;
 
 pub use clob::{ClobClient, ClobError, parse_book};
+pub use data::{DataApiClient, DataApiError, DataTrade, TradeHistory, parse_trades};
 pub use gamma::{
     GammaClient, GammaError, GammaEvent, LocationMarketSpec, MappingError, build_market,
     event_slug, parse_events,

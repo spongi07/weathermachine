@@ -165,6 +165,22 @@ fn good_dist() -> IncrementDistribution {
     dist(&[0.985, 0.012, 0.002, 0.001], 500)
 }
 
+/// Strategy A without market pooling: tests of the model's own logic.
+fn model_only_yes() -> BuyYesConfig {
+    BuyYesConfig {
+        market_weight: 0.0,
+        ..BuyYesConfig::default()
+    }
+}
+
+/// Strategy B without market pooling.
+fn model_only_no() -> BuyNoConfig {
+    BuyNoConfig {
+        market_weight: 0.0,
+        ..BuyNoConfig::default()
+    }
+}
+
 #[test]
 fn strategy_a_signals_with_edge_after_confirmation() {
     let m = market();
@@ -175,7 +191,7 @@ fn strategy_a_signals_with_edge_after_confirmation() {
         HashSet::new(),
         LocationId::new("amsterdam").unwrap(),
     );
-    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default());
+    let mut a = BuyYesFinalHigh::new(model_only_yes());
     let out = a.evaluate(&ctx(&m, &b, &v, &pos, &pending, &loc));
     assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
     let p = &out.proposals[0];
@@ -293,7 +309,7 @@ fn strategy_a_uses_most_conservative_view_and_refuses_disagreement() {
         HashSet::new(),
         LocationId::new("amsterdam").unwrap(),
     );
-    let mut a = BuyYesFinalHigh::new(BuyYesConfig::default());
+    let mut a = BuyYesFinalHigh::new(model_only_yes());
     let mut v = views(&confirmed_series(), NOW, Some(good_dist()));
     let mut second = v[0].clone();
     second.distribution = Some(dist(&[0.96, 0.03, 0.007, 0.003], 500));
@@ -323,7 +339,7 @@ fn strategy_b_evaluates_each_distance_separately() {
         HashSet::new(),
         LocationId::new("amsterdam").unwrap(),
     );
-    let mut s = BuyNoAboveHigh::new(BuyNoConfig::default());
+    let mut s = BuyNoAboveHigh::new(model_only_no());
     let out = s.evaluate(&ctx(&m, &b, &v, &pos, &pending, &loc));
     assert_eq!(out.evaluations.len(), 3);
     let labels: Vec<_> = out
@@ -509,4 +525,460 @@ fn progressive_unwind_steps_toward_bid() {
     );
     assert_eq!(p5[0].limit_price, Price::parse("0.30").unwrap());
     assert_eq!(p5[0].tif, TimeInForce::Fak);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy D — outcomes the observations have decided
+// ---------------------------------------------------------------------------
+
+use wm_strategy::{CertainConfig, CertainOutcomes};
+
+fn book_at(token: &TokenId, bid: Option<&str>, ask: Option<&str>) -> OrderBook {
+    synthetic_book(token, bid, ask, 200, utc(NOW))
+}
+
+#[test]
+fn strategy_d_buys_no_on_every_bucket_below_the_observed_high() {
+    let m = market();
+    let loc = LocationId::new("amsterdam").unwrap();
+    // High 18 (up from 17.5): buckets ≤13 … 17 are decided NO.
+    let v = views(&confirmed_series(), NOW, None);
+    let mut b = HashMap::new();
+    b.insert(no(&m, 17), book_at(&no(&m, 17), Some("0.85"), Some("0.90"))); // stale
+    b.insert(
+        no(&m, 16),
+        book_at(&no(&m, 16), Some("0.99"), Some("0.995")),
+    ); // repriced
+    let (pos, pend) = (PositionBook::new(), HashSet::new());
+    let mut d = CertainOutcomes::new(CertainConfig::default());
+    let out = d.evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    assert_eq!(out.evaluations.len(), 5, "≤13, 14, 15, 16, 17");
+    assert!(
+        out.evaluations
+            .iter()
+            .all(|e| e.outcome_side == OutcomeSide::No)
+    );
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+    let p = &out.proposals[0];
+    assert_eq!(p.bucket_label, "17°C");
+    assert_eq!(p.token, no(&m, 17));
+    assert_eq!(p.limit_price, Price::parse("0.90").unwrap());
+    assert!((p.p_win - 1.0).abs() < 1e-12);
+    // 1 − 0.90 − fee 0.05·0.9·0.1 − slippage 0.002
+    assert!(
+        (p.ev_per_share - (0.1 - 0.0045 - 0.002)).abs() < 1e-9,
+        "{}",
+        p.ev_per_share
+    );
+    assert!(p.weather_dependent && p.kind == IntentKind::Open && p.tif == TimeInForce::Fak);
+    let blocker = |label: &str| {
+        out.evaluations
+            .iter()
+            .find(|e| e.bucket_label == label)
+            .map(|e| e.blockers.join("; "))
+            .unwrap()
+    };
+    assert!(
+        blocker("16°C").contains("ask 0.995 > 0.99"),
+        "{}",
+        blocker("16°C")
+    );
+    assert!(blocker("15°C").contains("no order book"));
+    // Buckets at or above the high are never decided by the observations.
+    assert!(out.evaluations.iter().all(|e| e.bucket_label != "18°C"));
+    // The market's view is recorded next to the certainty, not used.
+    let e = |label: &str| {
+        out.evaluations
+            .iter()
+            .find(|e| e.bucket_label == label)
+            .unwrap()
+    };
+    assert_eq!(e("17°C").model_p, Some(1.0));
+    assert!((e("17°C").market_p.unwrap() - 0.875).abs() < 1e-12);
+    assert!((e("16°C").market_p.unwrap() - 0.9925).abs() < 1e-12);
+    assert_eq!(e("15°C").market_p, None);
+}
+
+#[test]
+fn strategy_d_buys_yes_on_a_reached_open_top_bucket() {
+    let m = market();
+    let loc = LocationId::new("amsterdam").unwrap();
+    let v = views(
+        &[
+            ("2026-07-01T12:00:00Z", 230),
+            ("2026-07-01T12:30:00Z", 235),
+            ("2026-07-01T13:00:00Z", 240),
+        ],
+        NOW,
+        None,
+    );
+    let top = m.outcome_for_value(24).unwrap().yes_token.clone();
+    let mut b = HashMap::new();
+    b.insert(top.clone(), book_at(&top, Some("0.60"), Some("0.62")));
+    let (pos, pend) = (PositionBook::new(), HashSet::new());
+    let out = CertainOutcomes::new(CertainConfig::default())
+        .evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    let yes_props: Vec<_> = out
+        .proposals
+        .iter()
+        .filter(|p| p.outcome_side == OutcomeSide::Yes)
+        .collect();
+    assert_eq!(yes_props.len(), 1);
+    assert_eq!(yes_props[0].token, top);
+    assert_eq!(yes_props[0].bucket_label, "24°C or higher");
+}
+
+#[test]
+fn strategy_d_waits_for_a_second_report_after_an_implausible_jump() {
+    let m = market();
+    let loc = LocationId::new("amsterdam").unwrap();
+    let mut b = HashMap::new();
+    b.insert(no(&m, 18), book_at(&no(&m, 18), Some("0.80"), Some("0.85")));
+    let (pos, pend) = (PositionBook::new(), HashSet::new());
+    let mut d = CertainOutcomes::new(CertainConfig::default());
+    // 15.0 → 19.0 in one report: not trusted yet.
+    let jump = views(
+        &[("2026-07-01T12:30:00Z", 150), ("2026-07-01T13:00:00Z", 190)],
+        NOW,
+        None,
+    );
+    let out = d.evaluate(&ctx(&m, &b, &jump, &pos, &pend, &loc));
+    assert!(out.proposals.is_empty());
+    let e = out
+        .evaluations
+        .iter()
+        .find(|e| e.bucket_label == "18°C")
+        .unwrap();
+    assert!(
+        e.blockers.iter().any(|x| x.contains("jumped 4.0 °C")),
+        "{:?}",
+        e.blockers
+    );
+    // The next report repeats 19: the high is confirmed.
+    let repeated = views(
+        &[
+            ("2026-07-01T12:30:00Z", 150),
+            ("2026-07-01T13:00:00Z", 190),
+            ("2026-07-01T13:30:00Z", 190),
+        ],
+        NOW,
+        None,
+    );
+    let out = d.evaluate(&ctx(&m, &b, &repeated, &pos, &pend, &loc));
+    assert_eq!(out.proposals.len(), 1);
+    assert_eq!(out.proposals[0].token, no(&m, 18));
+}
+
+#[test]
+fn strategy_d_only_trusts_the_high_every_view_has_seen() {
+    let m = market();
+    let loc = LocationId::new("amsterdam").unwrap();
+    // View 1 saw 18; view 2 (e.g. hourly rows only) has 17 so far.
+    let mut v = views(&confirmed_series(), NOW, None);
+    let lower = views(
+        &[
+            ("2026-07-01T11:00:00Z", 165),
+            ("2026-07-01T11:30:00Z", 170),
+            ("2026-07-01T13:30:00Z", 170),
+        ],
+        NOW,
+        None,
+    );
+    v.extend(lower);
+    let mut b = HashMap::new();
+    b.insert(no(&m, 17), book_at(&no(&m, 17), Some("0.85"), Some("0.90")));
+    b.insert(no(&m, 16), book_at(&no(&m, 16), Some("0.90"), Some("0.95")));
+    let (pos, pend) = (PositionBook::new(), HashSet::new());
+    let out = CertainOutcomes::new(CertainConfig::default())
+        .evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    assert!(
+        out.evaluations.iter().all(|e| e.bucket_label != "17°C"),
+        "17 is not decided in view 2"
+    );
+    assert_eq!(out.proposals.len(), 1);
+    assert_eq!(out.proposals[0].token, no(&m, 16));
+}
+
+#[test]
+fn strategy_d_leaves_the_settlement_discount_of_long_dead_buckets_alone() {
+    let m = market();
+    let loc = LocationId::new("amsterdam").unwrap();
+    let v = views(&confirmed_series(), NOW, None);
+    let mut b = HashMap::new();
+    // 14 °C died hours ago; its NO is quoted where every settled bucket is.
+    b.insert(no(&m, 14), book_at(&no(&m, 14), Some("0.98"), Some("0.99")));
+    let (pos, pend) = (PositionBook::new(), HashSet::new());
+    let out = CertainOutcomes::new(CertainConfig::default())
+        .evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    assert!(out.proposals.is_empty());
+    let e = out.evaluations.iter().find(|e| e.bucket_label == "14°C").unwrap();
+    // 1 − 0.99 − fee 0.000495 − slippage 0.002 = 0.0075 < 0.02
+    assert!(e.blockers.iter().any(|x| x == "edge 0.0075 < 0.0200"), "{:?}", e.blockers);
+}
+
+#[test]
+fn strategy_d_respects_books_positions_data_age_and_edge() {
+    let m = market();
+    let loc = LocationId::new("amsterdam").unwrap();
+    let v = views(&confirmed_series(), NOW, None);
+    let pend = HashSet::new();
+    let mut d = CertainOutcomes::new(CertainConfig::default());
+    // Stale book.
+    let mut b = HashMap::new();
+    let mut stale = book_at(&no(&m, 17), Some("0.85"), Some("0.90"));
+    stale.received_at = utc(NOW) - chrono::Duration::seconds(30);
+    b.insert(no(&m, 17), stale);
+    let pos = PositionBook::new();
+    let out = d.evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    assert!(out.proposals.is_empty());
+    // Too little edge at 0.994 (below the cap is not enough).
+    let mut b = HashMap::new();
+    b.insert(no(&m, 17), book_at(&no(&m, 17), Some("0.98"), Some("0.99")));
+    let loose = CertainConfig {
+        min_edge: 0.009,
+        ..CertainConfig::default()
+    };
+    let out = CertainOutcomes::new(loose).evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    assert!(out.proposals.is_empty());
+    assert!(
+        out.evaluations
+            .iter()
+            .any(|e| e.blockers.iter().any(|x| x.starts_with("edge")))
+    );
+    // Already positioned.
+    let mut b = HashMap::new();
+    b.insert(no(&m, 17), book_at(&no(&m, 17), Some("0.85"), Some("0.90")));
+    let mut held = PositionBook::new();
+    hold(&mut held, &m, 17, OutcomeSide::No, "0.90");
+    let out = d.evaluate(&ctx(&m, &b, &v, &held, &pend, &loc));
+    assert!(out.proposals.is_empty());
+    // Weather data older than 40 minutes.
+    let old = views(&confirmed_series(), "2026-07-01T14:20:00Z", None);
+    let out = d.evaluate(&ctx(&m, &b, &old, &pos, &pend, &loc));
+    assert!(out.proposals.is_empty());
+    assert!(
+        out.evaluations
+            .iter()
+            .any(|e| e.blockers.iter().any(|x| x.contains("too old")))
+    );
+    // Disabled.
+    let off = CertainConfig {
+        enabled: false,
+        ..CertainConfig::default()
+    };
+    let out = CertainOutcomes::new(off).evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
+    assert!(out.proposals.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Market pooling: the book as information
+// ---------------------------------------------------------------------------
+
+use wm_strategy::{Pooling, log_pool};
+
+fn pooling(weight: f64) -> Pooling {
+    Pooling {
+        weight,
+        max_spread: Price::parse("0.10").unwrap(),
+        max_book_age_ms: 15_000,
+    }
+}
+
+#[test]
+fn log_pool_averages_log_odds() {
+    // σ(½·logit 0.9 + ½·logit 0.5) = σ(½·ln 9) = σ(ln 3) = 0.75
+    assert!((log_pool(0.9, Some(0.5), 0.5) - 0.75).abs() < 1e-12);
+    assert!((log_pool(0.9, Some(0.5), 0.5) - log_pool(0.5, Some(0.9), 0.5)).abs() < 1e-12);
+    assert_eq!(log_pool(0.9, None, 0.5), 0.9);
+    assert_eq!(log_pool(0.9, Some(0.5), 0.0), 0.9);
+    assert!((log_pool(0.9, Some(0.5), 1.0) - 0.5).abs() < 1e-12);
+    // Weights outside 0..=1 are clamped.
+    assert!((log_pool(0.9, Some(0.5), 7.0) - 0.5).abs() < 1e-12);
+    assert_eq!(log_pool(0.9, Some(0.5), -1.0), 0.9);
+    // Certainties are clamped, so opposite certainties meet in the middle.
+    assert!((log_pool(1.0, Some(0.0), 0.5) - 0.5).abs() < 1e-9);
+    assert!(log_pool(1.0, Some(0.99), 0.5).is_finite());
+    // Between the inputs and increasing in both.
+    let a = log_pool(0.95, Some(0.90), 0.5);
+    assert!(a > 0.90 && a < 0.95);
+    assert!(a < log_pool(0.95, Some(0.92), 0.5) && a < log_pool(0.96, Some(0.90), 0.5));
+}
+
+#[test]
+fn pooled_win_probability_never_exceeds_the_model() {
+    let p = pooling(0.5);
+    assert!((p.win_probability(0.9, Some(0.5)) - 0.75).abs() < 1e-12);
+    assert_eq!(
+        p.win_probability(0.9, Some(0.99)),
+        0.9,
+        "a more confident market does not raise the model"
+    );
+    assert_eq!(p.win_probability(0.9, None), 0.9);
+    assert_eq!(pooling(0.0).win_probability(0.9, Some(0.1)), 0.9);
+}
+
+#[test]
+fn market_probability_needs_a_fresh_tight_two_sided_book() {
+    let m = market();
+    let now = utc(NOW);
+    let (own, other) = (yes(&m, 18), no(&m, 18));
+    let p = pooling(0.5);
+    let tight = book_at(&own, Some("0.93"), Some("0.95"));
+    let comp = book_at(&other, Some("0.04"), Some("0.08"));
+    let mp = |a: Option<&OrderBook>, b: Option<&OrderBook>, t| p.market_probability(a, b, t);
+    assert!((mp(Some(&tight), Some(&comp), now).unwrap() - 0.94).abs() < 1e-12);
+    // A wide or one-sided own book: one minus the complement's midpoint.
+    let wide = book_at(&own, Some("0.80"), Some("0.95"));
+    assert!((mp(Some(&wide), Some(&comp), now).unwrap() - 0.94).abs() < 1e-12);
+    assert_eq!(mp(Some(&wide), None, now), None);
+    let one_sided = book_at(&own, None, Some("0.95"));
+    assert!((mp(Some(&one_sided), Some(&comp), now).unwrap() - 0.94).abs() < 1e-12);
+    // A spread exactly at the limit still counts.
+    let at_limit = book_at(&own, Some("0.85"), Some("0.95"));
+    assert!((mp(Some(&at_limit), None, now).unwrap() - 0.90).abs() < 1e-12);
+    // A stale book carries no probability.
+    let later = now + chrono::Duration::seconds(16);
+    assert_eq!(mp(Some(&tight), Some(&comp), later), None);
+    // A crossed book is not a price.
+    let crossed = book_at(&own, Some("0.96"), Some("0.95"));
+    assert_eq!(mp(Some(&crossed), None, now), None);
+    assert_eq!(mp(None, None, now), None);
+}
+
+#[test]
+fn strategy_a_lets_the_market_veto_but_not_create_a_trade() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let (pos, pending, loc) = (
+        PositionBook::new(),
+        HashSet::new(),
+        LocationId::new("amsterdam").unwrap(),
+    );
+    let run = |cfg: BuyYesConfig, b: &HashMap<TokenId, OrderBook>| {
+        BuyYesFinalHigh::new(cfg).evaluate(&ctx(&m, b, &v, &pos, &pending, &loc))
+    };
+    // Default weight ½: model 0.985 pooled with the 0.93/0.95 book (mid 0.94).
+    let out = run(BuyYesConfig::default(), &books(&m));
+    let e = &out.evaluations[0];
+    let pooled = log_pool(0.985, Some(0.94), 0.5);
+    assert!((pooled - 0.969_765).abs() < 1e-6);
+    assert!((e.model_p.unwrap() - 0.985).abs() < 1e-12);
+    assert!((e.market_p.unwrap() - 0.94).abs() < 1e-12);
+    assert!((e.p_win.unwrap() - pooled).abs() < 1e-9);
+    assert_eq!(
+        out.proposals.len(),
+        1,
+        "0.9698 − 0.95 − fee − slippage ≥ 0.01"
+    );
+    let p = &out.proposals[0];
+    assert!((p.p_win - pooled).abs() < 1e-9);
+    assert!(
+        p.rationale
+            .iter()
+            .any(|r| r.contains("market 0.9400") && r.contains("used 0.9698")),
+        "{:?}",
+        p.rationale
+    );
+    // A market that disagrees (mid 0.915) vetoes what the model alone would buy.
+    let mut b = books(&m);
+    b.insert(
+        yes(&m, 18),
+        book_at(&yes(&m, 18), Some("0.88"), Some("0.95")),
+    );
+    let out = run(BuyYesConfig::default(), &b);
+    assert!(out.proposals.is_empty());
+    let why = out.evaluations[0].blockers.join("; ");
+    assert!(
+        why.contains("market 0.915 pulls model 0.985 to 0.964"),
+        "{why}"
+    );
+    assert_eq!(
+        run(model_only_yes(), &b).proposals.len(),
+        1,
+        "model alone buys"
+    );
+    // A wide book is no probability: the model decides alone.
+    let mut b = books(&m);
+    b.insert(
+        yes(&m, 18),
+        book_at(&yes(&m, 18), Some("0.80"), Some("0.95")),
+    );
+    let out = run(BuyYesConfig::default(), &b);
+    assert_eq!(out.evaluations[0].market_p, None);
+    assert!((out.evaluations[0].p_win.unwrap() - 0.985).abs() < 1e-12);
+    assert_eq!(out.proposals.len(), 1);
+    assert!(
+        out.proposals[0]
+            .rationale
+            .iter()
+            .any(|r| r.starts_with("model only"))
+    );
+}
+
+#[test]
+fn strategy_b_pools_each_bucket_with_its_own_book() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let (pos, pending, loc) = (
+        PositionBook::new(),
+        HashSet::new(),
+        LocationId::new("amsterdam").unwrap(),
+    );
+    let run = |b: &HashMap<TokenId, OrderBook>| {
+        BuyNoAboveHigh::new(BuyNoConfig::default()).evaluate(&ctx(&m, b, &v, &pos, &pending, &loc))
+    };
+    let eval = |out: &wm_strategy::StrategyOutput, label: &str| {
+        out.evaluations
+            .iter()
+            .find(|e| e.bucket_label == label)
+            .unwrap()
+            .clone()
+    };
+    let out = run(&books(&m));
+    let labels: Vec<_> = out
+        .proposals
+        .iter()
+        .map(|p| p.bucket_label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["19°C", "20°C"]);
+    let e19 = eval(&out, "19°C");
+    assert!((e19.model_p.unwrap() - 0.988).abs() < 1e-12);
+    assert!(
+        (e19.market_p.unwrap() - 0.92).abs() < 1e-12,
+        "the NO book's midpoint"
+    );
+    assert!((e19.p_win.unwrap() - log_pool(0.988, Some(0.92), 0.5)).abs() < 1e-12);
+    assert!(
+        eval(&out, "21°C")
+            .blockers
+            .iter()
+            .any(|b| b.starts_with("edge"))
+    );
+    // A wide NO book: the YES book's midpoint (3 %) speaks for the NO side.
+    let mut b = books(&m);
+    b.insert(no(&m, 19), book_at(&no(&m, 19), Some("0.80"), Some("0.93")));
+    let e19 = eval(&run(&b), "19°C");
+    assert!((e19.market_p.unwrap() - 0.97).abs() < 1e-12);
+    assert!((e19.p_win.unwrap() - log_pool(0.988, Some(0.97), 0.5)).abs() < 1e-12);
+    // A YES book pricing 20 °C at 12 % vetoes the NO at 0.97.
+    let mut b = books(&m);
+    b.insert(no(&m, 20), book_at(&no(&m, 20), Some("0.80"), Some("0.97")));
+    b.insert(
+        yes(&m, 20),
+        book_at(&yes(&m, 20), Some("0.10"), Some("0.14")),
+    );
+    let out = run(&b);
+    assert!(out.proposals.iter().all(|p| p.bucket_label != "20°C"));
+    let why = eval(&out, "20°C").blockers.join("; ");
+    assert!(why.contains("market 0.880 pulls model 0.998"), "{why}");
+    // A market more confident than the model never raises the probability.
+    let mut b = books(&m);
+    b.insert(no(&m, 19), book_at(&no(&m, 19), Some("0.70"), Some("0.93")));
+    b.insert(
+        yes(&m, 19),
+        book_at(&yes(&m, 19), Some("0.001"), Some("0.003")),
+    );
+    let e19 = eval(&run(&b), "19°C");
+    assert!((e19.market_p.unwrap() - 0.998).abs() < 1e-12);
+    assert!((e19.p_win.unwrap() - 0.988).abs() < 1e-12);
 }

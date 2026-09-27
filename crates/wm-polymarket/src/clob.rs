@@ -91,6 +91,7 @@ pub fn parse_book(
         exchange_ts: raw.timestamp.as_ref().and_then(parse_epoch),
         received_at,
         hash: raw.hash,
+        confirmed_at: None,
     };
     book.normalize();
     Ok(book)

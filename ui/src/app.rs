@@ -490,6 +490,7 @@ fn Ladder(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                                     (Some(i), None) => view! { <span class="num">{fmt::pct(Some(i))}</span> }.into_any(),
                                     (None, None) => view! { <span class="num muted">{DASH}</span> }.into_any(),
                                 }}
+                                {r.model_p.zip(r.used_p).filter(|(m, u)| m - u >= 0.0005).map(|(_, u)| view! { <div class="muted small" title="The model's P(YES) pooled with the market midpoint; EVs and strategy A use it">{format!("used {}", fmt::pct(Some(u)))}</div> })}
                             </td>
                             <td class=edge_class>{fmt::pp(r.edge)}</td>
                             <td class=ev_class(r.yes_ev)>{fmt::signed(r.yes_ev, 4)}</td>
@@ -517,7 +518,7 @@ fn Ladder(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                             <tbody>{rows}</tbody>
                         </table>
                     </div>
-                    <div class="muted small">"EV per share after fee and slippage allowance. B/E: probability needed to profit buying YES at the ask (n/a = impossible at that price). Highlighted row contains the current high. Bars: grey = market-implied, blue = model."</div>
+                    <div class="muted small">"EV per share after fee and slippage allowance, at the model's probability pooled with the market (\"used\" — the market can lower it, never raise it). B/E: probability needed to profit buying YES at the ask (n/a = impossible at that price). Highlighted row contains the current high. Bars: grey = market-implied, blue = model."</div>
                 </div>
             }
             .into_any()

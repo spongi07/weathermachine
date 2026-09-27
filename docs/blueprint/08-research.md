@@ -138,6 +138,75 @@ block, and roll forward. No test day ever precedes its training data. Report
 train, validation and out-of-sample results separately, where there are
 enough days.
 
+## 36a. Model versus market (`research market`)
+
+**PURPOSE.** Measure, on EHAM's own settled markets, what the market knows
+that the model does not, and the reverse. This is the evidence for
+`market_weight` (§27b) and for strategy D (§27a).
+
+**INPUTS.**
+
+* Settled events from Gamma: every bucket closed and exactly one resolved
+  YES.
+* Their taker trades from the Data API: all buckets in one query, from six
+  hours before the local day to its end.
+* The METAR history, and the forecast history when the installed model
+  uses the forecast, from the training caches.
+
+Settled days are cached under `research/polymarket/<STATION>/` and never
+downloaded again. Wallets are stored as short hashes, used only to count
+distinct traders.
+
+**METHOD (`wm-backtest::market_eval`).**
+
+* **Prequential replay.** The history is replayed with the live state, peak
+  and model code, and each day is scored with the model trained on the days
+  before it.
+* **Decision points.** Every report from 09:00 local. The state is taken as
+  of the report; the market as of the report plus the decision delay
+  (`--delay-secs`, default 180).
+* **Market probability.** The midpoint of the latest taker buy and taker
+  sell of YES (NO trades converted), each at most 60 min old; dust trades
+  (< 1 share) are ignored.
+* **What is scored.** Every bucket that can still win, where the model's
+  tail probability is unambiguous and its cell has enough support.
+  Probabilities are clamped to [0.001, 0.999].
+
+**OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
+
+* log loss and Brier score of the model, the market and the pools, each
+  with a 95 % day-block bootstrap interval of the difference to the market,
+  overall and where A/B trade (market 0.90–0.99 or 0.01–0.10), plus the
+  best weight;
+* calibration by market price, and outcomes when the model disagreed with
+  the market by ≥ 5 points;
+* when the winning bucket first reached 90/95/99 % in the market vs in the
+  model;
+* for each report that raised the high: stale-quote trades on the killed
+  buckets (YES sold, or NO bought, at ≥ 0.02 in YES terms) by delay after
+  the observation. Profit is split into before and after the bot's
+  decision time, with the number of distinct takers;
+* agreement of the METAR high with the resolved bucket;
+* a plain-language verdict.
+
+**LIMITS.** Trades show only liquidity someone took, which is a lower
+bound on what was offered. The midpoint of the last taker buy and sell
+approximates the book's midpoint. The study is read-only and changes
+nothing.
+**TESTING.** Unit tests on synthetic history:
+
+* an oracle market beats the model;
+* a uniform market loses to it;
+* no day is scored with a model that has learned it;
+* stale-quote timing and profit accounting;
+* the price proxy;
+* skipped days.
+
+Data API paging, the offset cap, window splitting, dedup and the request
+budget are tested against a mock server. An end-to-end run against mock
+Gamma, Data API and IEM servers checks the cache and a rerun that makes no
+new requests.
+
 ## 37. Overfitting safeguards
 
 | Safeguard | Mechanism |

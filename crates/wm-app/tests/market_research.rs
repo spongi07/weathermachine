@@ -1,0 +1,375 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! `research market` end to end against mock Gamma, Data API and IEM servers:
+//! settled days only, trades converted to YES terms, reports written, and a
+//! rerun served from the cache. All data are synthetic test fixtures.
+
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::watch;
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wm_app::market_research::{self, MarketResearchClients, MarketResearchPlan};
+use wm_app::training::TrainPlan;
+use wm_backtest::{MarketStudyConfig, synthetic_history};
+use wm_core::ids::{LocationId, ProviderId, StationId};
+use wm_core::market::{FeeSchedule, TempUnit};
+use wm_core::time::{SystemClock, local_date};
+use wm_net::{HttpFetcher, ProviderGate, RateLimitPolicy};
+use wm_polymarket::{DataApiClient, GammaClient, LocationMarketSpec, event_slug};
+use wm_strategy::PeakConfig;
+use wm_weather::IemArchive;
+
+const TZ: chrono_tz::Tz = chrono_tz::Europe::Amsterdam;
+const TEMPLATE: &str = "highest-temperature-in-amsterdam-on-{month}-{day}-{year}";
+
+fn eham() -> StationId {
+    StationId::new("EHAM").unwrap()
+}
+
+fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, day).unwrap()
+}
+
+fn fetcher(id: ProviderId, seed: u64) -> Arc<HttpFetcher> {
+    let mut policy = RateLimitPolicy::local_test();
+    policy.min_interval = Duration::milliseconds(1).to_std().unwrap();
+    policy.max_body_bytes = 16 * 1024 * 1024;
+    let gate = ProviderGate::new(id, policy, Arc::new(SystemClock::new()), seed);
+    Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap())
+}
+
+fn tempdir(tag: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!("wm-market-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+/// Synthetic history: IEM CSV bodies per year and each local day's high.
+fn history() -> (BTreeMap<i32, String>, BTreeMap<NaiveDate, i32>) {
+    let mut csv: BTreeMap<i32, String> = BTreeMap::new();
+    let mut highs: BTreeMap<NaiveDate, i32> = BTreeMap::new();
+    for o in synthetic_history(&eham(), d(2024, 1, 1), 474, 11, Duration::minutes(4)) {
+        let body = csv
+            .entry(o.key.observed_at.year())
+            .or_insert_with(|| "station,valid,metar\n".to_owned());
+        body.push_str(&format!(
+            "EHAM,{},{}\n",
+            o.key.observed_at.format("%Y-%m-%d %H:%M"),
+            o.raw_text
+        ));
+        let t = o.temperature.unwrap().round_half_up_whole();
+        let day = highs.entry(local_date(o.key.observed_at, TZ)).or_insert(t);
+        *day = (*day).max(t);
+    }
+    (csv, highs)
+}
+
+/// Buckets ≤h−3, h−2 … h+2, ≥h+3 as (title, is_winner, condition, yes, no).
+fn buckets(date: NaiveDate, high: i32) -> Vec<(String, bool, String, String, String)> {
+    let mut titles = vec![(format!("{}°C or below", high - 3), false)];
+    for v in (high - 2)..=(high + 2) {
+        titles.push((format!("{v}°C"), v == high));
+    }
+    titles.push((format!("{}°C or higher", high + 3), false));
+    let tag = date.format("%m%d");
+    titles
+        .into_iter()
+        .enumerate()
+        .map(|(i, (t, w))| {
+            (
+                t,
+                w,
+                format!("0xc{tag}{i}"),
+                format!("1{tag}{i}"),
+                format!("2{tag}{i}"),
+            )
+        })
+        .collect()
+}
+
+fn event_json(date: NaiveDate, high: i32, settled: bool) -> String {
+    let slug = event_slug(TEMPLATE, date);
+    let markets: Vec<String> = buckets(date, high)
+        .iter()
+        .enumerate()
+        .map(|(i, (title, won, cond, yes, no))| {
+            let prices = if !settled {
+                "[\"0.5\", \"0.5\"]"
+            } else if *won {
+                "[\"1\", \"0\"]"
+            } else {
+                "[\"0\", \"1\"]"
+            };
+            format!(
+                r#"{{"id":"m{i}","question":"Will the highest temperature in Amsterdam be {title}?","conditionId":"{cond}","questionID":"0xq{i}","slug":"amsterdam-{i}","groupItemTitle":"{title}","outcomes":"[\"Yes\", \"No\"]","outcomePrices":{prices:?},"clobTokenIds":"[\"{yes}\", \"{no}\"]","active":{active},"closed":{settled},"acceptingOrders":false,"orderPriceMinTickSize":0.01,"orderMinSize":5,"negRisk":true}}"#,
+                active = !settled
+            )
+        })
+        .collect();
+    format!(
+        r#"[{{"id":"e1","slug":"{slug}","title":"Highest temperature in Amsterdam on {date}?","description":"This market will resolve to the temperature range that contains the highest temperature recorded by NOAA at the Amsterdam Airport Schiphol Station in degrees Celsius on {date}. The resolution source for this market will be information from NOAA, specifically the highest reading under the \"Temp\" column for all times on the specified day, available here: https://www.weather.gov/wrh/timeseries?site=eham. The resolution source for this market measures temperatures to whole degrees Celsius (eg, 9°C), which is the level of precision that will be used when resolving the market.","resolutionSource":"https://www.weather.gov/wrh/timeseries?site=eham","endDate":"{date}T12:00:00Z","active":{active},"closed":{settled},"negRisk":true,"markets":[{}]}}]"#,
+        markets.join(","),
+        active = !settled
+    )
+}
+
+fn at(date: NaiveDate, h: u32, m: u32) -> DateTime<Utc> {
+    TZ.from_local_datetime(&date.and_hms_opt(h, m, 0).unwrap())
+        .single()
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// Every half hour, a taker buys YES just above the bucket's price and
+/// another buys NO just above one minus it (a YES sale just below).
+fn trades_json(date: NaiveDate, high: i32) -> Vec<(i64, String)> {
+    let mut out = Vec::new();
+    for (i, (_, won, cond, yes, no)) in buckets(date, high).iter().enumerate() {
+        let p = if *won { 0.80 } else { 0.03 };
+        for h in 7..24 {
+            for m in [0, 30] {
+                let ts = at(date, h, m).timestamp();
+                out.push((ts, format!(
+                    r#"{{"proxyWallet":"0xa{i}","side":"BUY","asset":"{yes}","conditionId":"{cond}","size":10,"price":{:.3},"timestamp":{ts},"outcome":"Yes","transactionHash":"0xy{i}{ts}"}}"#,
+                    p + 0.01
+                )));
+                out.push((ts, format!(
+                    r#"{{"proxyWallet":"0xb{i}","side":"BUY","asset":"{no}","conditionId":"{cond}","size":10,"price":{:.3},"timestamp":{ts},"outcome":"No","transactionHash":"0xn{i}{ts}"}}"#,
+                    1.0 - p + 0.01
+                )));
+            }
+        }
+    }
+    out
+}
+
+struct Servers {
+    gamma: MockServer,
+    data: MockServer,
+    iem: MockServer,
+}
+
+async fn servers(highs: &BTreeMap<NaiveDate, i32>, csv: &BTreeMap<i32, String>) -> Servers {
+    let (gamma, data, iem) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for (year, body) in csv {
+        Mock::given(method("GET"))
+            .and(path("/cgi-bin/request/asos.py"))
+            .and(query_param("year1", year.to_string().as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body.clone()))
+            .mount(&iem)
+            .await;
+    }
+    // 10–12 April settled, 13 April has no event, 14 April is still open.
+    let mut by_market: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
+    for day in [
+        d(2025, 4, 10),
+        d(2025, 4, 11),
+        d(2025, 4, 12),
+        d(2025, 4, 14),
+    ] {
+        let high = highs[&day];
+        let settled = day != d(2025, 4, 14);
+        Mock::given(method("GET"))
+            .and(path("/events"))
+            .and(query_param("slug", event_slug(TEMPLATE, day).as_str()))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(event_json(day, high, settled)),
+            )
+            .mount(&gamma)
+            .await;
+        let conds: Vec<String> = buckets(day, high).into_iter().map(|b| b.2).collect();
+        by_market.insert(conds.join(","), trades_json(day, high));
+    }
+    Mock::given(method("GET"))
+        .and(path("/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gamma)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/trades"))
+        .respond_with(move |req: &Request| {
+            let q: BTreeMap<String, String> = req.url.query_pairs().into_owned().collect();
+            let num = |k: &str| q[k].parse::<i64>().unwrap();
+            let (start, end, offset, limit) =
+                (num("start"), num("end"), num("offset"), num("limit"));
+            let mut rows: Vec<&(i64, String)> = by_market
+                .get(&q["market"])
+                .map(|v| {
+                    v.iter()
+                        .filter(|(ts, _)| *ts >= start && *ts <= end)
+                        .collect()
+                })
+                .unwrap_or_default();
+            rows.reverse();
+            let page: Vec<&str> = rows
+                .into_iter()
+                .skip(usize::try_from(offset).unwrap())
+                .take(usize::try_from(limit).unwrap())
+                .map(|(_, r)| r.as_str())
+                .collect();
+            ResponseTemplate::new(200).set_body_string(format!("[{}]", page.join(",")))
+        })
+        .mount(&data)
+        .await;
+    Servers { gamma, data, iem }
+}
+
+fn plan(dir: &Path) -> MarketResearchPlan {
+    MarketResearchPlan {
+        train: TrainPlan {
+            station: eham(),
+            tz: TZ,
+            peak: PeakConfig::default(),
+            from_year: 2024,
+            today: d(2025, 4, 19),
+            cache_dir: dir.join("research/iem/EHAM"),
+            model_out: dir.join("models/eham.json"),
+            report_out: dir.join("research/eham-survival.md"),
+            min_days: 1,
+            forecast: None,
+        },
+        spec: LocationMarketSpec {
+            location: LocationId::new("amsterdam").unwrap(),
+            station: eham(),
+            timezone: TZ,
+            slug_template: TEMPLATE.into(),
+            unit: TempUnit::Celsius,
+            fees: FeeSchedule::taker(50_000),
+        },
+        from: d(2025, 4, 10),
+        to: d(2025, 4, 14),
+        study: MarketStudyConfig {
+            min_model_support: 10,
+            bootstrap_iterations: 200,
+            ..MarketStudyConfig::new(eham(), TZ, PeakConfig::default())
+        },
+        use_forecast: false,
+        cache_dir: dir.join("research/polymarket/EHAM"),
+        report_out: dir.join("research/eham-market.md"),
+    }
+}
+
+#[tokio::test]
+async fn scores_settled_days_and_serves_a_rerun_from_the_cache() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    let dir = tempdir("e2e");
+    let plan = plan(&dir);
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let data = DataApiClient::new(fetcher(ProviderId::polymarket_data(), 2), s.data.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let now = at(d(2025, 4, 19), 12, 0);
+    let o = market_research::run(&clients, &plan, now, &|_| {}, &mut stop_rx)
+        .await
+        .unwrap();
+    assert_eq!(o.report.market_days, 3);
+    assert_eq!((o.days_downloaded, o.days_cached), (3, 0));
+    assert_eq!(
+        o.unavailable,
+        vec![
+            (d(2025, 4, 13), "no event with this slug".to_owned()),
+            (
+                d(2025, 4, 14),
+                "not settled yet (a bucket is still open)".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        (o.report.resolution_agreed, o.report.resolution_checked),
+        (3, 3)
+    );
+    assert_eq!(o.report.scored_days, 3, "{:?}", o.report.skipped_days);
+    assert!(o.report.points > 50, "{}", o.report.points);
+    // YES buys at p + 0.01 and NO buys at 1 − p + 0.01 average to p.
+    let cal = &o.report.calibration;
+    let winners = cal.iter().find(|r| r.group == "0.70–0.90").unwrap();
+    assert!(
+        winners.points > 0 && (winners.market_mean - 0.80).abs() < 1e-9,
+        "{cal:?}"
+    );
+    let md = std::fs::read_to_string(&o.markdown).unwrap();
+    assert!(md.contains("# Model versus market — EHAM"));
+    assert!(md.contains("2025-04-14: not settled yet"));
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&o.json).unwrap()).unwrap();
+    assert_eq!(json["market_days"], 3);
+    // Settled days are cached; open or missing ones are not.
+    let cache = &plan.cache_dir;
+    for day in [d(2025, 4, 10), d(2025, 4, 11), d(2025, 4, 12)] {
+        let slug = event_slug(TEMPLATE, day);
+        assert!(cache.join(format!("{slug}.event.json")).is_file());
+        let trades = std::fs::read_to_string(cache.join(format!("{slug}.trades.json"))).unwrap();
+        assert!(!trades.contains("0xa1"), "wallets are stored hashed");
+    }
+    assert!(
+        !cache
+            .join(format!(
+                "{}.event.json",
+                event_slug(TEMPLATE, d(2025, 4, 14))
+            ))
+            .exists()
+    );
+
+    // A rerun asks the network only for the days that were not settled.
+    let data_calls = s.data.received_requests().await.unwrap().len();
+    let gamma_calls = s.gamma.received_requests().await.unwrap().len();
+    let again = market_research::run(&clients, &plan, now, &|_| {}, &mut stop_rx)
+        .await
+        .unwrap();
+    assert_eq!((again.days_downloaded, again.days_cached), (0, 3));
+    assert_eq!(s.data.received_requests().await.unwrap().len(), data_calls);
+    assert_eq!(
+        s.gamma.received_requests().await.unwrap().len(),
+        gamma_calls + 2,
+        "only 13 and 14 April are asked again"
+    );
+    assert_eq!(again.report.points, o.report.points);
+}
+
+#[tokio::test]
+async fn no_settled_market_is_an_error() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    let dir = tempdir("none");
+    let mut plan = plan(&dir);
+    plan.from = d(2025, 4, 13);
+    plan.to = d(2025, 4, 14);
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let data = DataApiClient::new(fetcher(ProviderId::polymarket_data(), 2), s.data.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let err = market_research::run(&clients, &plan, Utc::now(), &|_| {}, &mut stop_rx)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no settled market"), "{err}");
+    assert!(s.data.received_requests().await.unwrap().is_empty());
+    assert!(
+        s.iem.received_requests().await.unwrap().is_empty(),
+        "no history needed"
+    );
+    plan.from = d(2025, 4, 15);
+    assert!(
+        market_research::run(&clients, &plan, Utc::now(), &|_| {}, &mut stop_rx)
+            .await
+            .is_err()
+    );
+}

@@ -240,6 +240,12 @@ pub fn build_market(
     }
     outcomes.sort_by_key(|o| o.bucket.sort_key());
     let unit = outcomes.first().map_or(spec.unit, |o| o.bucket.unit);
+    // Gamma's `endDate` of a daily weather market is a nominal 12:00 UTC on
+    // the target day, yet the market trades until the day's data are final
+    // (seen on the live markets; Polymarket/clob-client#331). A market on a
+    // local day's high cannot end before that day does.
+    let day_end = wm_core::time::local_day_bounds(date, spec.timezone).1;
+    let end_time = Some(parse_ts(event.end_date.as_deref()).map_or(day_end, |t| t.max(day_end)));
     let market = DailyTemperatureMarket {
         event_slug: EventSlug::new(event.slug.clone())
             .map_err(|e| MappingError::Id(e.to_string()))?,
@@ -253,7 +259,7 @@ pub fn build_market(
         unit,
         neg_risk: event.neg_risk.unwrap_or(false),
         outcomes,
-        end_time: parse_ts(event.end_date.as_deref()),
+        end_time,
         rules,
         resolution,
         fees: spec.fees,
@@ -379,9 +385,36 @@ pub(crate) mod tests {
             m.resolution.unrecognized_clauses
         );
         assert_eq!(m.outcomes[0].tick_size, Price::parse("0.01").unwrap());
+        // The nominal noon-UTC endDate is extended to the end of the local day.
         assert_eq!(
             m.end_time.unwrap().to_rfc3339(),
-            "2026-09-25T12:00:00+00:00"
+            "2026-09-25T22:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn a_daily_market_ends_no_earlier_than_its_local_day() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 25).unwrap();
+        let build = |body: String| {
+            let events = parse_events(body.as_bytes()).unwrap();
+            build_market(&events[0], &spec(), date, Utc::now()).unwrap()
+        };
+        let later = fixture().replace(
+            r#""endDate":"2026-09-25T12:00:00Z","active""#,
+            r#""endDate":"2026-09-27T09:00:00Z","active""#,
+        );
+        assert_eq!(
+            build(later).end_time.unwrap().to_rfc3339(),
+            "2026-09-27T09:00:00+00:00",
+            "a later endDate is kept"
+        );
+        let missing = fixture().replace(
+            r#""endDate":"2026-09-25T12:00:00Z","active""#,
+            r#""active""#,
+        );
+        assert_eq!(
+            build(missing).end_time.unwrap().to_rfc3339(),
+            "2026-09-25T22:00:00+00:00"
         );
     }
 

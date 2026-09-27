@@ -2,11 +2,12 @@
 //!
 //! Replay and backtesting with the *same* kernel as live trading, historical
 //! observation import, the first strategy experiment (peak survival), model
-//! training with live feature code, walk-forward splits and synthetic data
-//! for demos/tests.
+//! training with live feature code, walk-forward splits, the model-versus-
+//! market study on settled markets and synthetic data for demos/tests.
 
 pub mod forecast_eval;
 pub mod historical;
+pub mod market_eval;
 pub mod replay;
 pub mod research;
 pub mod synthetic;
@@ -16,6 +17,7 @@ pub use forecast_eval::{
     ProxyRow, RiseRow,
 };
 pub use historical::{ImportStats, import_iem_csv};
+pub use market_eval::{MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade, market_study};
 pub use replay::{
     BacktestConfig, BacktestReport, Fidelity, SessionOutput, Settlement, SimulationSession,
     TradeRecord, bootstrap_mean_ci, run_backtest,

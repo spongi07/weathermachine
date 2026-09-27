@@ -43,6 +43,8 @@ of three labels:
 | 25 | BUY YES (strategy A) | [06-strategy.md](06-strategy.md#25-buy-yes--strategy-a) |
 | 26 | BUY NO (strategy B) | [06-strategy.md](06-strategy.md#26-buy-no--strategy-b) |
 | 27 | SPLIT + UNWIND (strategy C) | [06-strategy.md](06-strategy.md#27-split--unwind--strategy-c) |
+| 27a | DECIDED OUTCOMES (strategy D) | [06-strategy.md](06-strategy.md#27a-decided-outcomes--strategy-d) |
+| 27b | Market pooling (A and B) | [06-strategy.md](06-strategy.md#27b-the-book-as-information--market-pooling-a-and-b) |
 | 28 | UnwindEngine | [06-strategy.md](06-strategy.md#28-unwindengine) |
 | 29 | RiskEngine | [07-risk-storage.md](07-risk-storage.md#29-riskengine) |
 | 30 | $10 / $100 exposure model | [07-risk-storage.md](07-risk-storage.md#30-10--100-exposure-model) |
@@ -52,6 +54,7 @@ of three labels:
 | 34 | BacktestEngine | [08-research.md](08-research.md#34-backtestengine) |
 | 35 | Execution simulator | [08-research.md](08-research.md#35-execution-simulator) |
 | 36 | Parameter research | [08-research.md](08-research.md#36-parameter-research) |
+| 36a | Model versus market (`research market`) | [08-research.md](08-research.md#36a-model-versus-market-research-market) |
 | 37 | Overfitting safeguards | [08-research.md](08-research.md#37-overfitting-safeguards) |
 | 38 | Testing | [09-operations.md](09-operations.md#38-testing) |
 | 39 | Observability | [09-operations.md](09-operations.md#39-observability) |

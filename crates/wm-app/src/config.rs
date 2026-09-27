@@ -102,6 +102,9 @@ pub struct ProvidersSection {
     /// Open-Meteo Previous Runs API: fixed-lead forecasts (predictive input).
     #[serde(default = "default_open_meteo_provider")]
     pub open_meteo: ProviderSection,
+    /// Polymarket Data API: public trade history for `research market`.
+    #[serde(default = "default_polymarket_data_provider")]
+    pub polymarket_data: ProviderSection,
 }
 
 /// IEM throttles each IP to one request per second; we space requests 15 s
@@ -151,6 +154,22 @@ fn default_open_meteo_provider() -> ProviderSection {
     }
 }
 
+/// The Data API allows 200 requests per 10 s; research reads at most two
+/// per second, one at a time.
+fn default_polymarket_data_provider() -> ProviderSection {
+    ProviderSection {
+        enabled: true,
+        base_url: wm_polymarket::DataApiClient::DEFAULT_BASE.into(),
+        policy: RateLimitPolicy {
+            min_interval: std::time::Duration::from_millis(500),
+            max_concurrency: 1,
+            timeout: std::time::Duration::from_secs(30),
+            daily_budget: Some(20_000),
+            ..RateLimitPolicy::polymarket_rest()
+        },
+    }
+}
+
 /// The day-1 forecast as a model feature. It influences trading only when
 /// the out-of-sample evaluation at training adopts it; otherwise it is
 /// fetched and shown, nothing more.
@@ -194,7 +213,40 @@ pub struct StrategiesSection {
     pub buy_yes: BuyYesConfigToml,
     pub buy_no: BuyNoConfigToml,
     pub split_unwind: SplitUnwindConfigToml,
+    /// Strategy D (outcomes the observations have decided).
+    #[serde(default)]
+    pub certain: CertainConfigToml,
     pub unwind: UnwindConfig,
+}
+
+/// TOML mirror of [`wm_strategy::CertainConfig`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CertainConfigToml {
+    pub enabled: bool,
+    #[serde(with = "decimal_serde::price")]
+    pub max_price: Price,
+    pub min_edge: f64,
+    #[serde(with = "decimal_serde::price")]
+    pub slippage_allowance: Price,
+    pub max_data_age_minutes: i64,
+    pub max_book_age_ms: i64,
+    pub max_jump_tenths: i32,
+}
+
+impl Default for CertainConfigToml {
+    fn default() -> Self {
+        let d = wm_strategy::CertainConfig::default();
+        Self {
+            enabled: d.enabled,
+            max_price: d.max_price,
+            min_edge: d.min_edge,
+            slippage_allowance: d.slippage_allowance,
+            max_data_age_minutes: d.max_data_age_minutes,
+            max_book_age_ms: d.max_book_age_ms,
+            max_jump_tenths: d.max_jump_tenths,
+        }
+    }
 }
 
 /// TOML-friendly mirror of [`BuyYesConfig`] (decimal strings for prices/money).
@@ -213,6 +265,15 @@ pub struct BuyYesConfigToml {
     pub max_book_age_ms: i64,
     #[serde(with = "decimal_serde::price")]
     pub slippage_allowance: Price,
+    /// Weight of the market-implied probability (0 = model only, 1 = market only).
+    #[serde(default = "wm_strategy::strategy::default_market_weight")]
+    pub market_weight: f64,
+    /// Widest spread at which a book's midpoint counts as a market probability.
+    #[serde(
+        with = "decimal_serde::price",
+        default = "wm_strategy::strategy::default_max_market_spread"
+    )]
+    pub max_market_spread: Price,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +292,14 @@ pub struct BuyNoConfigToml {
     pub max_book_age_ms: i64,
     #[serde(with = "decimal_serde::price")]
     pub slippage_allowance: Price,
+    /// See [`BuyYesConfigToml::market_weight`].
+    #[serde(default = "wm_strategy::strategy::default_market_weight")]
+    pub market_weight: f64,
+    #[serde(
+        with = "decimal_serde::price",
+        default = "wm_strategy::strategy::default_max_market_spread"
+    )]
+    pub max_market_spread: Price,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -564,6 +633,7 @@ impl AppConfig {
             ("polymarket_ws", &p.polymarket_ws),
             ("iem", &p.iem),
             ("open_meteo", &p.open_meteo),
+            ("polymarket_data", &p.polymarket_data),
         ] {
             s.policy
                 .validate()
@@ -592,6 +662,26 @@ impl AppConfig {
                 "forecast.model must be an Open-Meteo model id (a-z, 0-9, _), got '{}'",
                 f.model
             );
+        }
+        let st = &self.file.strategies;
+        for (name, weight, spread) in [
+            (
+                "buy_yes",
+                st.buy_yes.market_weight,
+                st.buy_yes.max_market_spread,
+            ),
+            (
+                "buy_no",
+                st.buy_no.market_weight,
+                st.buy_no.max_market_spread,
+            ),
+        ] {
+            if !(0.0..=1.0).contains(&weight) {
+                bail!("strategies.{name}.market_weight must be 0..=1, got {weight}");
+            }
+            if spread <= Price::ZERO {
+                bail!("strategies.{name}.max_market_spread must be > 0");
+            }
         }
         self.file.risk.validate().context("risk")?;
         if self.locations.is_empty() {
@@ -676,6 +766,8 @@ impl AppConfig {
             max_book_age_ms: c.max_book_age_ms,
             slippage_allowance: c.slippage_allowance,
             notional: self.file.risk.position_size_usd,
+            market_weight: c.market_weight,
+            max_market_spread: c.max_market_spread,
         }
     }
 
@@ -692,6 +784,22 @@ impl AppConfig {
             max_data_age_minutes: c.max_data_age_minutes,
             max_book_age_ms: c.max_book_age_ms,
             slippage_allowance: c.slippage_allowance,
+            notional: self.file.risk.position_size_usd,
+            market_weight: c.market_weight,
+            max_market_spread: c.max_market_spread,
+        }
+    }
+
+    pub fn certain(&self) -> wm_strategy::CertainConfig {
+        let c = &self.file.strategies.certain;
+        wm_strategy::CertainConfig {
+            enabled: c.enabled,
+            max_price: c.max_price,
+            min_edge: c.min_edge,
+            slippage_allowance: c.slippage_allowance,
+            max_data_age_minutes: c.max_data_age_minutes,
+            max_book_age_ms: c.max_book_age_ms,
+            max_jump_tenths: c.max_jump_tenths,
             notional: self.file.risk.position_size_usd,
         }
     }
@@ -774,6 +882,73 @@ mod tests {
         assert!(cfg.validate().is_err(), "model id goes into a URL");
         cfg.file.forecast.model = "ecmwf_ifs".into();
         assert!(cfg.validate().is_ok());
+    }
+
+    /// The shipped file without the given sections and keys.
+    fn shipped_without(sections: &[&str], keys: &[&str]) -> String {
+        let text =
+            std::fs::read_to_string(repo_root().join("configs/weather-machine.toml")).unwrap();
+        let mut out = Vec::new();
+        let mut skipping = false;
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with('[') {
+                skipping = sections
+                    .iter()
+                    .any(|s| t == format!("[{s}]") || t.starts_with(&format!("[{s}.")));
+            }
+            if skipping || keys.iter().any(|k| t.starts_with(&format!("{k} ="))) {
+                continue;
+            }
+            out.push(line);
+        }
+        out.join("\n")
+    }
+
+    #[test]
+    fn older_config_files_get_the_new_defaults() {
+        let text = shipped_without(
+            &["providers.polymarket_data", "strategies.certain"],
+            &["market_weight", "max_market_spread"],
+        );
+        assert!(
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .all(|l| !l.contains("polymarket_data") && !l.contains("market_weight"))
+        );
+        let file: AppConfigFile = toml::from_str(&text).unwrap();
+        let st = &file.strategies;
+        for (w, spread) in [
+            (st.buy_yes.market_weight, st.buy_yes.max_market_spread),
+            (st.buy_no.market_weight, st.buy_no.max_market_spread),
+        ] {
+            assert!((w - 0.5).abs() < 1e-12);
+            assert_eq!(spread, Price::saturating_from_micros(100_000));
+        }
+        assert!(st.certain.enabled);
+        let data = &file.providers.polymarket_data;
+        assert!(data.enabled);
+        assert_eq!(data.base_url, "https://data-api.polymarket.com");
+        assert!(data.policy.min_interval >= std::time::Duration::from_millis(500));
+        assert!(data.policy.validate().is_ok());
+    }
+
+    #[test]
+    fn market_pooling_settings_are_validated() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        assert!((cfg.buy_yes().market_weight - 0.5).abs() < 1e-12);
+        assert!((cfg.buy_no().pooling().weight - 0.5).abs() < 1e-12);
+        assert_eq!(cfg.buy_no().pooling().max_book_age_ms, 15_000);
+        cfg.file.strategies.buy_yes.market_weight = 1.5;
+        assert!(cfg.validate().is_err());
+        cfg.file.strategies.buy_yes.market_weight = 0.0;
+        assert!(cfg.validate().is_ok(), "0 = model only");
+        cfg.file.strategies.buy_no.market_weight = f64::NAN;
+        assert!(cfg.validate().is_err());
+        cfg.file.strategies.buy_no.market_weight = 1.0;
+        cfg.file.strategies.buy_no.max_market_spread = Price::ZERO;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

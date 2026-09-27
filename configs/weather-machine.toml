@@ -215,6 +215,30 @@ politeness_factor = 2
 politeness_decay_secs = 86400.0
 max_body_bytes = 4194304
 
+# Polymarket Data API: public trade history, read by `weather-machine research
+# market` only (documented limit 200 requests / 10 s; we use 2 per second).
+[providers.polymarket_data]
+enabled = true
+base_url = "https://data-api.polymarket.com"
+[providers.polymarket_data.policy]
+class = "exchange"
+min_interval_secs = 0.5
+max_concurrency = 1
+timeout_secs = 30.0
+connect_timeout_secs = 5.0
+backoff_base_secs = 2.0
+backoff_max_secs = 300.0
+throttle_backoff_base_secs = 30.0
+respect_retry_after = true
+max_retry_after_secs = 3600.0
+circuit_failure_threshold = 8
+circuit_open_base_secs = 60.0
+circuit_open_max_secs = 1800.0
+daily_budget = 20000
+politeness_factor = 2
+politeness_decay_secs = 3600.0
+max_body_bytes = 8388608
+
 # ---------------------------------------------------------------------------
 # Adaptive polling (engineering starting points — NOT optimized parameters).
 # Fast intervals apply only inside the arrival window after an expected report.
@@ -266,6 +290,12 @@ require_approved_resolution_spec = false   # set true before any live considerat
 # ---------------------------------------------------------------------------
 # Strategies (research parameters; see docs/blueprint/14-research-methodology.md)
 # ---------------------------------------------------------------------------
+# The book is information. A and B pool the model's probability with the
+# market's (midpoint of a fresh book with spread <= max_market_spread):
+# logit(p) = w·logit(market) + (1−w)·logit(model), capped at the model's
+# probability — the market can veto a trade, never create one.
+# market_weight: 0 = model only, 1 = market only. `weather-machine research
+# market` estimates the best weight from settled markets.
 [strategies.buy_yes]
 enabled = true
 min_price = "0.90"
@@ -276,6 +306,8 @@ min_model_support = 50
 max_data_age_minutes = 40
 max_book_age_ms = 15000
 slippage_allowance = "0.005"
+market_weight = 0.5
+max_market_spread = "0.10"
 
 [strategies.buy_no]
 enabled = true
@@ -288,6 +320,24 @@ min_model_support = 50
 max_data_age_minutes = 40
 max_book_age_ms = 15000
 slippage_allowance = "0.005"
+market_weight = 0.5
+max_market_spread = "0.10"
+
+# Strategy D: outcomes the observations have decided. When every resolution
+# view has seen a high of H, buckets entirely below H lose (buy their NO) and
+# an open-ended top bucket "≥ L" with L ≤ H wins (buy its YES) — no model.
+# The edge is speed: quotes on the bucket that just died can be stale for a
+# moment after the report. A high more than max_jump_tenths above the report
+# before it waits for a second report.
+[strategies.certain]
+enabled = true
+max_price = "0.99"
+min_edge = 0.02                   # profit per share after fee and slippage; skips 0.98–0.99 asks
+                                  # on long-dead buckets (settlement discount, not a stale quote)
+slippage_allowance = "0.002"
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+max_jump_tenths = 30
 
 [strategies.split_unwind]
 enabled = false                   # research only; risk rejects outside backtests

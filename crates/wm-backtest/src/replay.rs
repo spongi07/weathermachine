@@ -119,7 +119,9 @@ fn priority(e: &WeatherMachineEvent) -> u8 {
         WeatherMachineEvent::ProviderHealthChanged(_) | WeatherMachineEvent::Operator(_) => 0,
         WeatherMachineEvent::MarketSnapshot(_) => 1,
         WeatherMachineEvent::OrderUpdate(_) => 2,
-        WeatherMachineEvent::OrderBookUpdate(_) | WeatherMachineEvent::MarketTrade(_) => 3,
+        WeatherMachineEvent::OrderBookUpdate(_)
+        | WeatherMachineEvent::MarketTrade(_)
+        | WeatherMachineEvent::MarketStreamHeartbeat(_) => 3,
         WeatherMachineEvent::WeatherObservation(_)
         | WeatherMachineEvent::WeatherCorrection(_)
         | WeatherMachineEvent::ForecastUpdate(_) => 4,

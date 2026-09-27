@@ -76,6 +76,11 @@ pub struct PeakFeatures {
     /// uses only observation features).
     #[serde(default)]
     pub forecast_rise_tenths: Option<i32>,
+    /// How far the high rose above the report just before it first reached
+    /// the high (tenths °C). `None` when the high is the day's first report.
+    /// A large jump from a single report is treated as unconfirmed.
+    #[serde(default)]
+    pub high_jump_tenths: Option<i32>,
 }
 
 impl PeakFeatures {
@@ -214,6 +219,12 @@ impl PeakDetectionEngine {
             forecast_rise_tenths: forecast
                 .filter(|f| f.date == state.date)
                 .and_then(|f| f.rise_tenths(now)),
+            high_jump_tenths: state
+                .points
+                .iter()
+                .rev()
+                .find(|p| p.observed_at < high.first_at)
+                .map(|p| high.value.tenths() - p.temp.tenths()),
         };
         let near_high = features.drop_tenths <= self.config.watch_margin_tenths;
         let in_heating = (self.config.watch_start_after_noon..=self.config.watch_end_after_noon)
@@ -353,6 +364,24 @@ mod tests {
         assert_eq!(a.features.data_age_minutes, 5);
         assert!((a.features.minutes_after_solar_noon - (15 * 60 + 5 - 13 * 60 - 44)).abs() <= 5);
         assert_eq!(a.features.forecast_rise_tenths, None, "no forecast given");
+        assert_eq!(
+            a.features.high_jump_tenths, None,
+            "the high is the first report"
+        );
+        let b = assess(
+            &[
+                ("2026-07-01T11:30:00Z", 150),
+                ("2026-07-01T12:00:00Z", 180),
+                ("2026-07-01T12:30:00Z", 170),
+                ("2026-07-01T13:00:00Z", 180),
+            ],
+            "2026-07-01T13:05:00Z",
+        );
+        assert_eq!(
+            b.features.high_jump_tenths,
+            Some(30),
+            "rise into the first touch"
+        );
     }
 
     #[test]

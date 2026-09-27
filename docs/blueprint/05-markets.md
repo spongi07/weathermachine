@@ -174,13 +174,28 @@ strategies never touch it.
 | Market discovery, metadata, rules, outcomes, token ids | `GammaClient::events_by_slug`, `build_market` (`GET gamma-api.polymarket.com/events?slug=`) | ✅ |
 | Order books | `ClobClient::book` (`GET clob.polymarket.com/book?token_id=`), REST fallback while the stream is down | ✅ |
 | Prices / history | `ClobClient::prices_history` (`/prices-history`, research only) | ✅ |
+| Trade history | `DataApiClient::trades` (`GET data-api.polymarket.com/trades`, taker side, all buckets of an event in one query; `limit`/`offset` ≤ 10,000, so a window that reaches the cap is halved and read again). Research only (`research market`) | ✅ |
 | Trades, live books | `MarketStream` (`wss://ws-subscriptions-clob.polymarket.com/ws/market`: `book`, `price_change`, `tick_size_change`, `last_trade_price`), local book with invalidation on disconnect | ✅ |
 | Split / merge / redeem / neg-risk convert | `wm_polymarket::ctf` economics (pure) | ✅ model; on-chain calls Phase 14 |
 | Orders, cancellations, fills, positions, balances | `ExecutionVenue` port; `SimulatedExchange` (paper); `DisabledLiveVenue` (live) | paper ✅, live ⛔ Phase 14 |
 
 * **Own limits (KNOWN FACT).** Gamma (1 s spacing), CLOB REST (250 ms,
-  concurrency 2) and WebSocket reconnects (5 s) each have their own gate.
-  None of them inherits NOAA's rules, and vice versa.
+  concurrency 2), the Data API (500 ms, one at a time; documented limit 200
+  requests per 10 s) and WebSocket reconnects (5 s) each have their own
+  gate. None of them inherits NOAA's rules, and vice versa.
+* **Market end time (KNOWN FACT, [clob-client#331](https://github.com/Polymarket/clob-client/issues/331)).**
+  Gamma's `endDate` of a daily weather market is a nominal 12:00 UTC on the
+  target day, although the market trades until the day's data are final.
+  `build_market` therefore sets the end to the later of `endDate` and the
+  end of the local resolution day. Used as-is, it made the risk engine
+  reject every intent after 14:00 Amsterdam summer time.
+* **Quiet books.** The market channel sends only changes. Each PONG to the
+  client's heartbeat emits a `MarketStreamHeartbeat` (with the connection's
+  start), and the engine marks every book received on that connection as
+  confirmed (`OrderBook::confirmed_at`). A book nobody touched stays current
+  while its connection is alive; after a reconnect it is current again only
+  once the new connection has sent it. Heartbeats are pruned with the book
+  journal.
 * **KNOWN FACT (Polymarket code/docs).** Since the CTF-exchange v2 migration
   (2026-04-28) collateral is pUSD (6 decimals). Orders carry `feeRateBps`.
   Live order placement would need EIP-712 signing of the v2 order struct,

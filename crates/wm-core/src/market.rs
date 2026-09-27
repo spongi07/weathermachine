@@ -263,6 +263,11 @@ pub struct OrderBook {
     /// When Weather Machine received it (knowledge time).
     pub received_at: DateTime<Utc>,
     pub hash: Option<String>,
+    /// Latest instant the live feed confirmed the book unchanged (stream
+    /// heartbeat on the connection that delivered it). A quiet book is
+    /// current, not stale; after a disconnect confirmations stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<DateTime<Utc>>,
 }
 
 /// Levels per side the engine keeps (and journals). Positions are small
@@ -333,9 +338,13 @@ impl OrderBook {
         (shares, proceeds)
     }
 
-    /// Age of the book at `now`, in milliseconds.
+    /// Time since the book was last known current (received or confirmed),
+    /// in milliseconds.
     pub fn age_ms(&self, now: DateTime<Utc>) -> i64 {
-        (now - self.received_at).num_milliseconds()
+        let current = self
+            .confirmed_at
+            .map_or(self.received_at, |c| c.max(self.received_at));
+        (now - current).num_milliseconds()
     }
 }
 
@@ -423,6 +432,42 @@ mod tests {
     }
 
     #[test]
+    fn a_confirmed_quiet_book_is_current() {
+        let t = |s: &str| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|t| t.with_timezone(&Utc))
+                .unwrap_or_default()
+        };
+        let mut b = OrderBook {
+            token: tok("1"),
+            bids: vec![],
+            asks: vec![],
+            tick_size: Price::saturating_from_micros(10_000),
+            min_order_size: Shares::from_whole(5),
+            exchange_ts: None,
+            received_at: t("2026-07-01T12:00:00Z"),
+            hash: None,
+            confirmed_at: None,
+        };
+        let now = t("2026-07-01T12:01:00Z");
+        assert_eq!(b.age_ms(now), 60_000);
+        b.confirmed_at = Some(t("2026-07-01T12:00:55Z"));
+        assert_eq!(b.age_ms(now), 5_000);
+        // A confirmation older than the content never makes it older.
+        b.confirmed_at = Some(t("2026-07-01T11:00:00Z"));
+        assert_eq!(b.age_ms(now), 60_000);
+        let json = serde_json::to_string(&OrderBook {
+            confirmed_at: None,
+            ..b.clone()
+        })
+        .unwrap_or_default();
+        assert!(
+            !json.contains("confirmed_at"),
+            "journal format unchanged without it"
+        );
+    }
+
+    #[test]
     fn book_best_prices_depth_and_spread() {
         let mut book = OrderBook {
             token: tok("1"),
@@ -455,6 +500,7 @@ mod tests {
             exchange_ts: None,
             received_at: Utc::now(),
             hash: None,
+            confirmed_at: None,
         };
         book.normalize();
         assert_eq!(

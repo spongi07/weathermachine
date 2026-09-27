@@ -1028,6 +1028,8 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 extra_providers: &extra,
                 rules_review: &reviews,
                 model: &model_now,
+                yes_pooling: cfg.buy_yes().pooling(),
+                no_pooling: cfg.buy_no().pooling(),
             };
             publisher.publish(dto::build(&snap, &inputs, now));
         }
@@ -1732,6 +1734,7 @@ mod tests {
             exchange_ts: None,
             received_at: t(at),
             hash: None,
+            confirmed_at: None,
         }
     }
 

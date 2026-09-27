@@ -182,6 +182,10 @@ impl ProviderId {
     pub fn polymarket_ws() -> Self {
         Self("polymarket_ws".to_owned())
     }
+    /// Polymarket Data API: public trade history (research only).
+    pub fn polymarket_data() -> Self {
+        Self("polymarket_data".to_owned())
+    }
     /// Historical replay / backtest source.
     pub fn replay() -> Self {
         Self("replay".to_owned())

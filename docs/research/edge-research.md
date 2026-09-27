@@ -1,0 +1,118 @@
+# Where the edge is — and where it is not
+
+*Question (27 September 2026).* The market had "Highest temperature in
+Amsterdam on September 27?" at 21 °C = 99.5–99.9 % while Weather Machine
+was still waiting for its 60-minute confirmation (the high was retested every
+half hour, so the clock never started). The book had decided the day. How do
+we take the book into account, and where can the bot actually earn?
+
+**Short answer.** Agreeing with a book that has already decided earns
+nothing. The money is made only where the price is *wrong*:
+
+1. for a short time after new information, before quotes are updated;
+2. where the bot knows something the market does not;
+3. by providing liquidity instead of taking it (not built yet).
+
+This change therefore:
+
+* uses the book as information (it can veto a model trade);
+* adds a strategy for the one case where the answer is certain;
+* fixes two defects that would have blocked afternoon trading;
+* adds a measurement (`research market`) that shows, on settled markets and
+  with the bot's own model, which of these edges exist for EHAM.
+
+## 1. What a decided book leaves on the table
+
+Buying YES at 0.998 pays 0.002 per share, minus the taker fee of
+0.05 × 0.998 × 0.002 ≈ 0.0001. On a $10 position that is about **$0.02**. A
+single later report of 22 °C loses the whole **$10**. The trade is worth it
+only if P(21 °C is final) > 99.81 %.
+
+Prices of near-certain contracts also stay below 1.0 for a reason unrelated
+to the weather: the collateral is locked until the oracle settles. Gebele &
+Matthes measure this settlement discount across prediction markets.
+
+So 0.995–0.998 on a "decided" 21 °C is mostly a correct price plus a
+settlement discount, not a mispricing.
+
+## 2. What others found
+
+| Source | Finding |
+|---|---|
+| [jattree/weather-edge](https://github.com/jattree/weather-edge) | 697 events scored 36 h before close: market log loss **1.31** vs model **1.59**. The market's implied temperature is off by ~0.2 °C, raw models by ~0.8 °C. Best blend: **100 % market**. Simulated trades: −13.9 % ± 5.3 % per trade (1,905 trades). |
+| [BallesJr/polymarket-weather-edge](https://github.com/BallesJr/polymarket-weather-edge) | Daily highs computed from station METARs matched resolutions 93 % of the time, vs 66 % for a reanalysis grid. An early edge (+$157 over 527 trades) did not hold out of sample (−$592 over 847 trades). |
+| [Celmaro/polymeteo](https://github.com/Celmaro/polymeteo) (copy-trading tool) | "Weather markets reprice quickly after informed flow"; ~1 s treated as typical copy latency, "edge decays fast". Its dashboard figures are curated demo numbers, not evidence. |
+| [Our review of the weatherforecaster bot](weatherforecaster-review.md) | Forward paper trading lost 19.7 % across every strategy once look-ahead was removed. |
+| [Polymarket fees](https://docs.polymarket.com/trading/fees), [fee guide](https://startpolymarket.com/learn/polymarket-fees/) | Taker fee = shares × 0.05 × p × (1 − p) on weather markets. Makers pay nothing and receive a share (up to 25 %) of taker fees as daily rebates. |
+| [Gebele & Matthes, arXiv:2605.31431](https://arxiv.org/abs/2605.31431) | Near-certain contracts carry a maturity-dependent settlement discount (collateral lock-up until oracle settlement). |
+| [Polymarket/clob-client#331](https://github.com/Polymarket/clob-client/issues/331) | Daily weather markets report `endDate` = 12:00 UTC on the target day, although they trade until the day's data are final. |
+
+The independent attempts agree. On these contracts, public forecasts do
+not beat the market's prices, and directional edges found in backtests did
+not survive live trading. Tools that copy informed traders within about a
+second are advertised for these markets.
+
+## 3. What changed in Weather Machine
+
+| Change | Why | Effect |
+|---|---|---|
+| **Market end time** | Gamma's nominal `endDate` (12:00 UTC) was used as the market's end, and the risk engine rejects intents after the end. | Every signal after 14:00 Amsterdam time (summer) would have been rejected. A daily-high market now ends no earlier than its local day. |
+| **Quiet books** | The market channel sends only *changes*, so a book nobody touched looked stale. The dashboard showed book ages of 12–87 s, and the 15 s limit blocked every strategy. | A heartbeat (PONG) on the live connection now confirms every book received on that connection. A book counts as current while its connection is alive. |
+| **Strategy D — decided outcomes** | The one case where the answer is certain: the high can only rise. | When every resolution view has seen a high of H, buckets entirely below H are NO, and an open top bucket "≥ L" with L ≤ H is YES. D buys on the observation event itself (no model), at most 0.99, if ≥ 0.02 per share remains after fee and 0.002 slippage. That excludes the 0.98–0.99 quotes of long-dead buckets, which are settlement discount, not stale quotes. A jump of > 3 °C from the previous report waits for a second report; corrections block trading; the risk gates are unchanged (spread ≤ 0.05, depth, exposure). |
+| **The book as information (A, B)** | When the market disagrees, the market is more likely right (§2). | The model's probability is pooled with the midpoint of a fresh book (spread ≤ 0.10): logit p = w·logit(market) + (1 − w)·logit(model), with w = `market_weight` (default 0.5). The result is capped at the model's probability, so the market can veto a trade but never create one. The ladder shows the probability used, and blockers name the market. |
+| **`research market`** | Replace opinions with measurements on EHAM's own settled markets. | See §4. |
+
+## 4. The measurement: `weather-machine research market`
+
+For every settled market in the date range, the command:
+
+1. fetches the event from Gamma and its trades from the Polymarket Data API
+   (settled days are cached under `/data/research/polymarket/EHAM/`);
+2. replays the METAR history prequentially: each day is scored with the
+   model trained only on the days before it, using live-trading code;
+3. at every report (plus the bot's decision delay, default 180 s), compares
+   the model's probability for each still-possible bucket with the market's
+   (the midpoint of the latest taker buy and sell).
+
+It answers five questions:
+
+| Section | Question | How to act on it |
+|---|---|---|
+| Who predicts better | Log loss of model, market and pools (w = 0, 0.25, 0.5, 0.75, 1), with 95 % day-block intervals; overall and where A/B trade. | Set `market_weight` to the best weight. If the market alone is best, the model adds nothing: A and B have no information edge. With w = 1 they effectively never trade, because the market's own midpoint never clears its ask. |
+| Where prices are wrong | Win rate by market price; outcomes when the model disagreed by ≥ 5 points. | A price bin whose win rate is clearly above its price is where buying pays. |
+| Who is sure first | When the winning bucket reached 90 / 95 / 99 % in the market vs in the model. | Shows how much the confirmation rule costs (on 27 September the book was at 99.5 % while the bot still waited). |
+| How fast dead buckets reprice | After each new high: stale quotes on the killed buckets that were taken, by delay after the observation, and before or after our decision time. | Profit taken before our decision time → D needs faster data. Profit still taken after it → D would have found fills. |
+| Resolution check | Did the METAR high fall in the resolved bucket? | D assumes it does; any mismatch must be understood before trusting D. |
+
+The image has no shell, so run it as a one-off container on the stack's
+data volume. In Portainer: *Containers → Add container*, same image, the
+volume `weather-machine_wmdata` at `/data`, `WM_CONTACT` set, and the command
+below. The container's log shows the report.
+
+```sh
+docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
+  ghcr.io/spongi07/weathermachine:latest \
+  research market --from 2026-06-01 --to 2026-09-26 --print
+# also written to /data/research/eham-market.md (+ eham-market.json)
+```
+
+It uses about 1–3 Data API requests and one Gamma request per day, two per
+second at most. METAR history comes from the training cache.
+
+## 5. Next levers (not built)
+
+* **Faster observations.** KNMI publishes
+  [10-minute station observations](https://english.knmidata.nl/open-data/10-minute-in-situ-meteorological-observations)
+  through the [EDR API](https://developer.dataplatform.knmi.nl/edr-api)
+  (API key required,
+  [collection](https://english.knmidata.nl/latest/news/2025/07/03/edr-api-new-10-minute-in-situ-meteorological-observations-collection)).
+  It could show a new high before the half-hourly METAR. This is only worth
+  building if §4 shows that stale quotes are taken *after* the METAR, not
+  before it.
+* **Providing liquidity.** Late in the day, quoting NO on buckets far above
+  the high earns the spread plus rebates instead of paying fees. This needs
+  order management, and live execution is Phase 14.
+* **A spread limit for D.** The risk engine's spread ≤ 0.05 and "no
+  one-sided book" gates apply to D too. If §4 shows stale quotes mostly in
+  wide books, a separate limit for decided outcomes can be justified with
+  data.

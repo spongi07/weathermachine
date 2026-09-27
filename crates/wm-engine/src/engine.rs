@@ -24,10 +24,10 @@ use wm_risk::{
     ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus,
 };
 use wm_strategy::{
-    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, ForecastDay,
-    PeakConfig, PeakDetectionEngine, ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig,
-    Strategy, StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation,
-    ViewKind,
+    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, CertainConfig,
+    CertainOutcomes, ForecastDay, PeakConfig, PeakDetectionEngine, ProbabilityModel, Proposal,
+    SplitUnwind, SplitUnwindConfig, Strategy, StrategyContext, TemperatureStateEngine,
+    UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
 };
 
 /// A location the engine trades.
@@ -52,6 +52,9 @@ pub struct EngineConfig {
     pub buy_yes: BuyYesConfig,
     pub buy_no: BuyNoConfig,
     pub split_unwind: SplitUnwindConfig,
+    /// Strategy D: outcomes the observations have decided.
+    #[serde(default)]
+    pub certain: CertainConfig,
     pub unwind: UnwindConfig,
     pub evaluate_on_book_updates: bool,
     pub decision_log_capacity: usize,
@@ -196,6 +199,7 @@ impl Engine {
             peak.insert(l.location.clone(), PeakDetectionEngine::new(l.peak.clone()));
         }
         let strategies: Vec<Box<dyn Strategy>> = vec![
+            Box::new(CertainOutcomes::new(cfg.certain.clone())),
             Box::new(BuyYesFinalHigh::new(cfg.buy_yes.clone())),
             Box::new(BuyNoAboveHigh::new(cfg.buy_no.clone())),
             Box::new(SplitUnwind::new(cfg.split_unwind.clone())),
@@ -399,6 +403,14 @@ impl Engine {
                     && let Some(i) = self.location_index(&loc)
                 {
                     self.evaluate_location(i, false, &mut out);
+                }
+            }
+            WeatherMachineEvent::MarketStreamHeartbeat(h) => {
+                // Quiet books delivered on the live connection stay current.
+                for b in self.books.values_mut() {
+                    if b.received_at >= h.connected_since {
+                        b.confirmed_at = Some(env.available_at);
+                    }
                 }
             }
             WeatherMachineEvent::MarketTrade(t) => {

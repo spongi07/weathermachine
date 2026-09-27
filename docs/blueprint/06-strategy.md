@@ -1,4 +1,4 @@
-# 22–28 · Peak detection, probability, strategies A/B/C, unwind (+ EV)
+# 22–28 · Peak detection, probability, strategies A/B/C/D, market pooling, unwind (+ EV)
 
 > **The core trading belief is a HYPOTHESIS TO BACKTEST, not a fact:** once
 > the day's high has been reached and not retested for N minutes, it becomes
@@ -120,7 +120,8 @@ Conditions, all required:
 * model support ≥ 50;
 * data age ≤ 40 min;
 * book fresh (≤ 15 s) with an ask in [`min_price`, `max_price`] = [0.90, 0.99];
-* p_win = **minimum across views** of the lower-bound bucket probability;
+* p_win = **minimum across views** of the lower-bound bucket probability,
+  pooled with the market (§27b);
 * EV − `min_edge` (0.01) > 0 after fee and slippage (0.005);
 * not already positioned or pending;
 * size ≥ the market minimum.
@@ -140,8 +141,9 @@ approval tests.
 + 3 …) when the heating cycle appears finished.
 
 The conditions mirror A. The loss probability is the **maximum across views**
-of the upper-bound bucket probability, and distances are configurable
-(`distances = [1, 2, 3]`), so each is backtested separately.
+of the upper-bound bucket probability (its complement is pooled with the
+market, §27b), and distances are configurable (`distances = [1, 2, 3]`), so
+each is backtested separately.
 **HYPOTHESIS TO BACKTEST.** NO(+1) versus NO(+2/+3) EV after fees. Deep NO
 contracts are priced near 0.99, where one loss erases about 100 wins.
 **TESTING.** As for A. `paper_lifecycle_signal_risk_fill_settle` approves
@@ -167,6 +169,83 @@ waiting (brief §17).
 
 **HYPOTHESIS TO BACKTEST.** C has higher EV than A+B net of both legs' costs.
 Do not assume it.
+
+## 27a. DECIDED OUTCOMES — strategy D
+
+**PURPOSE.** Trade the only case in which the answer is certain. The daily
+high can only rise. Once *every* resolution view has seen a high of `H`
+whole degrees:
+
+* a bucket entirely below `H` cannot win, so its **NO** wins;
+* an open-ended top bucket "≥ L" with `L ≤ H` has won, so its **YES** wins.
+
+No model is involved (`p_win = 1`). The edge is speed. Right after a report
+raises the high, quotes on the bucket that just died can still be stale.
+D (`CertainOutcomes`, `wm-strategy::certain`) evaluates on the observation
+event itself; A and B need a confirmation window.
+
+Conditions, all required (`[strategies.certain]`):
+
+* the lowest high across views decides, so every view must have seen it;
+* a high more than `max_jump_tenths` (3 °C) above the report before it is
+  trusted only once a later report repeats it (`high_jump_tenths`,
+  `retests`);
+* data age ≤ 40 min; book fresh (≤ 15 s); ask ≤ `max_price` (0.99);
+* profit per share ≥ `min_edge` (0.02) after the taker fee and a 0.002
+  slippage allowance. The default skips long-dead buckets quoted at
+  0.98–0.99: a settlement discount of well under a cent per share is not
+  worth the resolution risk, nor the daily exposure budget ($60) it would
+  use up;
+* not already positioned or pending; market accepting orders; size ≥ the
+  market minimum.
+
+The risk engine applies all its gates, D included: correction cooldown,
+spread ≤ 0.05, no one-sided book, depth, exposure. The market's midpoint
+is recorded next to each evaluation but not used: a stale quote on a
+decided outcome is the opportunity, not a warning.
+
+**RESIDUAL RISK.** An erroneous report that is corrected later (the jump
+guard and the correction cooldown cover most of it), and a resolution
+source that differs from the METAR high. `research market` counts how often
+the METAR high matched the resolved bucket.
+**TESTING.** Five `strategy_d_*` tests in `wm-strategy/tests/strategies.rs`
+(NO below the high; top bucket YES; jump guard; views must agree; books,
+positions, data age, edge). Kernel tests `a_new_high_is_traded_on_the_observation_event_itself`
+(including an unconfirmed quiet book) and
+`a_corrected_high_blocks_certain_outcome_trades`.
+
+## 27b. The book as information — market pooling (A and B)
+
+**PURPOSE.** On these contracts the market predicts better than public
+forecasts ([research](../research/edge-research.md)). When it disagrees with
+the model, the model is more likely wrong.
+
+`Pooling { weight, max_spread, max_book_age_ms }`:
+
+* **Market probability.** The midpoint of the traded token's own book if it
+  is fresh, two-sided, not crossed and its spread is ≤ `max_market_spread`
+  (0.10); otherwise one minus the complementary token's midpoint; otherwise
+  none.
+* **Pool.** `logit p = w·logit(market) + (1 − w)·logit(model)` with
+  `w = market_weight` (default 0.5; 0 = model only), **capped at the
+  model's probability**. The market can veto a trade but never create one.
+  With consistent books the cap is a no-op, because the midpoint is at or
+  below the ask.
+* The pooled probability drives EV, break-even and the edge blocker. The
+  blocker names the market when it pulled the probability down. The
+  rationale records model, market and the result. The dashboard ladder
+  shows the probability used ("used") and computes EVs from it.
+
+**HYPOTHESIS TO BACKTEST.** Which weight predicts best at EHAM. `weather-machine research market`
+scores w ∈ {0, 0.25, 0.5, 0.75, 1} on settled markets (§36a). If the market
+alone is best, A and B have no information edge. With w = 1 they
+effectively stop trading, because the midpoint never clears its own ask.
+**TESTING.** `log_pool_averages_log_odds`,
+`pooled_win_probability_never_exceeds_the_model`,
+`market_probability_needs_a_fresh_tight_two_sided_book`,
+`strategy_a_lets_the_market_veto_but_not_create_a_trade`,
+`strategy_b_pools_each_bucket_with_its_own_book`, plus configuration defaults
+and validation tests.
 
 ## 28. UnwindEngine
 

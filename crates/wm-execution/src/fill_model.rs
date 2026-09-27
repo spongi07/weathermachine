@@ -161,6 +161,7 @@ mod tests {
             exchange_ts: None,
             received_at: Utc::now(),
             hash: None,
+            confirmed_at: None,
         };
         b.normalize();
         b

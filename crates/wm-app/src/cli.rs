@@ -4,6 +4,7 @@
 use crate::config::AppConfig;
 use crate::demo::{self, DemoOptions};
 use crate::http::{self, BasicAuth, Publisher, Shared};
+use crate::market_research::{self, MarketResearchClients, MarketResearchPlan, ResearchProgress};
 use crate::runtime::{self, RuntimeContext};
 use crate::setup::Providers;
 use crate::training::{self, Progress, TrainPlan};
@@ -17,7 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
-    BacktestConfig, BacktestReport, Fidelity, StudyConfig, import_iem_csv, run_backtest, study,
+    BacktestConfig, BacktestReport, Fidelity, MarketStudyConfig, StudyConfig, import_iem_csv,
+    run_backtest, study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{RunId, StationId};
@@ -27,7 +29,7 @@ use wm_core::time::{Clock, SystemClock};
 use wm_core::trading::RunMode;
 use wm_core::units::Price;
 use wm_execution::SimConfig;
-use wm_polymarket::{GammaClient, build_market, event_slug};
+use wm_polymarket::{DataApiClient, GammaClient, build_market, event_slug};
 use wm_storage::PgStore;
 use wm_strategy::ev::{break_even_table, research_price_grid};
 use wm_weather::{
@@ -150,6 +152,29 @@ pub enum ResearchCommand {
         /// Write the Markdown report here.
         #[arg(long)]
         report_out: Option<PathBuf>,
+    },
+    /// Model versus market on settled markets: who predicts better, the best
+    /// market_weight, who is sure of the winner first, how fast dead buckets
+    /// reprice after a new high, and whether the METAR high matched the
+    /// resolution. Downloads trade history from the Polymarket Data API
+    /// (settled days are cached) and uses the training's METAR history.
+    Market {
+        /// First local date (default: 60 days before --to).
+        #[arg(long)]
+        from: Option<NaiveDate>,
+        /// Last local date (default: yesterday).
+        #[arg(long)]
+        to: Option<NaiveDate>,
+        /// Seconds from an observation to the bot's decision.
+        #[arg(long, default_value_t = 180)]
+        delay_secs: i64,
+        /// Markdown report (default: <data_dir>/research/<station>-market.md;
+        /// the JSON report is written beside it).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Also print the whole Markdown report (for container logs).
+        #[arg(long)]
+        print: bool,
     },
 }
 
@@ -350,6 +375,16 @@ pub async fn execute(cli: Cli) -> Result<()> {
             model_out,
             report_out,
         ),
+        Command::Research {
+            command:
+                ResearchCommand::Market {
+                    from,
+                    to,
+                    delay_secs,
+                    out,
+                    print,
+                },
+        } => research_market(cli.config, from, to, delay_secs, out, print).await,
         Command::Backtest {
             synthetic_days,
             journal,
@@ -476,6 +511,143 @@ async fn model_train(
     }
     println!("report: {}", plan.report_out.display());
     println!("restart the service to load the model");
+    Ok(())
+}
+
+/// `research market`: the model against the market on settled days.
+async fn research_market(
+    config: Option<PathBuf>,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    delay_secs: i64,
+    out: Option<PathBuf>,
+    print: bool,
+) -> Result<()> {
+    let cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    let user_agent = cfg
+        .user_agent()
+        .context("set WM_CONTACT so requests identify Weather Machine")?;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let providers = Providers::build(&cfg, Arc::clone(&clock), &user_agent)?;
+    let loc = cfg.locations.first().context("no location configured")?;
+    let spec = setup::market_spec(loc)?;
+    let today = wm_core::time::local_date(clock.now(), spec.timezone);
+    let to = to.unwrap_or(today - Duration::days(1));
+    if to >= today {
+        bail!("--to must be before today ({today}): only settled days can be scored");
+    }
+    let from = from.unwrap_or(to - Duration::days(59));
+    let fetcher = |name: &str| {
+        providers
+            .fetcher(name)
+            .cloned()
+            .with_context(|| format!("providers.{name} is disabled in the configuration"))
+    };
+    let p = &cfg.file.providers;
+    let gamma = GammaClient::new(fetcher("polymarket_gamma")?, &p.polymarket_gamma.base_url);
+    let data = DataApiClient::new(fetcher("polymarket_data")?, &p.polymarket_data.base_url);
+    let archive = IemArchive::new(fetcher("iem")?, &p.iem.base_url);
+    let model_out = {
+        let mut c = cfg.clone();
+        c.file.model.auto_train.enabled = true;
+        setup::model_path(&c)
+    }
+    .context("no model path: set WM_MODEL_PATH or [model.auto_train].data_dir")?;
+    let train = TrainPlan::from_config(&cfg, model_out, clock.now().date_naive())?;
+    // Evaluate the model as live trading uses it: with the forecast only if
+    // the installed model adopted it.
+    let use_forecast = match setup::find_model(&cfg) {
+        setup::ModelLoad::Loaded(m) => {
+            println!(
+                "installed model {}: evaluated {} the day-1 forecast",
+                m.id,
+                if m.uses_forecast() { "with" } else { "without" }
+            );
+            m.uses_forecast()
+        }
+        _ => {
+            println!("no installed model: evaluated without the forecast");
+            false
+        }
+    };
+    let forecast = setup::forecast_client(&cfg, &providers);
+    let yes = cfg.buy_yes();
+    let study = MarketStudyConfig {
+        knowledge_delay: Duration::seconds(delay_secs.clamp(0, 3_600)),
+        configured_weight: yes.market_weight,
+        min_model_support: yes.min_model_support,
+        taker_fee_rate: loc.market.taker_fee_rate.as_f64(),
+        ..MarketStudyConfig::new(train.station.clone(), train.tz, train.peak.clone())
+    };
+    let data_dir = PathBuf::from(&cfg.file.model.auto_train.data_dir);
+    let lower = train.station.as_str().to_ascii_lowercase();
+    let plan = MarketResearchPlan {
+        cache_dir: data_dir
+            .join("research")
+            .join("polymarket")
+            .join(train.station.as_str()),
+        report_out: out
+            .unwrap_or_else(|| data_dir.join("research").join(format!("{lower}-market.md"))),
+        train,
+        spec,
+        from,
+        to,
+        study,
+        use_forecast,
+    };
+    println!(
+        "model versus market for {} → {} (decision = observation + {} s)",
+        plan.from,
+        plan.to,
+        plan.study.knowledge_delay.num_seconds()
+    );
+    let progress = |p: ResearchProgress| match p {
+        ResearchProgress::Market { date, done, total } => {
+            println!(
+                "[{}/{total}] {date}: event and trades (cached when settled)",
+                done + 1
+            );
+        }
+        ResearchProgress::History(Progress::Downloading { year, done, total }) => {
+            println!(
+                "METAR history [{}/{total}] {year}: cached or downloading from IEM",
+                done + 1
+            );
+        }
+        ResearchProgress::History(Progress::Forecast { year, .. }) => {
+            println!("forecast history {year}: cached or downloading from Open-Meteo");
+        }
+        ResearchProgress::History(Progress::Training { .. }) => {}
+        ResearchProgress::Studying { market_days } => {
+            println!("replaying the history and scoring {market_days} settled market days…");
+        }
+    };
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: forecast.as_ref(),
+    };
+    let o = market_research::run(&clients, &plan, clock.now(), &progress, &mut stop_rx).await?;
+    println!(
+        "{} settled market days ({} cached, {} downloaded); {} dates without one",
+        o.report.market_days,
+        o.days_cached,
+        o.days_downloaded,
+        o.unavailable.len()
+    );
+    for line in &o.report.verdict {
+        println!("• {line}");
+    }
+    println!("report: {}", o.markdown.display());
+    println!("json:   {}", o.json.display());
+    if print {
+        let md = std::fs::read_to_string(&o.markdown)
+            .with_context(|| format!("reading {}", o.markdown.display()))?;
+        println!("\n{md}");
+    }
     Ok(())
 }
 

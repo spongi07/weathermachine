@@ -417,6 +417,7 @@ fn book_event(seq: u64, at: DateTime<Utc>, token: &str) -> EventEnvelope {
                 exchange_ts: None,
                 received_at: at,
                 hash: None,
+                confirmed_at: None,
             },
         }),
     );
@@ -461,6 +462,15 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
     w.seq = 1501;
     events.push(w);
     events.extend((1502..=1504).map(|i| book_event(i, now, "tok-b")));
+    let mut heartbeat = EventEnvelope::new(
+        old,
+        EventSource::Live,
+        WeatherMachineEvent::MarketStreamHeartbeat(wm_core::event::StreamHeartbeatEvent {
+            connected_since: old,
+        }),
+    );
+    heartbeat.seq = 1505;
+    events.push(heartbeat);
     let decision = DecisionRecord {
         decision_id: DecisionId(7),
         strategy: StrategyId::new("A_buy_yes_final_high").unwrap(),
@@ -525,7 +535,7 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
     )
     .await
     .unwrap();
-    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 1504);
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 1505);
     assert_eq!(count(s, "SELECT count(*) FROM decision_snapshots").await, 1);
     assert_eq!(count(s, "SELECT count(*) FROM fills").await, 1);
     assert_eq!(
@@ -540,7 +550,7 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
 
     // A batch whose last statement fails (fill for an unknown order) leaves
     // nothing behind: its journal rows are rolled back with it.
-    let more: Vec<EventEnvelope> = (1505..=1510).map(|i| book_event(i, now, "tok-b")).collect();
+    let more: Vec<EventEnvelope> = (1506..=1511).map(|i| book_event(i, now, "tok-b")).collect();
     let failed = s
         .persist_engine_batch(
             &run,
@@ -554,15 +564,16 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
         )
         .await;
     assert!(failed.is_err());
-    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 1504);
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 1505);
     assert_eq!(count(s, "SELECT count(*) FROM fills").await, 1);
 
-    // Retention: old order-book updates go, everything else stays.
+    // Retention: old order-book updates and stream heartbeats go, everything
+    // else stays.
     let deleted = s
         .prune_journal_books(now - Duration::days(7))
         .await
         .unwrap();
-    assert_eq!(deleted, 1500);
+    assert_eq!(deleted, 1501);
     assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 4);
     assert_eq!(
         count(

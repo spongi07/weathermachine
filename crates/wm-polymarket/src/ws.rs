@@ -4,7 +4,9 @@
 //! `{"assets_ids":[…],"type":"market"}`; the server sends `book` snapshots,
 //! `price_change` deltas (current format: `price_changes[]`; legacy:
 //! `changes[]`), `tick_size_change` and `last_trade_price`. Clients send
-//! `PING` every 10 s. On disconnect, books are marked stale and the stream
+//! `PING` every 10 s; each `PONG` becomes a [`StreamHeartbeatEvent`], which
+//! keeps books that did not change current (the server only sends changes).
+//! On disconnect, books are marked stale, heartbeats stop and the stream
 //! reconnects through its own rate-limit gate.
 
 use chrono::{DateTime, Utc};
@@ -16,7 +18,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 use wm_core::event::{
-    EventEnvelope, EventSource, MarketTradeEvent, OrderBookEvent, WeatherMachineEvent,
+    EventEnvelope, EventSource, MarketTradeEvent, OrderBookEvent, StreamHeartbeatEvent,
+    WeatherMachineEvent,
 };
 use wm_core::ids::TokenId;
 use wm_core::market::{BookLevel, OrderBook, Side, TradePrint};
@@ -282,6 +285,7 @@ impl LocalBook {
             exchange_ts: self.exchange_ts,
             received_at: self.received_at,
             hash: self.hash.clone(),
+            confirmed_at: None,
         }
     }
 }
@@ -348,10 +352,16 @@ impl MarketStream {
         serde_json::json!({ "assets_ids": assets.iter().map(|a| a.as_str()).collect::<Vec<_>>(), "type": "market" }).to_string()
     }
 
-    async fn emit(&mut self, out: &mpsc::Sender<EventEnvelope>, events: Vec<WsEvent>) -> bool {
+    async fn emit(
+        &mut self,
+        out: &mpsc::Sender<EventEnvelope>,
+        events: Vec<WsEvent>,
+        connected_since: DateTime<Utc>,
+    ) -> bool {
         let now = self.clock.now();
         let mut touched: Vec<String> = Vec::new();
         let mut trades = Vec::new();
+        let mut heartbeat = false;
         for e in events {
             match e {
                 WsEvent::Book {
@@ -409,7 +419,8 @@ impl MarketStream {
                         });
                     }
                 }
-                WsEvent::Pong | WsEvent::Other => {}
+                WsEvent::Pong => heartbeat = true,
+                WsEvent::Other => {}
             }
         }
         touched.sort();
@@ -430,6 +441,18 @@ impl MarketStream {
         }
         for t in trades {
             let ev = WeatherMachineEvent::MarketTrade(MarketTradeEvent { trade: t });
+            if out
+                .send(EventEnvelope::new(now, EventSource::Live, ev))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        if heartbeat {
+            let ev = WeatherMachineEvent::MarketStreamHeartbeat(StreamHeartbeatEvent {
+                connected_since,
+            });
             if out
                 .send(EventEnvelope::new(now, EventSource::Live, ev))
                 .await
@@ -506,6 +529,7 @@ impl MarketStream {
             self.status.connected = true;
             self.status.subscribed_assets = current.len();
             self.publish();
+            let connected_since = self.clock.now();
             let mut ping = tokio::time::interval(self.cfg.ping_interval);
             ping.tick().await;
             let reason = loop {
@@ -515,7 +539,7 @@ impl MarketStream {
                             self.status.messages_total += 1;
                             self.status.last_message_at = Some(self.clock.now());
                             match parse_ws_message(t.as_str()) {
-                                Ok(events) => { if !self.emit(&out, events).await { break "receiver closed".to_owned(); } }
+                                Ok(events) => { if !self.emit(&out, events, connected_since).await { break "receiver closed".to_owned(); } }
                                 Err(e) => { tracing::warn!(error = %e, "unparseable WS message"); }
                             }
                         }
@@ -551,6 +575,32 @@ impl MarketStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_pong_confirms_books_of_the_current_connection() {
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .unwrap_or_default();
+        let clock = Arc::new(wm_core::time::ManualClock::new(t0));
+        let gate = ProviderGate::new(
+            wm_core::ids::ProviderId::polymarket_ws(),
+            wm_net::RateLimitPolicy::local_test(),
+            clock.clone(),
+            1,
+        );
+        let mut stream = MarketStream::new(MarketStreamConfig::default(), gate, clock.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        assert!(stream.emit(&tx, vec![WsEvent::Pong], t0).await);
+        let ev = rx.try_recv().unwrap();
+        assert_eq!(ev.available_at, t0);
+        assert!(matches!(
+            ev.event,
+            WeatherMachineEvent::MarketStreamHeartbeat(StreamHeartbeatEvent { connected_since }) if connected_since == t0
+        ));
+        // No PONG, no heartbeat.
+        assert!(stream.emit(&tx, vec![WsEvent::Other], t0).await);
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn parses_book_and_price_changes_both_formats() {

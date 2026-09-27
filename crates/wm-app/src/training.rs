@@ -176,11 +176,19 @@ pub struct TrainOutcome {
 
 /// One year's history file on disk and its provenance.
 #[derive(Debug, Clone)]
-struct YearFile {
-    year: i32,
-    path: PathBuf,
-    sha256: String,
-    rows: usize,
+pub(crate) struct YearFile {
+    pub(crate) year: i32,
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: String,
+    pub(crate) rows: usize,
+}
+
+/// The station's METAR history on disk.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct IemHistory {
+    pub(crate) files: Vec<YearFile>,
+    pub(crate) downloaded: u32,
+    pub(crate) cached: u32,
 }
 
 /// Download (or reuse) the history, train, validate and install the model.
@@ -193,6 +201,41 @@ pub async fn train(
     progress: &(dyn Fn(Progress) + Send + Sync),
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<TrainOutcome> {
+    let IemHistory {
+        files,
+        downloaded,
+        cached,
+    } = iem_history(archive, plan, audit, progress, shutdown).await?;
+
+    // Forecast history (optional: failure leaves the forecast unused).
+    let fc = match (&plan.forecast, forecast) {
+        (Some(fp), Some(client)) => Some(
+            match forecast_history(client, plan, fp, audit, progress, shutdown).await {
+                Ok(h) => h,
+                Err(e) if *shutdown.borrow() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "forecast history unavailable: training without it");
+                    ForecastDownload::failed(format!("{e:#}"))
+                }
+            },
+        ),
+        (Some(_), None) => Some(ForecastDownload::failed(
+            "the open_meteo provider is disabled".into(),
+        )),
+        (None, _) => None,
+    };
+    train_on(plan, &files, downloaded, cached, fc, progress).await
+}
+
+/// Download (or reuse the cached) METAR history years of `plan`: finished
+/// years are cached for good, the current year is fetched up to today.
+pub(crate) async fn iem_history(
+    archive: &IemArchive,
+    plan: &TrainPlan,
+    audit: Option<&Arc<dyn IngestSink>>,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<IemHistory> {
     std::fs::create_dir_all(&plan.cache_dir)
         .with_context(|| format!("creating {}", plan.cache_dir.display()))?;
     let years = plan.years();
@@ -274,25 +317,22 @@ pub async fn train(
         downloaded += 1;
         tracing::info!(station = %plan.station, year, rows = fetched.rows, "IEM history year downloaded");
     }
+    Ok(IemHistory {
+        files,
+        downloaded,
+        cached,
+    })
+}
 
-    // Forecast history (optional: failure leaves the forecast unused).
-    let fc = match (&plan.forecast, forecast) {
-        (Some(fp), Some(client)) => Some(
-            match forecast_history(client, plan, fp, audit, progress, shutdown).await {
-                Ok(h) => h,
-                Err(e) if *shutdown.borrow() => return Err(e),
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "forecast history unavailable: training without it");
-                    ForecastDownload::failed(format!("{e:#}"))
-                }
-            },
-        ),
-        (Some(_), None) => Some(ForecastDownload::failed(
-            "the open_meteo provider is disabled".into(),
-        )),
-        (None, _) => None,
-    };
-
+/// Train, validate and install the model from downloaded history.
+async fn train_on(
+    plan: &TrainPlan,
+    files: &[YearFile],
+    downloaded: u32,
+    cached: u32,
+    fc: Option<ForecastDownload>,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+) -> Result<TrainOutcome> {
     // CPU-bound part off the async runtime.
     let plan2 = plan.clone();
     let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
@@ -359,7 +399,7 @@ pub async fn train(
         }
         (None, None) => {}
     }
-    md.push_str(&provenance(plan, &files, &model));
+    md.push_str(&provenance(plan, files, &model));
     if let Some(f) = &fc {
         md.push_str(&forecast_provenance(plan, f));
     }
@@ -441,9 +481,9 @@ fn finalize(
 
 /// Downloaded forecast history.
 #[derive(Debug, Clone, Default)]
-struct ForecastDownload {
+pub(crate) struct ForecastDownload {
     /// Valid time and value (tenths °C), known hours only.
-    hourly: Vec<(DateTime<Utc>, i32)>,
+    pub(crate) hourly: Vec<(DateTime<Utc>, i32)>,
     files: Vec<YearFile>,
     downloaded: u32,
     cached: u32,
@@ -467,7 +507,7 @@ impl ForecastDownload {
 /// requested at most once per training, and the gate's circuit breaker never
 /// sees a string of rejections). A rejection that states the archive's first
 /// date is retried once from that date.
-async fn forecast_history(
+pub(crate) async fn forecast_history(
     client: &OpenMeteoPreviousRuns,
     plan: &TrainPlan,
     fp: &ForecastPlan,
@@ -629,7 +669,7 @@ fn forecast_provenance(plan: &TrainPlan, f: &ForecastDownload) -> String {
     s
 }
 
-fn import_all(paths: &[PathBuf], station: &StationId) -> Result<Vec<Observation>> {
+pub(crate) fn import_all(paths: &[PathBuf], station: &StationId) -> Result<Vec<Observation>> {
     let mut all = Vec::new();
     for p in paths {
         let f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
@@ -687,7 +727,7 @@ async fn record(audit: Option<&Arc<dyn IngestSink>>, r: &ProviderRequestRecord) 
 }
 
 /// Write via a temporary file in the same directory and rename it into place.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("installing {}", path.display()))?;

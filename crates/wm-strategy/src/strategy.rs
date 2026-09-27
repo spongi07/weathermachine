@@ -73,11 +73,18 @@ pub struct BucketEvaluation {
     pub token: TokenId,
     pub ask: Option<Price>,
     pub bid: Option<Price>,
+    /// Probability of winning used for EV (the blend of model and market).
     pub p_win: Option<f64>,
     pub ev_per_share: Option<f64>,
     pub break_even: Option<f64>,
     pub signal: bool,
     pub blockers: Vec<String>,
+    /// The model's probability of winning, before blending with the market.
+    #[serde(default)]
+    pub model_p: Option<f64>,
+    /// The market-implied probability of winning (book midpoint).
+    #[serde(default)]
+    pub market_p: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -167,6 +174,105 @@ pub fn max_p_in_bucket(
     any.then_some((p, support))
 }
 
+/// How a strategy combines its model with the market.
+///
+/// The book is information: when it disagrees with the model, the model is
+/// more likely wrong than the market (prediction markets beat forecast models
+/// on these contracts). The pooled probability is capped at the model's, so
+/// the market can veto a trade but never create one — a trade still needs the
+/// model's own edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pooling {
+    /// Weight of the market-implied probability (0 = model only, 1 = market only).
+    pub weight: f64,
+    /// Widest spread at which a book's midpoint counts as a probability.
+    pub max_spread: Price,
+    pub max_book_age_ms: i64,
+}
+
+impl Pooling {
+    /// Market-implied probability that a token pays out: the midpoint of its
+    /// own book, else one minus the midpoint of the complementary token's
+    /// book. `None` without a fresh two-sided book with a spread of at most
+    /// `max_spread` — a wide or stale book carries no reliable probability.
+    pub fn market_probability(
+        &self,
+        own: Option<&OrderBook>,
+        complement: Option<&OrderBook>,
+        now: DateTime<Utc>,
+    ) -> Option<f64> {
+        let mid = |book: Option<&OrderBook>| {
+            let b = book?;
+            if b.age_ms(now) > self.max_book_age_ms {
+                return None;
+            }
+            let (bid, ask) = (b.best_bid()?, b.best_ask()?);
+            (ask.price >= bid.price && ask.price.saturating_sub(bid.price) <= self.max_spread)
+                .then(|| (bid.price.as_f64() + ask.price.as_f64()) / 2.0)
+        };
+        mid(own).or_else(|| mid(complement).map(|m| 1.0 - m))
+    }
+
+    /// Probability of winning used to open a position: the logarithmic pool of
+    /// model and market ([`log_pool`]), never above the model.
+    pub fn win_probability(&self, model: f64, market: Option<f64>) -> f64 {
+        log_pool(model, market, self.weight).min(model)
+    }
+}
+
+/// Logarithmic opinion pool with `weight` on the market:
+/// `σ(w·logit(market) + (1−w)·logit(model))`. Without a market probability,
+/// or with weight 0, the model's probability.
+pub fn log_pool(model: f64, market: Option<f64>, weight: f64) -> f64 {
+    let w = weight.clamp(0.0, 1.0);
+    match market {
+        Some(m) if w > 0.0 => {
+            let logit = |p: f64| {
+                let p = p.clamp(1e-6, 1.0 - 1e-6);
+                (p / (1.0 - p)).ln()
+            };
+            let z = w * logit(m) + (1.0 - w) * logit(model);
+            1.0 / (1.0 + (-z).exp())
+        }
+        _ => model,
+    }
+}
+
+/// Audit line: how the market changed the model's probability.
+fn pooling_note(model: f64, market: Option<f64>, used: f64, weight: f64) -> String {
+    match market {
+        Some(m) if weight > 0.0 => {
+            format!("model {model:.4}, market {m:.4} → used {used:.4} (market weight {weight:.2})")
+        }
+        Some(_) => "model only (market weight 0)".to_owned(),
+        None => "model only: no fresh, tight book for a market probability".to_owned(),
+    }
+}
+
+/// Edge blocker, naming the market when it pulled the probability down.
+fn edge_blocker(
+    e: f64,
+    min_edge: f64,
+    model: Option<f64>,
+    market: Option<f64>,
+    used: Option<f64>,
+) -> String {
+    match (model, market, used) {
+        (Some(pm), Some(m), Some(pu)) if pu < pm => {
+            format!("edge {e:.4} < {min_edge:.4} (market {m:.3} pulls model {pm:.3} to {pu:.3})")
+        }
+        _ => format!("edge {e:.4} < {min_edge:.4}"),
+    }
+}
+
+pub const fn default_market_weight() -> f64 {
+    0.5
+}
+
+pub fn default_max_market_spread() -> Price {
+    Price::saturating_from_micros(100_000)
+}
+
 /// Whole-share quantity for a notional at a price, respecting the market minimum.
 pub fn size_for(notional: Usd, price: Price, min_size: Shares) -> Option<Shares> {
     let raw = shares_for_notional(notional, price, Rounding::Down);
@@ -174,7 +280,7 @@ pub fn size_for(notional: Usd, price: Price, min_size: Shares) -> Option<Shares>
     (shares.micros() > 0 && shares >= min_size).then_some(shares)
 }
 
-fn holds_or_pending(ctx: &StrategyContext<'_>, token: &TokenId) -> bool {
+pub(crate) fn holds_or_pending(ctx: &StrategyContext<'_>, token: &TokenId) -> bool {
     ctx.pending_tokens.contains(token)
         || ctx
             .positions
@@ -199,6 +305,23 @@ pub struct BuyYesConfig {
     pub max_book_age_ms: i64,
     pub slippage_allowance: Price,
     pub notional: Usd,
+    /// Weight of the market-implied probability in the probability used for
+    /// EV (0 = model only, 1 = market only), see [`Pooling`].
+    #[serde(default = "default_market_weight")]
+    pub market_weight: f64,
+    /// Widest spread at which the book's midpoint counts as a market probability.
+    #[serde(default = "default_max_market_spread")]
+    pub max_market_spread: Price,
+}
+
+impl BuyYesConfig {
+    pub fn pooling(&self) -> Pooling {
+        Pooling {
+            weight: self.market_weight,
+            max_spread: self.max_market_spread,
+            max_book_age_ms: self.max_book_age_ms,
+        }
+    }
 }
 
 impl Default for BuyYesConfig {
@@ -214,6 +337,8 @@ impl Default for BuyYesConfig {
             max_book_age_ms: 15_000,
             slippage_allowance: Price::saturating_from_micros(5_000),
             notional: Usd::from_whole(10),
+            market_weight: default_market_weight(),
+            max_market_spread: default_max_market_spread(),
         }
     }
 }
@@ -257,7 +382,10 @@ impl Strategy for BuyYesFinalHigh {
         let ask = book.and_then(OrderBook::best_ask);
         let bid = book.and_then(OrderBook::best_bid);
         let mut blockers = Vec::new();
-        let p = min_p_in_bucket(ctx.views, high, &outcome.bucket);
+        let model = min_p_in_bucket(ctx.views, high, &outcome.bucket);
+        let pooling = self.config.pooling();
+        let market_p = pooling.market_probability(book, ctx.books.get(&outcome.no_token), ctx.now);
+        let p = model.map(|(pm, support)| (pooling.win_probability(pm, market_p), support));
         let price = ask.map(|a| a.price);
         let (ev, be) = match (p, price) {
             (Some((pw, _)), Some(pr)) => (
@@ -315,7 +443,13 @@ impl Strategy for BuyYesFinalHigh {
         if let Some(e) = ev
             && e < self.config.min_edge
         {
-            blockers.push(format!("edge {e:.4} < {:.4}", self.config.min_edge));
+            blockers.push(edge_blocker(
+                e,
+                self.config.min_edge,
+                model.map(|x| x.0),
+                market_p,
+                p.map(|x| x.0),
+            ));
         }
         if holds_or_pending(ctx, token) {
             blockers.push("already positioned".into());
@@ -341,6 +475,8 @@ impl Strategy for BuyYesFinalHigh {
             break_even: be,
             signal,
             blockers,
+            model_p: model.map(|x| x.0),
+            market_p,
         });
         if signal
             && let (Some((pw, support)), Some(pr), Some(sh), Some(e), Some(b)) =
@@ -366,6 +502,12 @@ impl Strategy for BuyYesFinalHigh {
                 rationale: vec![
                     format!("high {high}{} confirmed {msh}m", ctx.market.unit.symbol()),
                     format!("p_win {pw:.4} (support {support}) vs break-even {b:.4}"),
+                    pooling_note(
+                        model.map_or(pw, |x| x.0),
+                        market_p,
+                        pw,
+                        self.config.market_weight,
+                    ),
                 ],
             });
         }
@@ -391,6 +533,21 @@ pub struct BuyNoConfig {
     pub max_book_age_ms: i64,
     pub slippage_allowance: Price,
     pub notional: Usd,
+    /// Weight of the market-implied probability, see [`BuyYesConfig::market_weight`].
+    #[serde(default = "default_market_weight")]
+    pub market_weight: f64,
+    #[serde(default = "default_max_market_spread")]
+    pub max_market_spread: Price,
+}
+
+impl BuyNoConfig {
+    pub fn pooling(&self) -> Pooling {
+        Pooling {
+            weight: self.market_weight,
+            max_spread: self.max_market_spread,
+            max_book_age_ms: self.max_book_age_ms,
+        }
+    }
 }
 
 impl Default for BuyNoConfig {
@@ -407,6 +564,8 @@ impl Default for BuyNoConfig {
             max_book_age_ms: 15_000,
             slippage_allowance: Price::saturating_from_micros(5_000),
             notional: Usd::from_whole(10),
+            market_weight: default_market_weight(),
+            max_market_spread: default_max_market_spread(),
         }
     }
 }
@@ -478,7 +637,10 @@ impl BuyNoAboveHigh {
         let price = book.and_then(OrderBook::best_ask).map(|l| l.price);
         let bid = book.and_then(OrderBook::best_bid).map(|l| l.price);
         let loss = max_p_in_bucket(ctx.views, high, &outcome.bucket);
-        let p_win = loss.map(|(pl, _)| 1.0 - pl);
+        let model_p = loss.map(|(pl, _)| 1.0 - pl);
+        let pooling = self.config.pooling();
+        let market_p = pooling.market_probability(book, ctx.books.get(&outcome.yes_token), ctx.now);
+        let p_win = model_p.map(|pm| pooling.win_probability(pm, market_p));
         let ev = match (p_win, price) {
             (Some(pw), Some(pr)) => {
                 Some(ev_per_share(pw, pr, &fees, self.config.slippage_allowance))
@@ -525,7 +687,13 @@ impl BuyNoAboveHigh {
         if let Some(e) = ev
             && e < self.config.min_edge
         {
-            blockers.push(format!("edge {e:.4} < {:.4}", self.config.min_edge));
+            blockers.push(edge_blocker(
+                e,
+                self.config.min_edge,
+                model_p,
+                market_p,
+                p_win,
+            ));
         }
         if holds_or_pending(ctx, token) {
             blockers.push("already positioned".into());
@@ -565,6 +733,12 @@ impl BuyNoAboveHigh {
                         outcome.label
                     ),
                     format!("p_win {pw:.4} vs break-even {b:.4}"),
+                    pooling_note(
+                        model_p.unwrap_or(pw),
+                        market_p,
+                        pw,
+                        self.config.market_weight,
+                    ),
                 ],
             });
         }
@@ -580,6 +754,8 @@ impl BuyNoAboveHigh {
             break_even: be,
             signal,
             blockers,
+            model_p,
+            market_p,
         }
     }
 }

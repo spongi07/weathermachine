@@ -25,11 +25,11 @@ reported, never just the first. Client order ids are deterministic
 | WeatherFreshness | latest report ≤ 40 min (exact comparison) | weather stale ⇒ no new position |
 | WeatherCoverage | no gap > 75 min in the local day series | (incomplete day may hide the high) |
 | CorrectionCooldown | 10 min after a correction | — |
-| MarketData | book present, ≤ 15 s old, correct token | market data stale ⇒ no new position |
+| MarketData | book present, ≤ 15 s old (received or confirmed by the stream's heartbeat), correct token | market data stale ⇒ no new position |
 | Spread | ≤ 0.05 | maximum spread |
 | Liquidity | FAK/FOK: ask depth ≥ size at limit | minimum liquidity |
 | Tick / PriceBounds / MinSize | on tick; 0.01 ≤ price ≤ 0.99; ≥ market minimum | — |
-| MarketStatus | accepting orders, not closed, before end time | — |
+| MarketStatus | accepting orders, not closed, before end time (a daily market ends no earlier than its local day) | — |
 | ResolutionSpec | machine-tradable; human-approved hash if required (live) | resolution rules |
 | Partition | bucket set valid | correlated risk |
 | Duplicate | no live order on the token; decision id not reused | duplicate orders |

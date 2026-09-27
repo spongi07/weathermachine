@@ -102,6 +102,7 @@ fn config() -> BacktestConfig {
                 ..BuyNoConfig::default()
             },
             split_unwind: SplitUnwindConfig::default(),
+            certain: wm_strategy::CertainConfig::default(),
             unwind: UnwindConfig::default(),
             evaluate_on_book_updates: true,
             decision_log_capacity: 1000,

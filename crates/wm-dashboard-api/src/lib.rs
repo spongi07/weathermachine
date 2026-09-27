@@ -164,7 +164,12 @@ pub struct LadderRowDto {
     pub yes_ask_depth_usd: Option<f64>,
     pub implied_p: Option<f64>,
     pub model_p: Option<f64>,
+    /// P(YES) the strategies use: the model pooled with a reliable market
+    /// midpoint, never above the model.
+    #[serde(default)]
+    pub used_p: Option<f64>,
     pub edge: Option<f64>,
+    /// EVs after fee and slippage allowance, at the pooled probabilities.
     pub yes_ev: Option<f64>,
     pub no_ev: Option<f64>,
     pub yes_break_even: Option<f64>,

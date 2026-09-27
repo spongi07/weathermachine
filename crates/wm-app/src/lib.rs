@@ -11,6 +11,7 @@ pub mod dto;
 pub mod healthcheck;
 pub mod http;
 pub mod lite;
+pub mod market_research;
 pub mod runtime;
 pub mod setup;
 pub mod telemetry;

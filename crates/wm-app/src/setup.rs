@@ -94,6 +94,7 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
         buy_yes: cfg.buy_yes(),
         buy_no: cfg.buy_no(),
         split_unwind: cfg.split_unwind(),
+        certain: cfg.certain(),
         unwind: cfg.file.strategies.unwind.clone(),
         evaluate_on_book_updates: true,
         decision_log_capacity: 2_000,
@@ -219,6 +220,7 @@ fn provider_id(name: &str) -> ProviderId {
         "polymarket_clob" => ProviderId::polymarket_clob(),
         "iem" => ProviderId::iem(),
         "open_meteo" => ProviderId::open_meteo(),
+        "polymarket_data" => ProviderId::polymarket_data(),
         _ => ProviderId::polymarket_ws(),
     }
 }
@@ -226,7 +228,7 @@ fn provider_id(name: &str) -> ProviderId {
 impl Providers {
     pub fn build(cfg: &AppConfig, clock: Arc<dyn Clock>, user_agent: &str) -> Result<Self> {
         let p = &cfg.file.providers;
-        let sections: [(&'static str, &ProviderSection); 8] = [
+        let sections: [(&'static str, &ProviderSection); 9] = [
             ("awc", &p.awc),
             ("tgftp", &p.tgftp),
             ("nws_api", &p.nws_api),
@@ -235,6 +237,7 @@ impl Providers {
             ("polymarket_ws", &p.polymarket_ws),
             ("iem", &p.iem),
             ("open_meteo", &p.open_meteo),
+            ("polymarket_data", &p.polymarket_data),
         ];
         let mut fetchers = HashMap::new();
         let mut gates = HashMap::new();

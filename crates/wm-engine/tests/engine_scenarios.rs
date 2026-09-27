@@ -69,6 +69,7 @@ fn config(mode: RunMode) -> EngineConfig {
         buy_yes: BuyYesConfig::default(),
         buy_no: BuyNoConfig::default(),
         split_unwind: SplitUnwindConfig::default(),
+        certain: wm_strategy::CertainConfig::default(),
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: false,
         decision_log_capacity: 500,
@@ -617,6 +618,132 @@ fn a_swapped_model_is_used_from_the_next_evaluation() {
     let out = run(&mut e, vec![last], m.fees);
     assert!(!approvals(&out).is_empty());
     assert_eq!(e.snapshot().model_id, "fixed-test-model");
+}
+
+#[test]
+fn a_new_high_is_traded_on_the_observation_event_itself() {
+    // Up to 09:55Z the high is 15; 10:25Z 16; 10:55Z (known 10:58Z) 17 kills
+    // the 16 °C bucket. Its NO is still quoted at 0.75 (stale).
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut events = vec![
+        health_event("2026-06-30T22:00:00Z", ProviderHealthState::Healthy),
+        env(
+            "2026-06-30T22:00:01Z",
+            WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+        ),
+    ];
+    events.extend(night_and_morning());
+    events.push(obs_event("2026-07-01T10:25:00Z", 16));
+    let no16 = m.outcome_for_value(16).unwrap().no_token.clone();
+    events.push(env(
+        "2026-07-01T10:57:30Z",
+        WeatherMachineEvent::OrderBookUpdate(OrderBookEvent {
+            book: synthetic_book(
+                &no16,
+                Some("0.70"),
+                Some("0.75"),
+                200,
+                utc("2026-07-01T10:57:30Z"),
+            ),
+        }),
+    ));
+    // The book did not change for 30 s; the live feed confirms it at 10:57:55.
+    events.push(env(
+        "2026-07-01T10:57:55Z",
+        WeatherMachineEvent::MarketStreamHeartbeat(wm_core::event::StreamHeartbeatEvent {
+            connected_since: utc("2026-07-01T06:00:00Z"),
+        }),
+    ));
+    events.push(obs_event("2026-07-01T10:55:00Z", 17)); // known 10:58:00
+    let mut quiet = events.clone();
+    let mut e = Engine::new(config(RunMode::Paper), Arc::new(NoEdgeModel));
+    let outs = run(&mut e, events, m.fees);
+    // The observation event that raised the high carries the approval.
+    let decided = outs
+        .iter()
+        .find(|o| !o.approved.is_empty())
+        .expect("strategy D traded");
+    let a = &decided.approved[0];
+    assert_eq!(a.intent().bucket_label, "16°C");
+    assert_eq!(a.intent().outcome_side, OutcomeSide::No);
+    assert_eq!(a.intent().strategy.as_str(), "D_certain_outcome");
+    assert_eq!(
+        approvals(&outs).len(),
+        1,
+        "one decided bucket had a book: {:?}",
+        approvals(&outs)
+    );
+    // No model was needed, and nothing else was bought.
+    let snap = e.snapshot();
+    let pos: Vec<_> = snap
+        .positions
+        .iter()
+        .filter(|p| p.shares.micros() > 0)
+        .collect();
+    assert_eq!(pos.len(), 1);
+    assert_eq!(pos[0].instrument.token, no16);
+
+    // The same book from an earlier connection (reconnected at 10:57:40) is
+    // not confirmed: 30 s old, stale, no trade.
+    for ev in &mut quiet {
+        if let WeatherMachineEvent::MarketStreamHeartbeat(h) = &mut ev.event {
+            h.connected_since = utc("2026-07-01T10:57:40Z");
+        }
+    }
+    let mut e = Engine::new(config(RunMode::Paper), Arc::new(NoEdgeModel));
+    let outs = run(&mut e, quiet, m.fees);
+    assert!(approvals(&outs).is_empty(), "{:?}", approvals(&outs));
+}
+
+#[test]
+fn a_corrected_high_blocks_certain_outcome_trades() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut events = vec![
+        health_event("2026-06-30T22:00:00Z", ProviderHealthState::Healthy),
+        env(
+            "2026-06-30T22:00:01Z",
+            WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+        ),
+    ];
+    events.extend(night_and_morning());
+    // A correction to an earlier report arrives just before the new high.
+    let first = obs_event("2026-07-01T09:55:00Z", 15);
+    let WeatherMachineEvent::WeatherObservation(o) = &first.event else {
+        unreachable!()
+    };
+    let mut corrected = o.observation.clone();
+    corrected.version = 2;
+    corrected.temperature = Some(TempC::from_whole(14));
+    events.push(env(
+        "2026-07-01T10:50:00Z",
+        WeatherMachineEvent::WeatherCorrection(wm_core::event::CorrectionEvent {
+            previous: o.observation.clone(),
+            current: corrected,
+            labeled: true,
+        }),
+    ));
+    let no16 = m.outcome_for_value(16).unwrap().no_token.clone();
+    events.push(obs_event("2026-07-01T10:25:00Z", 16));
+    events.push(env(
+        "2026-07-01T10:57:30Z",
+        WeatherMachineEvent::OrderBookUpdate(OrderBookEvent {
+            book: synthetic_book(
+                &no16,
+                Some("0.70"),
+                Some("0.75"),
+                200,
+                utc("2026-07-01T10:57:30Z"),
+            ),
+        }),
+    ));
+    events.push(obs_event("2026-07-01T10:55:00Z", 17));
+    let mut e = Engine::new(config(RunMode::Paper), Arc::new(NoEdgeModel));
+    let outs = run(&mut e, events, m.fees);
+    assert!(
+        approvals(&outs).is_empty(),
+        "correction cooldown: {:?}",
+        approvals(&outs)
+    );
 }
 
 #[test]

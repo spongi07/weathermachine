@@ -529,6 +529,8 @@ pub async fn run(
                 extra_providers: &[],
                 rules_review: &empty_reviews,
                 model: &model_status,
+                yes_pooling: cfg.buy_yes().pooling(),
+                no_pooling: cfg.buy_no().pooling(),
             };
             publisher.publish(dto::build(&snap, &inputs, Utc::now()));
         }
