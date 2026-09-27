@@ -25,8 +25,8 @@ use wm_backtest::{
     SimulationSession, StudyConfig, SyntheticDay, study, synthetic_history, synthetic_trading_day,
 };
 use wm_core::event::{
-    CorrectionEvent, EventEnvelope, EventSource, OperatorCommand, ProviderHealthEvent, TimerEvent,
-    TimerKind, WeatherMachineEvent,
+    CorrectionEvent, EventEnvelope, EventSource, ForecastEvent, OperatorCommand,
+    ProviderHealthEvent, TimerEvent, TimerKind, WeatherMachineEvent,
 };
 use wm_core::health::{CircuitState, ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{ProviderId, RunId};
@@ -184,6 +184,29 @@ pub fn day_events(
         }
     }
     events.extend(correction);
+    // Synthetic day-1 forecast: the day's underlying curve with a day-specific
+    // error, known from 08:05 local (like the live product's ready time).
+    let bias = (seed.wrapping_add(day_index) % 21) as f64 - 10.0;
+    let hourly = (0..=24)
+        .map(|h| {
+            let t = start + Duration::hours(h);
+            let tenths = (day.signal(h as f64) + bias).round() as i32;
+            (t, wm_core::units::TempC::from_tenths(tenths))
+        })
+        .collect();
+    events.push(EventEnvelope::new(
+        start + Duration::minutes(8 * 60 + 5),
+        EventSource::Synthetic,
+        WeatherMachineEvent::ForecastUpdate(ForecastEvent {
+            location: ids.location.clone(),
+            provider: ProviderId::synthetic(),
+            model: "demo".into(),
+            issued_at: start + Duration::minutes(8 * 60 + 5),
+            predicted_max: None,
+            hourly,
+            lead_days: Some(1),
+        }),
+    ));
     events.push(health_event(
         start - Duration::minutes(30),
         &ids.station,

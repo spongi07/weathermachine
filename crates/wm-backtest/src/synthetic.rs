@@ -47,7 +47,7 @@ impl SyntheticDay {
     }
 
     /// Underlying signal at a local fractional hour (tenths).
-    fn signal(&self, local_hour: f64) -> f64 {
+    pub fn signal(&self, local_hour: f64) -> f64 {
         let amp = f64::from(self.max_tenths - self.min_tenths) / 2.0;
         let mid = f64::from(self.max_tenths + self.min_tenths) / 2.0;
         // Asymmetric diurnal curve: slow rise from ~05:00, faster decline after the peak.

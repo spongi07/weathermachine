@@ -416,7 +416,7 @@ fn finalize(
         }
         None => {
             let why = fc
-                .and_then(|f| f.error.clone())
+                .and_then(|f| f.error.clone().or_else(|| f.note.clone()))
                 .unwrap_or_else(|| "no forecast history covers the METAR history".into());
             (
                 model.without_refinements(),

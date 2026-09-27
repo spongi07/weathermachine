@@ -286,6 +286,58 @@ async fn forecast_history_is_fetched_newest_first_cached_and_evaluated() {
 }
 
 #[tokio::test]
+async fn a_rejected_forecast_model_is_reported_with_the_api_reason() {
+    let years = csv_by_year(d(2024, 10, 1), 200);
+    let server = MockServer::start().await;
+    for (y, body) in &years {
+        mount(
+            &server,
+            *y,
+            ResponseTemplate::new(200).set_body_string(body.clone()),
+        )
+        .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/forecast"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":true,"reason":"Cannot initialize WeatherModel from invalid String value gfs_globl for key models"}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempdir("forecast-rejected");
+    let mut plan = plan(&dir, 30);
+    plan.forecast = Some(ForecastPlan {
+        product: wm_core::forecast::ForecastProduct {
+            provider: ProviderId::open_meteo(),
+            model: "gfs_globl".into(),
+            lead_days: 1,
+            ready_local_minute: 480,
+        },
+        latitude: 52.3,
+        longitude: 4.8,
+        from: d(2021, 3, 1),
+        cache_dir: dir.join("research/open-meteo/EHAM/gfs_globl-d1"),
+        eval: wm_backtest::EvaluationConfig::default(),
+    });
+    let (r, _) = run_with(
+        &archive(&server.uri()),
+        Some(&open_meteo(&server.uri())),
+        &plan,
+    )
+    .await;
+    let o = r.unwrap();
+    let verdict = o.forecast_verdict.unwrap();
+    assert!(
+        verdict.contains("invalid String value gfs_globl"),
+        "{verdict}"
+    );
+    let model = wm_app::setup::read_model(&plan.model_out).unwrap();
+    assert!(!model.uses_forecast());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn an_unreachable_forecast_source_leaves_the_model_without_it() {
     let years = csv_by_year(d(2024, 10, 1), 200);
     let server = MockServer::start().await;

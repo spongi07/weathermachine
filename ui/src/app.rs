@@ -433,8 +433,8 @@ fn PeakPanel(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                         <div class="view-head">
                             <b>"Day-1 forecast"</b>
                             <span class={if f.in_use { "pill good" } else { "pill" }}>{if f.in_use { "USED BY MODEL" } else { "not used" }}</span>
-                            <span class="muted small">{format!("{} · received {}", f.product, fmt::utc_time(f.received_ms))}</span>
                         </div>
+                        <div class="muted small">{format!("{} · received {}", f.product, fmt::utc_time(f.received_ms))}</div>
                         <div class="stats">
                             <div><label>"Day max"</label><b>{c(f.day_max_c)}</b><small>"forecast"</small></div>
                             <div><label>"Rest of day"</label><b>{c(f.remaining_max_c)}</b><small>"max from now"</small></div>
