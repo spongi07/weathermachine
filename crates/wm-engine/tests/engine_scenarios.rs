@@ -4,9 +4,11 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use std::sync::Arc;
 use wm_core::event::{
-    EventEnvelope, EventSource, MarketSnapshotEvent, ObservationEvent, OperatorCommand,
-    OrderBookEvent, ProviderHealthEvent, TimerEvent, TimerKind, WeatherMachineEvent,
+    EventEnvelope, EventSource, ForecastEvent, MarketSnapshotEvent, ObservationEvent,
+    OperatorCommand, OrderBookEvent, ProviderHealthEvent, TimerEvent, TimerKind,
+    WeatherMachineEvent,
 };
+use wm_core::forecast::ForecastProduct;
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{LocationId, ProviderId, RunId, StationId};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
@@ -420,8 +422,10 @@ fn identical_rejections_are_recorded_once_per_window() {
 
 #[test]
 fn forecasts_never_change_the_observed_high_or_create_trades() {
-    // A (wildly) warmer forecast is a predictive input only: the observed high,
-    // the resolution views and every decision stay exactly the same.
+    // A (wildly) warmer forecast is a predictive input only: for a model that
+    // does not condition on forecasts, the observed high, the resolution views
+    // and every decision stay exactly the same (models that adopted a forecast:
+    // `a_used_forecast_changes_probabilities_only_under_the_knowledge_rule`).
     let m = market(vec![
         ObservationFilter::AllRows,
         ObservationFilter::WRH_HOURLY_NWS_FAA,
@@ -442,6 +446,7 @@ fn forecasts_never_change_the_observed_high_or_create_trades() {
         issued_at: utc("2026-07-01T12:00:00Z"),
         predicted_max: Some(TempC::from_whole(30)),
         hourly: vec![(utc("2026-07-01T13:00:00Z"), TempC::from_whole(30))],
+        lead_days: None,
     };
     events.insert(
         10,
@@ -461,6 +466,157 @@ fn forecasts_never_change_the_observed_high_or_create_trades() {
         base.final_value(&m.event_slug),
         with_fc.final_value(&m.event_slug)
     );
+}
+
+/// A model that conditions on the day-1 forecast: 98.5 % final unless the
+/// forecast expects the rest of the day to be warmer.
+struct ForecastAwareModel(ForecastProduct);
+
+impl ProbabilityModel for ForecastAwareModel {
+    fn id(&self) -> &str {
+        "forecast-aware-test-model"
+    }
+    fn distribution(&self, f: &PeakFeatures) -> Option<IncrementDistribution> {
+        let probs = match f.forecast_rise_tenths {
+            Some(r) if r >= 5 => vec![0.60, 0.30, 0.08, 0.02],
+            _ => vec![0.985, 0.012, 0.002, 0.001],
+        };
+        Some(IncrementDistribution {
+            probs,
+            support: 500,
+            source: format!("rise={:?}", f.forecast_rise_tenths),
+        })
+    }
+    fn forecast_product(&self) -> Option<&ForecastProduct> {
+        Some(&self.0)
+    }
+}
+
+fn day1_product() -> ForecastProduct {
+    ForecastProduct {
+        provider: ProviderId::open_meteo(),
+        model: "gfs_global".into(),
+        lead_days: 1,
+        ready_local_minute: 480, // 08:00 CEST = 06:00Z
+    }
+}
+
+/// Day-1 series for 1 July (local day = 30 Jun 22:00Z … 1 Jul 22:00Z):
+/// 18.0 °C until 14:00Z, `later` tenths afterwards.
+fn day1_forecast(model: &str, later: i32) -> WeatherMachineEvent {
+    let start = utc("2026-06-30T22:00:00Z");
+    let hourly = (0..=24)
+        .map(|h| {
+            let t = start + Duration::hours(h);
+            let v = if t > utc("2026-07-01T14:00:00Z") {
+                later
+            } else {
+                180
+            };
+            (t, TempC::from_tenths(v))
+        })
+        .collect();
+    WeatherMachineEvent::ForecastUpdate(ForecastEvent {
+        location: loc(),
+        provider: ProviderId::open_meteo(),
+        model: model.into(),
+        issued_at: utc("2026-07-01T05:00:00Z"),
+        predicted_max: None,
+        hourly,
+        lead_days: Some(1),
+    })
+}
+
+#[test]
+fn a_used_forecast_changes_probabilities_only_under_the_knowledge_rule() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let model = || Arc::new(ForecastAwareModel(day1_product()));
+    let with = |extra: Vec<(usize, EventEnvelope)>| {
+        let mut e = Engine::new(config(RunMode::Paper), model());
+        let mut events = scenario(&m, Some(ProviderHealthState::Healthy));
+        for (i, ev) in extra {
+            events.insert(i, ev);
+        }
+        let out = run(&mut e, events, m.fees);
+        (e, out)
+    };
+    let (base, base_out) = with(vec![]);
+    assert!(
+        !approvals(&base_out).is_empty(),
+        "the scenario trades without a forecast"
+    );
+
+    // Warming expected after 14:00Z (rise +2.0 °C at the 13:58Z decision), known at 06:30Z.
+    let (warm, warm_out) = with(vec![(
+        2,
+        env("2026-07-01T06:30:00Z", day1_forecast("gfs_global", 200)),
+    )]);
+    assert!(
+        approvals(&warm_out).is_empty(),
+        "{:?}",
+        approvals(&warm_out)
+    );
+    let fc = warm.snapshot().locations[0].forecast.clone().unwrap();
+    assert!(fc.in_use, "{fc:?}");
+    assert_eq!(fc.product, "open_meteo/gfs_global/d1");
+    assert_eq!(fc.rise_tenths, Some(20));
+    assert_eq!(fc.day_max_tenths, Some(200));
+
+    // Cooling expected: the same trades as without a forecast.
+    let (_, cool_out) = with(vec![(
+        2,
+        env("2026-07-01T06:30:00Z", day1_forecast("gfs_global", 150)),
+    )]);
+    assert_eq!(approvals(&cool_out), approvals(&base_out));
+
+    // Retrieved at 05:30Z — before today's ready time (08:00 local): ignored all day.
+    let (early, early_out) = with(vec![(
+        0,
+        env("2026-07-01T05:30:00Z", day1_forecast("gfs_global", 200)),
+    )]);
+    assert_eq!(approvals(&early_out), approvals(&base_out));
+    let fc = early.snapshot().locations[0].forecast.clone().unwrap();
+    assert!(!fc.in_use && fc.status.contains("ready time"), "{fc:?}");
+
+    // Another model's series is another product: ignored.
+    let (other, other_out) = with(vec![(
+        2,
+        env("2026-07-01T06:30:00Z", day1_forecast("ecmwf_ifs", 200)),
+    )]);
+    assert_eq!(approvals(&other_out), approvals(&base_out));
+    assert!(
+        other.snapshot().locations[0].forecast.is_none(),
+        "not the model's product"
+    );
+
+    // Forecasts never change what was observed or how the market settles.
+    for e in [&warm, &early, &other] {
+        assert_eq!(
+            e.final_value(&m.event_slug),
+            base.final_value(&m.event_slug)
+        );
+        let (a, b) = (&e.snapshot().locations[0], &base.snapshot().locations[0]);
+        assert_eq!(a.series, b.series);
+        assert_eq!(
+            a.views.iter().map(|v| v.state.clone()).collect::<Vec<_>>(),
+            b.views.iter().map(|v| v.state.clone()).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn a_swapped_model_is_used_from_the_next_evaluation() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut e = Engine::new(config(RunMode::Paper), Arc::new(NoEdgeModel));
+    let mut events = scenario(&m, Some(ProviderHealthState::Healthy));
+    let last = events.pop().unwrap(); // the 13:55Z report that triggers the decision
+    let out = run(&mut e, events, m.fees);
+    assert!(approvals(&out).is_empty(), "no model, no trades");
+    e.set_model(Arc::new(FixedModel(vec![0.985, 0.012, 0.002, 0.001])));
+    assert_eq!(e.model_id(), "fixed-test-model");
+    let out = run(&mut e, vec![last], m.fees);
+    assert!(!approvals(&out).is_empty());
+    assert_eq!(e.snapshot().model_id, "fixed-test-model");
 }
 
 #[test]

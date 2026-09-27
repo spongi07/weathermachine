@@ -156,6 +156,11 @@ impl ProviderId {
     pub fn iem() -> Self {
         Self("iem".to_owned())
     }
+    /// Open-Meteo Previous Runs API: fixed-lead forecast series (predictive
+    /// input only — never observation, resolution or settlement data).
+    pub fn open_meteo() -> Self {
+        Self("open_meteo".to_owned())
+    }
     /// NWS Telecommunication Gateway file server (official product files).
     pub fn tgftp() -> Self {
         Self("tgftp".to_owned())

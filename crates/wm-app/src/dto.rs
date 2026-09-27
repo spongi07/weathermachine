@@ -368,6 +368,26 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
             }),
         }),
         market: market_dto,
+        forecast: l.forecast.as_ref().map(|f| ForecastDto {
+            product: f.product.clone(),
+            received_ms: ms(f.received_at),
+            in_use: f.in_use,
+            status: f.status.clone(),
+            day_max_c: f.day_max_tenths.map(|t| f64::from(t) / 10.0),
+            remaining_max_c: f.remaining_max_tenths.map(|t| f64::from(t) / 10.0),
+            rise_c: f.rise_tenths.map(|t| f64::from(t) / 10.0),
+            hourly: {
+                let day_start = wm_core::time::local_day_start(l.local_date, tz);
+                f.hourly
+                    .iter()
+                    .map(|(t, v)| ForecastPointDto {
+                        t_ms: ms(*t),
+                        minute: i32::try_from((*t - day_start).num_minutes()).unwrap_or(0),
+                        temp_c: f64::from(*v) / 10.0,
+                    })
+                    .collect()
+            },
+        }),
     }
 }
 

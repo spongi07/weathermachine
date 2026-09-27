@@ -16,7 +16,7 @@ configuration. The Portainer stack (`docker-compose.yml`) adds PostgreSQL 18
 |---|---|
 | Portainer CE/BE ≥ 2.19 on a Docker standalone environment | Swarm also works; resource limits then come from `deploy.resources`. |
 | x86-64 host (amd64) | arm64 images: run the CI workflow manually with `platforms = linux/amd64,linux/arm64`. |
-| Outbound HTTPS | `aviationweather.gov` (NOAA AWC), `tgftp.nws.noaa.gov`, `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`, and `mesonet.agron.iastate.edu` (IEM METAR history, used once to train the model). |
+| Outbound HTTPS | `aviationweather.gov` (NOAA AWC), `tgftp.nws.noaa.gov`, `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`, `mesonet.agron.iastate.edu` (IEM METAR history, to train the model) and `previous-runs-api.open-meteo.com` (day-1 forecast; `customer-previous-runs-api.open-meteo.com` with an API key). |
 | Image access | The package `ghcr.io/spongi07/weathermachine` is public: anonymous pulls work, so no registry credentials are needed. If the package is ever made private, add a registry in Portainer: *Registries → Add registry → Custom*, URL `ghcr.io`, username = GitHub user, password = a token with `read:packages`. |
 
 The image is built and pushed by `.github/workflows/ci.yml` on every push after
@@ -57,7 +57,10 @@ shown. Optional variables: `WM_DEMO_SPEED` (default 60 = one day in 24 min),
 | `WM_IMAGE_TAG` | no | Pin a tag (e.g. `sha-1a2b3c4`) for reproducible deploys and rollbacks. |
 | `WM_HTTP_PORT` | no | Host port (default 8080). |
 | `WM_MODEL_PATH` | no | Model file. Default `/data/models/eham.json`, trained automatically on first start (see §4). Without a model the engine never trades weather (fail closed). |
-| `WM_MODEL_AUTO_TRAIN` | no | `true` (default): train the model from IEM history when the file is missing. `false`: never download history. |
+| `WM_MODEL_AUTO_TRAIN` | no | `true` (default): train the model from IEM history when the file is missing, and retrain it in the background every 30 days. `false`: never download history. |
+| `WM_FORECAST` | no | `true` (default): fetch the day-1 forecast and evaluate it at every training (§4). `false`: never fetched or evaluated. |
+| `WM_FORECAST_MODEL` | no | Open-Meteo model id (default `gfs_global`, the longest archive). Changing it triggers a retraining. |
+| `WM_OPEN_METEO_API_KEY` | no | Open-Meteo subscription key. The free tier is for **non-commercial** use; for real-money trading use a subscription. |
 
 Optionally enable **GitOps updates** (polling, or the webhook Portainer shows
 after creation; store it as the repository secret `PORTAINER_WEBHOOK_URL` and
@@ -98,16 +101,45 @@ the service:
 1. downloads EHAM METARs from the IEM archive, 2005 to today, one year per
    request, 15 s apart (IEM allows one request per second per IP), and
    caches finished years in `/data/research/iem/EHAM/`;
-2. parses them with its own METAR parser and runs the peak-survival study;
-3. refuses to install a model built from fewer than 730 usable days;
-4. writes `/data/models/eham.json` and the survival report
+2. downloads the day-1 forecast history from Open-Meteo (newest year first,
+   one request per year, cached in `/data/research/open-meteo/EHAM/`);
+3. parses the METARs with its own parser, runs the peak-survival study and
+   the forecast evaluation (below);
+4. refuses to install a model built from fewer than 730 usable days;
+5. writes `/data/models/eham.json` and the report
    `/data/research/eham-survival.md` (with the SHA-256 of every year it used);
-5. **restarts once** (exit code 75; the stack's restart policy brings it
-   back within seconds) and loads the model: the badge turns green.
+6. **loads the model into the running service** — no restart: the badge
+   turns green.
 
 This takes a few minutes. If IEM is unreachable the badge shows **MODEL
 ERROR** with the reason, and training is retried every 6 hours. Later
-restarts load the saved model directly.
+starts load the saved model directly. The model is retrained **in the
+background** every 30 days (and when the forecast has not been evaluated
+yet): the current model keeps trading, the badge shows **MODEL ↻**, and the
+new model is swapped in when it is ready.
+
+### The day-1 forecast (measured, not assumed)
+
+The service fetches a day-1 forecast for Schiphol every hour: every hourly
+value was forecast 24 hours before its time, exactly the product used in the
+training history — so the evaluation cannot be flattered by look-ahead.
+Whether the model may *use* it is decided by the training, never assumed:
+it replays years of days one at a time, scoring every trading moment with a
+model that has only seen earlier days, with and without the forecast and
+against a placebo (the forecast of two weeks earlier). Only if the forecast
+clearly beats both is it adopted. Read the verdict:
+
+* the **FORECAST** pill (status bar) — green: in use; amber **FORECAST
+  WAITING**: adopted, but today's series is not usable yet (before 08:00
+  local, or the source is down); grey **forecast not used**: not adopted
+  (hover for the numbers);
+* the *Day-1 forecast* box under the model distribution and the dashed line
+  in the chart;
+* the section *Forecast evaluation* in `/data/research/eham-survival.md`
+  (log loss with and without the forecast and vs. the placebo, P(final) by
+  forecast rise, calibration, a constant-price trading proxy).
+
+If Open-Meteo is unreachable the model simply runs without the forecast.
 
 Retrain by hand (for example once a year) with a one-off container on the
 stack's data volume. The image has no shell (distroless), so run it as its
@@ -170,9 +202,13 @@ path prefix.
 | `failed to bind host port 0.0.0.0:8080/tcp: address already in use` | Another service already uses host port 8080. Set `WM_HTTP_PORT` to a free port (e.g. `8090`) and redeploy; the dashboard is then at `http://<host>:8090/`. The demo stack uses `WM_DEMO_PORT` (default 8081) the same way. |
 | Image pull `denied` | Make the GHCR package public or add GHCR credentials under *Registries*. |
 | Container unhealthy, logs show `database not reachable yet` | PostgreSQL still initialising (first start) — it retries for 90 s; check the `postgres` service logs. |
-| **MODEL TRAINING** / banner "No probability model yet" | Normal on the first start: the history download and training take a few minutes, then the service restarts once. |
+| **MODEL TRAINING** / banner "No probability model yet" | Normal on the first start: the history download and training take a few minutes; the model is then loaded without a restart. |
 | **MODEL ERROR**: `model training failed: … connection failed` | The host cannot reach `mesonet.agron.iastate.edu`. Allow outbound HTTPS to it; the service retries every 6 h (or restart it). |
-| Container restarted once with exit code 75 | Expected: it restarts to load the newly trained model. |
+| **MODEL ↻** | A background retraining is running (forecast evaluation, or the model is 30 days old); the current model keeps trading. |
+| **forecast not used** | The evaluation did not show a clear improvement from the forecast (hover for the numbers; details in the report). Nothing to fix — the model trades without it. |
+| **FORECAST WAITING** | The forecast is adopted, but today's series is not usable yet: before 08:00 local, or Open-Meteo unreachable (alert "day-1 forecast unavailable"). The model trades without it meanwhile. |
+| Alert "day-1 forecast unavailable (HTTP status 429 …)" | Open-Meteo's free daily limit (shared by every client on your IP) was reached. The service backs off; consider `WM_OPEN_METEO_API_KEY`. |
+| Report says "not evaluated: …" | The forecast history could not be downloaded (e.g. `previous-runs-api.open-meteo.com` blocked); training is retried after 6 h. A "rejected by Open-Meteo" reason naming the model means `WM_FORECAST_MODEL` is not a valid model id. |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
 | Providers *throttled* / *unavailable* | The rate limiter backs off (Retry-After honoured, circuit breaker); trading of that station stays blocked until data is healthy and fresh. Do not lower the polling floors. |

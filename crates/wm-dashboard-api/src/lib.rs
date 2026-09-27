@@ -55,6 +55,12 @@ pub struct ModelDto {
     pub detail: String,
     /// Training progress in station-years: (done, total).
     pub progress: Option<(u32, u32)>,
+    /// The loaded model's forecast evaluation verdict (`None`: forecasts off).
+    #[serde(default)]
+    pub forecast: Option<String>,
+    /// Background retraining in progress; the loaded model keeps trading.
+    #[serde(default)]
+    pub retraining: Option<String>,
 }
 
 impl ModelDto {
@@ -189,6 +195,32 @@ pub struct MarketDto {
     pub rows: Vec<LadderRowDto>,
 }
 
+/// The location's day-1 forecast (predictive input; never resolution data).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ForecastDto {
+    /// e.g. `open_meteo/gfs_global/d1`.
+    pub product: String,
+    pub received_ms: i64,
+    /// The model conditions on it (evaluation adopted it, knowledge rule met).
+    pub in_use: bool,
+    /// Why it is (not) in use.
+    pub status: String,
+    pub day_max_c: Option<f64>,
+    pub remaining_max_c: Option<f64>,
+    /// Remaining-day maximum minus the maximum so far, per the forecast.
+    pub rise_c: Option<f64>,
+    /// Today's hourly values for the chart.
+    pub hourly: Vec<ForecastPointDto>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ForecastPointDto {
+    pub t_ms: i64,
+    /// Minutes since local midnight (0 ..= 1440; 1380/1500 on DST days).
+    pub minute: i32,
+    pub temp_c: f64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LocationDto {
     pub location: String,
@@ -207,6 +239,8 @@ pub struct LocationDto {
     pub observations: Vec<ObservationRowDto>,
     pub collector: Option<CollectorDto>,
     pub market: Option<MarketDto>,
+    #[serde(default)]
+    pub forecast: Option<ForecastDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

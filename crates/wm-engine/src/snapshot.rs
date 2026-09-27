@@ -23,6 +23,25 @@ pub struct ViewSnapshot {
     pub distribution: Option<IncrementDistribution>,
 }
 
+/// The location's latest fixed-lead forecast and whether the model uses it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForecastSnapshot {
+    /// Product label, e.g. `open_meteo/gfs_global/d1`.
+    pub product: String,
+    /// Knowledge time of the series (when it reached the engine).
+    pub received_at: DateTime<Utc>,
+    /// `true` when the model conditions on this product and today's series
+    /// passed the knowledge rule and the coverage check.
+    pub in_use: bool,
+    /// Why the forecast is (not) in use, in words.
+    pub status: String,
+    pub day_max_tenths: Option<i32>,
+    pub remaining_max_tenths: Option<i32>,
+    pub rise_tenths: Option<i32>,
+    /// Today's hourly values (valid time, tenths °C) for charts.
+    pub hourly: Vec<(DateTime<Utc>, i32)>,
+}
+
 /// Everything about one location.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocationSnapshot {
@@ -37,6 +56,8 @@ pub struct LocationSnapshot {
     pub books: Vec<OrderBook>,
     pub evaluations: Vec<BucketEvaluation>,
     pub hint: StationHint,
+    #[serde(default)]
+    pub forecast: Option<ForecastSnapshot>,
 }
 
 /// Full engine snapshot.

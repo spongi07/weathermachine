@@ -20,7 +20,7 @@ evidence.
 | Historical trades | PARTIAL | Polymarket data API / on-chain fills | Trade prints | Trade time | Trades imply prices, not resting liquidity | Phase 5 |
 | Historical order books | **UNAVAILABLE** (venue) | Reported: the order-book-history endpoint stopped producing snapshots around Feb 2026 | — | — | True order-book backtests need **our own recorder** (enabled: `record_orderbooks`) or a commercial archive | From deployment onwards |
 | Final resolutions | AVAILABLE | Gamma closed markets (resolved outcome prices) | Per market | Resolution time | Occasional disputes (UMA) must be respected | Phase 5 |
-| Historical forecasts | PARTIAL | GFS (NOAA archives), ECMWF open data (recent window; archive licensed), KNMI Harmonie | Varies | **Issue time must be stored** to avoid forecast look-ahead | Licensing and volume | Phase 11 |
+| Historical forecasts | YES (fixed lead) | Open-Meteo Previous Runs API: `temperature_2m_previous_day1` = value of the run initialised 24 h before valid time; GFS 2 m temperature since 2021-03, most models since 2024-01 | Hourly | Same product live and in history ⇒ no look-ahead. **Not** the "Historical Forecast API": stitched from the first hours of each run, i.e. a same-day analysis that leaks the outcome (0.80 °C MAE at EHAM vs ~2 °C persistence in the reviewed bot's data) | Free tier non-commercial; subscription for commercial use | Phase 11 ✅ (evaluated automatically, §19) |
 
 ## 33. ReplayEngine
 
@@ -107,9 +107,9 @@ with `SimConfig { latency_ms: 250, adverse_ticks: 0 }`.
 ## 36. Parameter research
 
 **Dimensions.** Season, month, local time, confirmation window, slope, drop
-from high, retest count, trajectory class, forecast remaining maximum (Phase
-11), YES price threshold (0.90…0.99), NO price, outcome distance (+1/+2/+3),
-split timing, unwind style/timing, exit price.
+from high, retest count, trajectory class, forecast rise (day-1 forecast:
+rest of day vs. so far, §19), YES price threshold (0.90…0.99), NO price,
+outcome distance (+1/+2/+3), split timing, unwind style/timing, exit price.
 
 **First strategy experiment (brief §38).** Runs automatically when the
 service first starts without a model (report:
@@ -126,7 +126,10 @@ N minutes)** for N ∈ {30, 45, 60, 75, 90, 105, 120, 150, 180}. It stratifies b
 95 % Wilson intervals, and trains the empirical model in the same pass. Order
 of work, per the brief:
 1. survival table on history;
-2. does a forecast improve it (Phase 11);
+2. does a forecast improve it (Phase 11) — answered automatically at every
+   training by the prequential evaluation with a placebo control (§19); the
+   report gains P(final) by forecast rise, calibration and a constant-price
+   proxy, and the forecast is used only if adopted;
 3. only then join with historical prices (Phases 8–10).
 
 **Protocol.** Walk-forward splits (`walk_forward_splits(dates, train,

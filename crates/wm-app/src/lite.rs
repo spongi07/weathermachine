@@ -53,6 +53,7 @@ header h1{font-size:14px;margin:0;letter-spacing:.08em}
 .pill.ok{color:var(--ok);border-color:#2b5a33}.pill.bad{color:var(--bad);border-color:#6b2a2a}.pill.warn{color:var(--warn);border-color:#6b5217}
 .banner{background:#3b2a05;color:#f2cc60;padding:8px 16px;border-bottom:1px solid #6b5217}
 .kill{background:#4a0f0f;color:#ffb3ad;padding:8px 16px;border-bottom:1px solid #7a1f1f;font-weight:bold}
+.note{background:#0c1a2b;color:#9cc7ff;padding:6px 16px;border-bottom:1px solid #1d3553;font-size:12px}
 main{padding:12px 16px;display:grid;gap:12px}
 section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;overflow-x:auto}
 h2{font-size:12px;margin:0 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
@@ -225,6 +226,18 @@ pub fn render(s: &DashboardSnapshot) -> String {
             out,
             "<div class=\"banner\">No probability model yet, so no weather trades: {}</div>",
             esc(&s.model.detail)
+        );
+    }
+    if let Some(v) = &s.model.forecast {
+        let used = s
+            .locations
+            .iter()
+            .any(|l| l.forecast.as_ref().is_some_and(|f| f.in_use));
+        let _ = write!(
+            out,
+            "<div class=\"note\">Day-1 forecast {}: {}</div>",
+            if used { "in use" } else { "not in use" },
+            esc(v)
         );
     }
     if let Some(k) = &s.kill_switch {

@@ -26,9 +26,17 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
 * **Decides deterministically.** The same kernel runs in backtest, demo and
   paper. The chain is: temperature state → peak detection per resolution view
   → probability model trained on real EHAM history (downloaded from IEM and
-  trained automatically on first start) → strategies (A: buy YES of the
-  final-high bucket, B: buy NO above it, C: split/unwind research) → risk
+  trained automatically on first start, retrained every 30 days in the
+  background and swapped in without a restart) → strategies (A: buy YES of
+  the final-high bucket, B: buy NO above it, C: split/unwind research) → risk
   engine → simulated venue.
+* **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
+  Previous Runs: every hourly value forecast 24 h ahead, the same product in
+  training and live, so no look-ahead) can refine the model with one feature:
+  does the forecast expect the rest of the day to get warmer? Training runs a
+  walk-forward test with a placebo control, and the forecast changes trading
+  probabilities only if it clearly improves them. The verdict is in the
+  training report and on the dashboard.
 * **Fails closed.** A throttled or unhealthy provider, stale data, gaps in the
   day's series, recent corrections, stale books, unverified resolution rules,
   no model, storage down, or the kill switch each block new weather-dependent
@@ -66,7 +74,7 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine run` | Paper-trading service (default) |
 | `weather-machine demo [--speed 60]` | Synthetic accelerated demo |
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
-| `weather-machine model train` | Download METAR history from IEM (rate-limited, cached) and train the model; `run` does this automatically when no model exists |
+| `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train the model and evaluate the forecast; `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules (read-only) |
@@ -88,6 +96,9 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_DASHBOARD_USER` / `WM_DASHBOARD_PASSWORD` | Optional Basic auth |
 | `WM_MODEL_PATH` | Model file (default `/data/models/<station>.json`); without a model, no weather trades |
 | `WM_MODEL_AUTO_TRAIN` | `false` stops automatic training from IEM history (default `true`) |
+| `WM_FORECAST` | `false` never fetches or evaluates the day-1 forecast (default `true`) |
+| `WM_FORECAST_MODEL` | Open-Meteo model id for the day-1 forecast (default `gfs_global`) |
+| `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key; the free tier is for non-commercial use |
 | `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
 | `WM_JOURNAL_RETENTION_DAYS` | Days of order-book updates kept in the replay journal (default 7; 0 = keep) |
 | `WM_BACKUP_JOURNAL` | Stack only: include the replay journal in nightly backups (default `false`) |
@@ -115,3 +126,6 @@ to GHCR.
   KNOWN FACT / ASSUMPTION / HYPOTHESIS TO BACKTEST labels, the dependency
   rationale, the historical-data audit and the Phase 0–14 roadmap.
 * [Deployment with Portainer](docs/deployment/portainer.md).
+* [Forecast layer and its evaluation](docs/blueprint/05-markets.md#19-forecastprovider-and-the-day-1-forecast-feature).
+* [Review of the "weatherforecaster" bot](docs/research/weatherforecaster-review.md):
+  why its backtest edge came from look-ahead, and what was (not) ported.

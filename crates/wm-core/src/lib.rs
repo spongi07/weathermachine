@@ -5,6 +5,7 @@
 //! that live, paper and backtest runs speak exactly the same language.
 
 pub mod event;
+pub mod forecast;
 pub mod hash;
 pub mod health;
 pub mod ids;

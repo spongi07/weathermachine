@@ -187,6 +187,34 @@ politeness_factor = 2
 politeness_decay_secs = 86400.0
 max_body_bytes = 16777216
 
+# Open-Meteo Previous Runs API: the day-1 forecast (each hourly value from the
+# run initialised 24 h earlier), a predictive input only. One request per
+# location per refresh, one per year of history when training; one at a
+# time, 10 s apart. The free tier is for non-commercial use: for real-money
+# trading set WM_OPEN_METEO_API_KEY (a subscription), which switches to the
+# customer host automatically.
+[providers.open_meteo]
+enabled = true
+base_url = "https://previous-runs-api.open-meteo.com"
+[providers.open_meteo.policy]
+class = "public_data"
+min_interval_secs = 10.0
+max_concurrency = 1
+timeout_secs = 60.0
+connect_timeout_secs = 10.0
+backoff_base_secs = 60.0
+backoff_max_secs = 3600.0
+throttle_backoff_base_secs = 900.0
+respect_retry_after = true
+max_retry_after_secs = 86400.0
+circuit_failure_threshold = 3
+circuit_open_base_secs = 1800.0
+circuit_open_max_secs = 21600.0
+daily_budget = 500
+politeness_factor = 2
+politeness_decay_secs = 86400.0
+max_body_bytes = 4194304
+
 # ---------------------------------------------------------------------------
 # Adaptive polling (engineering starting points — NOT optimized parameters).
 # Fast intervals apply only inside the arrival window after an expected report.
@@ -290,3 +318,21 @@ data_dir = "/data"
 from_year = 2005
 min_days = 730                    # refuse a model built from fewer usable days
 retry_after_secs = 21600          # after a failed attempt
+retrain_after_days = 30           # background retrain (current model keeps trading); 0 = never
+
+# ---------------------------------------------------------------------------
+# Day-1 forecast as a model feature — MEASURED, NOT ASSUMED. Training joins
+# the forecast history with the METAR history and runs a walk-forward test
+# with a placebo control (docs/blueprint/19-forecast-layer.md). The forecast
+# changes trading probabilities only if that test adopts it; otherwise it is
+# fetched and shown on the dashboard, nothing more. WM_FORECAST=false turns
+# it off entirely.
+# ---------------------------------------------------------------------------
+[forecast]
+enabled = true
+model = "gfs_global"              # 2 m temperature archived since 2021 (longest history)
+lead_days = 1                     # every value forecast 24 h before its valid time
+ready_local_minute = 480          # a day's series is used from 08:00 local (knowledge rule)
+refresh_minutes = 60
+history_from = "2021-03-01"
+min_eval_days = 365               # the test needs at least a year of scored days

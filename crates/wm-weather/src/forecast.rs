@@ -144,6 +144,7 @@ mod tests {
             issued_at: utc(issued),
             predicted_max: Some(TempC::from_whole(max)),
             hourly: Vec::new(),
+            lead_days: None,
         };
         let p = StaticForecastProvider::new(
             ProviderId::replay(),

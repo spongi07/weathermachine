@@ -6,29 +6,43 @@
 //!    cached file is unreadable or the year looked sparse); the current year
 //!    is fetched up to today on every training.
 //! 2. Import them with our own METAR parser (`import_iem_csv`).
-//! 3. Run the peak-survival study, which also builds the empirical model.
-//! 4. Refuse too little data, then write the model and the survival report
-//!    atomically (write + rename), so a reader never sees a partial file.
+//! 3. When forecasts are enabled, download the day-1 forecast history
+//!    (Open-Meteo Previous Runs, newest year first, finished years cached
+//!    under `research/open-meteo/<STATION>/<model>-d<lead>/`) and run the
+//!    study joined with it: a walk-forward evaluation with a placebo control
+//!    decides whether the model may use the forecast (see
+//!    `wm_backtest::forecast_eval`). Without forecast history the model is
+//!    trained exactly as before.
+//! 4. Run the peak-survival study, which also builds the empirical model.
+//! 5. Refuse too little data, then write the model and the report atomically
+//!    (write + rename), so a reader never sees a partial file.
 //!
 //! Nothing here fabricates data: a year IEM cannot deliver stays missing and
-//! the attempt fails (the service keeps running without a model, fail closed).
+//! the attempt fails (the service keeps running without a model, fail closed);
+//! forecast history that cannot be obtained simply leaves the forecast unused.
 
 use crate::config::AppConfig;
 use crate::setup;
 use anyhow::{Context, Result, bail};
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::watch;
-use wm_backtest::{StudyConfig, import_iem_csv, study};
+use wm_backtest::{
+    EvaluationConfig, ForecastEvaluation, ForecastHistory, StudyConfig, import_iem_csv, study,
+    study_with_forecasts,
+};
+use wm_core::forecast::ForecastProduct;
 use wm_core::ids::StationId;
 use wm_core::ingest::{IngestBatch, IngestSink, ProviderRequestRecord};
+use wm_core::market::FeeSchedule;
 use wm_core::resolution::ObservationFilter;
 use wm_core::weather::Observation;
-use wm_strategy::{EmpiricalPeakModel, PeakConfig};
-use wm_weather::IemArchive;
+use wm_strategy::{EmpiricalPeakModel, ForecastModelInfo, PeakConfig};
+use wm_weather::open_meteo::{known, parse_series};
+use wm_weather::{IemArchive, OpenMeteoError, OpenMeteoPreviousRuns};
 
 /// Longest wait for the IEM gate per request. Normal spacing (15 s) and short
 /// throttles are waited out; a longer closure ends this attempt.
@@ -41,6 +55,9 @@ const PUBLICATION_DELAY_MIN: i64 = 5;
 /// ~17,500) may be a transient or truncated answer: it is used for this run
 /// but downloaded again next time instead of being cached for good.
 const MIN_ROWS_TO_CACHE: usize = 1_000;
+
+/// A forecast year with fewer hourly values than this is not cached for good.
+const MIN_FORECAST_VALUES_TO_CACHE: usize = 24 * 28;
 
 /// Everything one training run needs.
 #[derive(Debug, Clone)]
@@ -55,6 +72,20 @@ pub struct TrainPlan {
     pub model_out: PathBuf,
     pub report_out: PathBuf,
     pub min_days: u64,
+    /// Forecast history and its evaluation; `None` = forecasts disabled.
+    pub forecast: Option<ForecastPlan>,
+}
+
+/// The forecast part of a training run.
+#[derive(Debug, Clone)]
+pub struct ForecastPlan {
+    pub product: ForecastProduct,
+    pub latitude: f64,
+    pub longitude: f64,
+    /// Earliest date requested.
+    pub from: NaiveDate,
+    pub cache_dir: PathBuf,
+    pub eval: EvaluationConfig,
 }
 
 impl TrainPlan {
@@ -69,6 +100,27 @@ impl TrainPlan {
         let at = &cfg.file.model.auto_train;
         let data = Path::new(&at.data_dir);
         let lower = ids.station.as_str().to_ascii_lowercase();
+        let forecast = cfg.forecast_product().map(|product| {
+            let yes = cfg.buy_yes();
+            ForecastPlan {
+                cache_dir: data
+                    .join("research")
+                    .join("open-meteo")
+                    .join(ids.station.as_str())
+                    .join(format!("{}-d{}", product.model, product.lead_days)),
+                product,
+                latitude: loc.station.latitude,
+                longitude: loc.station.longitude,
+                from: cfg.file.forecast.history_from,
+                eval: EvaluationConfig {
+                    fees: FeeSchedule::taker(loc.market.taker_fee_rate.micros()),
+                    slippage: yes.slippage_allowance,
+                    min_edge: yes.min_edge,
+                    min_days: cfg.file.forecast.min_eval_days,
+                    ..EvaluationConfig::default()
+                },
+            }
+        });
         Ok(Self {
             station: ids.station.clone(),
             tz: ids.timezone,
@@ -79,6 +131,7 @@ impl TrainPlan {
             model_out,
             report_out: data.join("research").join(format!("{lower}-survival.md")),
             min_days: at.min_days,
+            forecast,
         })
     }
 
@@ -90,8 +143,19 @@ impl TrainPlan {
 /// Progress callbacks (dashboard and logs).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Progress {
-    Downloading { year: i32, done: u32, total: u32 },
-    Training { observations: usize },
+    Downloading {
+        year: i32,
+        done: u32,
+        total: u32,
+    },
+    /// Forecast history, newest year first (`done` years so far).
+    Forecast {
+        year: i32,
+        done: u32,
+    },
+    Training {
+        observations: usize,
+    },
 }
 
 /// What a successful training produced.
@@ -105,9 +169,13 @@ pub struct TrainOutcome {
     pub observations: usize,
     pub years_downloaded: u32,
     pub years_cached: u32,
+    /// The forecast evaluation's verdict (or why there was none).
+    pub forecast_verdict: Option<String>,
+    pub forecast_adopted: bool,
 }
 
-/// One year's CSV on disk and its provenance.
+/// One year's history file on disk and its provenance.
+#[derive(Debug, Clone)]
 struct YearFile {
     year: i32,
     path: PathBuf,
@@ -116,8 +184,10 @@ struct YearFile {
 }
 
 /// Download (or reuse) the history, train, validate and install the model.
+/// `forecast` is the client for `plan.forecast` (ignored when that is `None`).
 pub async fn train(
     archive: &IemArchive,
+    forecast: Option<&OpenMeteoPreviousRuns>,
     plan: &TrainPlan,
     audit: Option<&Arc<dyn IngestSink>>,
     progress: &(dyn Fn(Progress) + Send + Sync),
@@ -205,6 +275,24 @@ pub async fn train(
         tracing::info!(station = %plan.station, year, rows = fetched.rows, "IEM history year downloaded");
     }
 
+    // Forecast history (optional: failure leaves the forecast unused).
+    let fc = match (&plan.forecast, forecast) {
+        (Some(fp), Some(client)) => Some(
+            match forecast_history(client, plan, fp, audit, progress, shutdown).await {
+                Ok(h) => h,
+                Err(e) if *shutdown.borrow() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "forecast history unavailable: training without it");
+                    ForecastDownload::failed(format!("{e:#}"))
+                }
+            },
+        ),
+        (Some(_), None) => Some(ForecastDownload::failed(
+            "the open_meteo provider is disabled".into(),
+        )),
+        (None, _) => None,
+    };
+
     // CPU-bound part off the async runtime.
     let plan2 = plan.clone();
     let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
@@ -215,7 +303,8 @@ pub async fn train(
         observations: observations.len(),
     });
     let plan2 = plan.clone();
-    let (report, mut model) = tokio::task::spawn_blocking(move || {
+    let hourly = fc.as_ref().map(|f| f.hourly.clone()).unwrap_or_default();
+    let (report, model, evaluation) = tokio::task::spawn_blocking(move || {
         let cfg = StudyConfig {
             station: plan2.station.clone(),
             tz: plan2.tz,
@@ -224,7 +313,17 @@ pub async fn train(
             k_classes: 4,
             min_high_local_minute: 9 * 60,
         };
-        study(&observations, &cfg)
+        match &plan2.forecast {
+            Some(fp) if !hourly.is_empty() => {
+                let history = ForecastHistory::from_hourly(fp.product.clone(), plan2.tz, &hourly);
+                let out = study_with_forecasts(&observations, &cfg, &history, fp.eval.clone());
+                (out.report, out.model, out.evaluation)
+            }
+            _ => {
+                let (r, m) = study(&observations, &cfg);
+                (r, m, None)
+            }
+        }
     })
     .await
     .context("training task")?;
@@ -237,10 +336,33 @@ pub async fn train(
             model.total_samples()
         );
     }
-    model.id = format!("{}-{}", model.id, plan.today.format("%Y%m%d"));
+    let (mut model, verdict, adopted) = finalize(model, plan, fc.as_ref(), evaluation.as_ref());
+    model.id = format!(
+        "{}-{}{}",
+        model.id,
+        plan.today.format("%Y%m%d"),
+        if adopted { "+fc" } else { "" }
+    );
     let n_obs = files.iter().map(|f| f.rows).sum::<usize>();
     let mut md = report.to_markdown();
+    match (&evaluation, &fc) {
+        (Some(e), _) => md.push_str(&e.to_markdown()),
+        (None, Some(f)) => {
+            let _ = write!(
+                md,
+                "\n## Forecast evaluation\n\n**Verdict: {}**\n",
+                verdict.as_deref().unwrap_or_default()
+            );
+            if let Some(note) = &f.note {
+                let _ = writeln!(md, "\n{note}");
+            }
+        }
+        (None, None) => {}
+    }
     md.push_str(&provenance(plan, &files, &model));
+    if let Some(f) = &fc {
+        md.push_str(&forecast_provenance(plan, f));
+    }
     if let Some(dir) = plan.model_out.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -257,7 +379,254 @@ pub async fn train(
         observations: n_obs,
         years_downloaded: downloaded,
         years_cached: cached,
+        forecast_verdict: verdict,
+        forecast_adopted: adopted,
     })
+}
+
+/// Keep the forecast refinement only if the evaluation adopted it, and record
+/// the evaluation (or why there was none) in the model.
+fn finalize(
+    model: EmpiricalPeakModel,
+    plan: &TrainPlan,
+    fc: Option<&ForecastDownload>,
+    evaluation: Option<&ForecastEvaluation>,
+) -> (EmpiricalPeakModel, Option<String>, bool) {
+    let Some(fp) = &plan.forecast else {
+        return (model, None, false);
+    };
+    let (mut m, info) = match evaluation {
+        Some(e) => {
+            let m = if e.adopted {
+                model
+            } else {
+                model.without_refinements()
+            };
+            (
+                m,
+                ForecastModelInfo {
+                    product: fp.product.clone(),
+                    adopted: e.adopted,
+                    verdict: e.verdict.clone(),
+                    days_with_forecast: e.days_with_forecast,
+                    evaluated: true,
+                    evaluated_at: Utc::now(),
+                },
+            )
+        }
+        None => {
+            let why = fc
+                .and_then(|f| f.error.clone())
+                .unwrap_or_else(|| "no forecast history covers the METAR history".into());
+            (
+                model.without_refinements(),
+                ForecastModelInfo {
+                    product: fp.product.clone(),
+                    adopted: false,
+                    verdict: format!("not evaluated: {why}"),
+                    days_with_forecast: 0,
+                    // Retry later only when the download failed; an archive
+                    // that simply has no overlapping data will not change soon.
+                    evaluated: fc.is_some_and(|f| f.error.is_none()),
+                    evaluated_at: Utc::now(),
+                },
+            )
+        }
+    };
+    let verdict = Some(info.verdict.clone());
+    let adopted = info.adopted;
+    m.forecast = Some(info);
+    (m, verdict, adopted)
+}
+
+/// Downloaded forecast history.
+#[derive(Debug, Clone, Default)]
+struct ForecastDownload {
+    /// Valid time and value (tenths °C), known hours only.
+    hourly: Vec<(DateTime<Utc>, i32)>,
+    files: Vec<YearFile>,
+    downloaded: u32,
+    cached: u32,
+    /// Why the history starts where it does (e.g. the archive's first date).
+    note: Option<String>,
+    /// Set when the download failed: nothing was evaluated.
+    error: Option<String>,
+}
+
+impl ForecastDownload {
+    fn failed(error: String) -> Self {
+        Self {
+            error: Some(error),
+            ..Self::default()
+        }
+    }
+}
+
+/// Download the forecast history newest year first. The walk stops at the
+/// first year the archive does not cover (so years before the archive are
+/// requested at most once per training, and the gate's circuit breaker never
+/// sees a string of rejections). A rejection that states the archive's first
+/// date is retried once from that date.
+async fn forecast_history(
+    client: &OpenMeteoPreviousRuns,
+    plan: &TrainPlan,
+    fp: &ForecastPlan,
+    audit: Option<&Arc<dyn IngestSink>>,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<ForecastDownload> {
+    std::fs::create_dir_all(&fp.cache_dir)
+        .with_context(|| format!("creating {}", fp.cache_dir.display()))?;
+    let variable = OpenMeteoPreviousRuns::variable(fp.product.lead_days);
+    let last = plan.today - Duration::days(1);
+    // First date of the archive, learned from an earlier rejection: years
+    // before it are not requested again.
+    let marker = fp.cache_dir.join("archive-start.txt");
+    let known_start = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|t| NaiveDate::parse_from_str(t.trim(), "%Y-%m-%d").ok());
+    let from = known_start.map_or(fp.from, |a| a.max(fp.from));
+    let mut out = ForecastDownload::default();
+    if let Some(a) = known_start {
+        out.note = Some(format!("forecast archive starts {a}"));
+    }
+    let mut year = last.year();
+    while year >= from.year() {
+        progress(Progress::Forecast {
+            year,
+            done: out.downloaded + out.cached,
+        });
+        let complete = year < plan.today.year();
+        let final_path = fp.cache_dir.join(format!("{year}.json"));
+        let partial_path = fp.cache_dir.join(format!("{year}-partial.json"));
+        if complete && final_path.is_file() {
+            let parsed = std::fs::read(&final_path)
+                .map_err(anyhow::Error::from)
+                .and_then(|b| Ok((parse_series(&b, &variable)?, b)));
+            match parsed {
+                Ok((series, bytes)) => {
+                    let values = known(&series);
+                    out.files.push(YearFile {
+                        year,
+                        path: final_path,
+                        sha256: wm_core::hash::sha256_hex(&bytes),
+                        rows: values.len(),
+                    });
+                    out.hourly
+                        .extend(values.into_iter().map(|(t, v)| (t, v.tenths())));
+                    out.cached += 1;
+                    year -= 1;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(file = %final_path.display(), error = %e, "cached forecast year unusable: downloading it again");
+                    let _ = std::fs::remove_file(&final_path);
+                }
+            }
+        }
+        let mut start = NaiveDate::from_ymd_opt(year, 1, 1)
+            .context("date")?
+            .max(from);
+        let end = NaiveDate::from_ymd_opt(year, 12, 31)
+            .context("date")?
+            .min(last);
+        if start > end {
+            break;
+        }
+        let mut retried = false;
+        let series = loop {
+            let fetched = tokio::select! {
+                r = client.fetch_series(fp.latitude, fp.longitude, start, end, MAX_GATE_WAIT) => r,
+                _ = shutdown.changed() => bail!("shutting down"),
+            };
+            if let Some(r) = fetched.as_ref().err().and_then(OpenMeteoError::record) {
+                record(audit, r).await;
+            }
+            if let Err(OpenMeteoError::Rejected {
+                allowed_from: Some(first),
+                ..
+            }) = &fetched
+            {
+                write_atomic(&marker, first.to_string().as_bytes())?;
+            }
+            match fetched {
+                Ok(s) => break Some(s),
+                Err(OpenMeteoError::Rejected {
+                    allowed_from: Some(first),
+                    ..
+                }) if !retried && first > start && first <= end => {
+                    out.note = Some(format!("forecast archive starts {first}"));
+                    start = first;
+                    retried = true;
+                }
+                Err(OpenMeteoError::Rejected { reason, .. }) => {
+                    out.note = Some(format!("history ends before {year}: Open-Meteo: {reason}"));
+                    break None;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e))
+                        .with_context(|| format!("downloading {year} forecasts from Open-Meteo"));
+                }
+            }
+        };
+        let Some(series) = series else { break };
+        record(audit, &series.record).await;
+        let values = series.values();
+        if values.is_empty() {
+            out.note = Some(format!("no forecast values before {}", year + 1));
+            break;
+        }
+        let keep = complete && values.len() >= MIN_FORECAST_VALUES_TO_CACHE;
+        let path = if keep {
+            final_path
+        } else {
+            partial_path.clone()
+        };
+        write_atomic(&path, &series.body)?;
+        if keep {
+            let _ = std::fs::remove_file(&partial_path);
+        }
+        out.files.push(YearFile {
+            year,
+            path,
+            sha256: wm_core::hash::sha256_hex(&series.body),
+            rows: values.len(),
+        });
+        out.hourly
+            .extend(values.into_iter().map(|(t, v)| (t, v.tenths())));
+        out.downloaded += 1;
+        tracing::info!(station = %plan.station, year, values = out.files.last().map_or(0, |f| f.rows), "forecast history year downloaded");
+        if retried {
+            break; // the archive starts inside this year
+        }
+        year -= 1;
+    }
+    out.hourly.sort_by_key(|p| p.0);
+    out.hourly.dedup_by_key(|p| p.0);
+    out.files.sort_by_key(|f| f.year);
+    Ok(out)
+}
+
+fn forecast_provenance(plan: &TrainPlan, f: &ForecastDownload) -> String {
+    let Some(fp) = &plan.forecast else {
+        return String::new();
+    };
+    let mut s = format!(
+        "\nForecast history: `{}` from the Open-Meteo Previous Runs API (`temperature_2m_previous_day{}`, point {:.4}, {:.4}, UTC), knowledge time = local midnight + {} min.{}\n\n| year | hourly values | SHA-256 |\n|---:|---:|---|\n",
+        fp.product.label(),
+        fp.product.lead_days,
+        fp.latitude,
+        fp.longitude,
+        fp.product.ready_local_minute,
+        f.note
+            .as_deref()
+            .map(|n| format!(" {n}."))
+            .unwrap_or_default(),
+    );
+    for y in &f.files {
+        let _ = writeln!(s, "| {} | {} | `{}` |", y.year, y.rows, y.sha256);
+    }
+    s
 }
 
 fn import_all(paths: &[PathBuf], station: &StationId) -> Result<Vec<Observation>> {

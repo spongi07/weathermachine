@@ -92,9 +92,12 @@ pub enum FetchError {
         retry_after: Option<Duration>,
         record: Box<ProviderRequestRecord>,
     },
-    #[error("HTTP status {status}")]
+    #[error("HTTP status {status}{}", detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
     Status {
         status: u16,
+        /// Start of a 4xx response body (printable, ≤ 300 chars): APIs
+        /// explain rejected parameters there. Never the request URL.
+        detail: Option<String>,
         record: Box<ProviderRequestRecord>,
     },
     #[error("request timed out")]
@@ -263,6 +266,8 @@ impl HttpFetcher {
         let response = match result {
             Ok(r) => r,
             Err(e) => {
+                // The URL may carry an API key: never log or store it.
+                let e = e.without_url();
                 let outcome = if e.is_timeout() {
                     RequestOutcome::Timeout
                 } else if e.is_connect() {
@@ -340,11 +345,17 @@ impl HttpFetcher {
             } else {
                 RequestOutcome::ClientError { status }
             };
+            let detail = if (400..500).contains(&status) {
+                error_excerpt(response).await
+            } else {
+                None
+            };
             let err_record = self.finish_record(record, &clock, started, "http_status");
             permit.complete(outcome);
             self.count("failures_total");
             return Err(FetchError::Status {
                 status,
+                detail,
                 record: Box::new(err_record),
             });
         }
@@ -479,4 +490,22 @@ impl HttpFetcher {
 enum ReadError {
     TooLarge,
     Transport(String),
+}
+
+/// First bytes of an error body as one line of printable text.
+async fn error_excerpt(mut response: reqwest::Response) -> Option<String> {
+    const MAX: usize = 300;
+    let mut buf = Vec::new();
+    while buf.len() < MAX {
+        match response.chunk().await {
+            Ok(Some(c)) => buf.extend_from_slice(&c[..c.len().min(MAX - buf.len())]),
+            _ => break,
+        }
+    }
+    let text: String = String::from_utf8_lossy(&buf)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
 }

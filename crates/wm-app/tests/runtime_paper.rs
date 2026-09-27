@@ -70,6 +70,35 @@ fn gamma_body(slug: &str) -> String {
     )
 }
 
+/// Open-Meteo day-1 series: 72 hours from yesterday 00:00 UTC.
+fn open_meteo_body() -> String {
+    let start = (Utc::now().date_naive() - Duration::days(1))
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let times: Vec<String> = (0..72)
+        .map(|h| {
+            format!(
+                "\"{}\"",
+                (start + Duration::hours(h)).format("%Y-%m-%dT%H:%M")
+            )
+        })
+        .collect();
+    let values: Vec<String> = (0..72)
+        .map(|h| {
+            let hour = f64::from(h % 24);
+            format!(
+                "{:.1}",
+                15.0 + 5.0 * ((hour - 14.0) / 24.0 * std::f64::consts::TAU).cos()
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"utc_offset_seconds":0,"timezone":"GMT","hourly_units":{{"temperature_2m_previous_day1":"°C"}},"hourly":{{"time":[{}],"temperature_2m_previous_day1":[{}]}}}}"#,
+        times.join(","),
+        values.join(",")
+    )
+}
+
 fn write_model(dir: &std::path::Path) -> PathBuf {
     let st = StationId::new("EHAM").unwrap();
     let hist = synthetic_history(
@@ -129,6 +158,16 @@ async fn mock_env(tag: &str) -> MockEnv {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/v1/forecast"))
+        .and(query_param("hourly", "temperature_2m_previous_day1"))
+        .and(query_param("models", "gfs_global"))
+        .and(query_param("timezone", "GMT"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(open_meteo_body(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .and(path("/book"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(r#"{"bids":[{"price":"0.45","size":"200"}],"asks":[{"price":"0.47","size":"200"}],"tick_size":"0.01","min_order_size":"5"}"#, "application/json"))
         .mount(&server)
@@ -142,8 +181,11 @@ async fn mock_env(tag: &str) -> MockEnv {
     p.polymarket_gamma.base_url = server.uri();
     p.polymarket_clob.base_url = server.uri();
     p.polymarket_ws.enabled = false;
-    // Tests never contact the real IEM archive.
+    // Tests never contact the real IEM archive or Open-Meteo.
     p.iem.enabled = false;
+    p.open_meteo.base_url = server.uri();
+    p.open_meteo.policy = wm_net::RateLimitPolicy::local_test();
+    p.open_meteo.policy.max_body_bytes = 4 * 1024 * 1024;
     cfg.locations[0].observation_sources.secondary.clear();
     cfg.file.app.snapshot_interval_ms = 100;
     cfg.file.app.heartbeat_secs = 5;
@@ -287,6 +329,31 @@ async fn paper_runtime_end_to_end_without_storage_fails_closed() {
             .to_str()
             .unwrap()
             .contains("runtime-test@example.invalid")
+    );
+
+    // The day-1 forecast arrives and is shown — but this model was trained
+    // without it, so it cannot influence anything.
+    let snap = run
+        .until("forecast received", 20, |s| {
+            s.locations
+                .first()
+                .and_then(|l| l.forecast.as_ref())
+                .is_some()
+        })
+        .await;
+    let f = snap.snapshot.locations[0].forecast.clone().unwrap();
+    assert_eq!(f.product, "open_meteo/gfs_global/d1");
+    assert!(
+        !f.in_use && f.status.contains("does not use forecasts"),
+        "{f:?}"
+    );
+    assert!(f.hourly.len() >= 23, "{}", f.hourly.len());
+    assert!(f.day_max_c.is_some());
+    assert!(
+        snap.snapshot
+            .providers
+            .iter()
+            .any(|p| p.provider == "open_meteo" && p.requests_today >= 1)
     );
 
     // Operator kill switch reaches the kernel.
@@ -455,10 +522,11 @@ async fn paper_runtime_with_postgres_persists_and_warm_starts() {
 }
 
 /// No model file: the service keeps running without one (no weather trades),
-/// trains from the (mock) IEM archive, installs the model and asks to be
-/// restarted; the next start loads it. CSV rows are synthetic fixtures.
+/// trains from the (mock) IEM archive and forecast history, evaluates the
+/// forecast, installs the model and swaps it into the running engine — no
+/// restart. CSV rows and forecast values are synthetic fixtures.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn missing_model_is_trained_from_history_and_loaded_after_restart() {
+async fn missing_model_is_trained_from_history_and_swapped_in_without_restart() {
     use chrono::Datelike;
     let mut env = mock_env("train").await;
     let st = StationId::new("EHAM").unwrap();
@@ -491,39 +559,44 @@ async fn missing_model_is_trained_from_history_and_loaded_after_restart() {
         from_year: from.year(),
         min_days: 30,
         retry_after_secs: 3600,
+        retrain_after_days: 30,
     };
+    env.cfg.file.forecast.history_from = from;
     let iem = &mut env.cfg.file.providers.iem;
     iem.enabled = true;
     iem.base_url = env.server.uri();
     iem.policy = wm_net::RateLimitPolicy::local_test();
     iem.policy.max_body_bytes = 16 * 1024 * 1024;
 
-    let run = start(env.cfg.clone());
-    let res = tokio::time::timeout(std::time::Duration::from_secs(90), run.handle)
-        .await
-        .expect("training finishes")
-        .unwrap();
-    let err = res.expect_err("the runtime stops to load the new model");
-    assert!(
-        err.downcast_ref::<runtime::RestartRequested>().is_some(),
-        "{err:#}"
-    );
-    let model_file = data.join("models").join("eham.json");
-    assert!(model_file.is_file());
-    assert!(data.join("research").join("eham-survival.md").is_file());
-
-    // Restart: the model is loaded and the probability gate passes.
     let mut run = start(env.cfg.clone());
     let snap = run
-        .until("model loaded", 30, |s| s.model.state == "loaded")
+        .until("model trained and swapped in", 120, |s| {
+            s.model.state == "loaded" && s.model_id.starts_with("empirical-EHAM-all-")
+        })
         .await;
-    assert!(snap.snapshot.model_id.starts_with("empirical-EHAM-all-"));
+    assert!(!run.handle.is_finished(), "no restart needed");
+    let model_file = data.join("models").join("eham.json");
+    assert!(model_file.is_file());
+    let report = std::fs::read_to_string(data.join("research").join("eham-survival.md")).unwrap();
+    assert!(report.contains("## Forecast evaluation"), "{report}");
     assert!(
         snap.snapshot
             .risk
             .checks
             .iter()
             .any(|c| c.name == "Probability model" && c.ok)
+    );
+    // Three days of forecasts are far too few: evaluated, not adopted.
+    let verdict = snap.snapshot.model.forecast.clone().unwrap_or_default();
+    assert!(verdict.starts_with("not adopted"), "{verdict}");
+    let m = wm_app::setup::read_model(&model_file).unwrap();
+    let info = m.forecast.unwrap();
+    assert!(info.evaluated && !info.adopted);
+    assert!(
+        !m.levels
+            .iter()
+            .flatten()
+            .any(|d| *d == wm_strategy::probability::FeatureDim::ForecastRise)
     );
     run.stop().await;
     let _ = std::fs::remove_dir_all(&env.tmp);

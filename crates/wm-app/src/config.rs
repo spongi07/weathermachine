@@ -17,6 +17,9 @@
 //! | `WM_MODEL_AUTO_TRAIN` | `false` disables training from IEM history       |
 //! | `WM_DATA_DIR`       | writable data directory (models, history cache)    |
 //! | `WM_JOURNAL_RETENTION_DAYS` | days of order-book updates kept in the journal |
+//! | `WM_FORECAST`       | `false` disables the day-1 forecast (fetch + training) |
+//! | `WM_FORECAST_MODEL` | Open-Meteo model id, e.g. `gfs_global`             |
+//! | `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key (commercial host)  |
 //! | `WM_LOG_FORMAT`     | `json` \| `pretty`                                   |
 
 use anyhow::{Context, Result, bail};
@@ -96,6 +99,9 @@ pub struct ProvidersSection {
     /// IEM ASOS/METAR archive: history for model training only.
     #[serde(default = "default_iem_provider")]
     pub iem: ProviderSection,
+    /// Open-Meteo Previous Runs API: fixed-lead forecasts (predictive input).
+    #[serde(default = "default_open_meteo_provider")]
+    pub open_meteo: ProviderSection,
 }
 
 /// IEM throttles each IP to one request per second; we space requests 15 s
@@ -118,6 +124,67 @@ fn default_iem_provider() -> ProviderSection {
             max_body_bytes: 16 * 1024 * 1024,
             ..RateLimitPolicy::public_data_conservative()
         },
+    }
+}
+
+/// Open-Meteo's free tier allows 600 calls/min, 5,000/h and 10,000/day for
+/// non-commercial use. We make one call per location per refresh (hourly)
+/// and one per year of history when training — one at a time, 10 s apart.
+fn default_open_meteo_provider() -> ProviderSection {
+    ProviderSection {
+        enabled: true,
+        base_url: wm_weather::open_meteo::FREE_HOST.into(),
+        policy: RateLimitPolicy {
+            min_interval: std::time::Duration::from_secs(10),
+            timeout: std::time::Duration::from_secs(60),
+            connect_timeout: std::time::Duration::from_secs(10),
+            backoff_base: std::time::Duration::from_secs(60),
+            backoff_max: std::time::Duration::from_secs(3600),
+            throttle_backoff_base: std::time::Duration::from_secs(900),
+            circuit_failure_threshold: 3,
+            circuit_open_base: std::time::Duration::from_secs(1800),
+            circuit_open_max: std::time::Duration::from_secs(6 * 3600),
+            daily_budget: Some(500),
+            max_body_bytes: 4 * 1024 * 1024,
+            ..RateLimitPolicy::public_data_conservative()
+        },
+    }
+}
+
+/// The day-1 forecast as a model feature. It influences trading only when
+/// the out-of-sample evaluation at training adopts it; otherwise it is
+/// fetched and shown, nothing more.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ForecastSection {
+    pub enabled: bool,
+    /// Open-Meteo model id (Previous Runs API). `gfs_global`: 2 m
+    /// temperature archived since 2021, the longest history.
+    pub model: String,
+    /// Lead of every value in days (1 = forecast 24 h before valid time).
+    pub lead_days: u8,
+    /// A local day's series is used from this local minute on (knowledge
+    /// rule, identical in training and live).
+    pub ready_local_minute: u16,
+    /// Live refresh interval.
+    pub refresh_minutes: u64,
+    /// Earliest forecast history requested for training.
+    pub history_from: chrono::NaiveDate,
+    /// The evaluation needs at least this many scored days to adopt it.
+    pub min_eval_days: u64,
+}
+
+impl Default for ForecastSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "gfs_global".into(),
+            lead_days: 1,
+            ready_local_minute: 8 * 60,
+            refresh_minutes: 60,
+            history_from: chrono::NaiveDate::from_ymd_opt(2021, 3, 1).unwrap_or_default(),
+            min_eval_days: 365,
+        }
     }
 }
 
@@ -201,6 +268,10 @@ pub struct AutoTrainSection {
     pub min_days: u64,
     /// Wait before retrying after a failed attempt.
     pub retry_after_secs: u64,
+    /// Retrain (in the background, the current model keeps trading) when the
+    /// model is older than this many days, so new history — and new forecast
+    /// history for the evaluation — is used. 0 = never.
+    pub retrain_after_days: u64,
 }
 
 impl Default for AutoTrainSection {
@@ -211,6 +282,7 @@ impl Default for AutoTrainSection {
             from_year: 2005,
             min_days: 730,
             retry_after_secs: 6 * 3600,
+            retrain_after_days: 30,
         }
     }
 }
@@ -228,6 +300,8 @@ pub struct AppConfigFile {
     pub risk: RiskConfig,
     pub strategies: StrategiesSection,
     pub model: ModelSection,
+    #[serde(default)]
+    pub forecast: ForecastSection,
 }
 
 /// Per-location file.
@@ -311,12 +385,28 @@ pub struct PeakMeta {
 }
 
 /// Environment-supplied deployment settings.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct EnvSettings {
     pub database_url: Option<String>,
     pub contact: Option<String>,
     pub user_agent: Option<String>,
     pub admin_token: Option<String>,
+    /// Open-Meteo subscription key (never logged or stored).
+    pub open_meteo_api_key: Option<String>,
+}
+
+/// Secrets (database URL with its password, tokens, keys) are never printed.
+impl std::fmt::Debug for EnvSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |v: &Option<String>| v.as_ref().map(|_| "<set>");
+        f.debug_struct("EnvSettings")
+            .field("database_url", &set(&self.database_url))
+            .field("contact", &self.contact)
+            .field("user_agent", &self.user_agent)
+            .field("admin_token", &set(&self.admin_token))
+            .field("open_meteo_api_key", &set(&self.open_meteo_api_key))
+            .finish()
+    }
 }
 
 /// Fully loaded configuration.
@@ -364,6 +454,14 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn parse_bool(name: &str, v: &str) -> Result<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => bail!("{name} must be true or false, got '{other}'"),
+    }
+}
+
 impl AppConfig {
     /// Load and validate from `path` (or `WM_CONFIG`), applying env overrides.
     pub fn load(path: Option<&Path>) -> Result<Self> {
@@ -404,11 +502,13 @@ impl AppConfig {
             file.model.auto_train.data_dir = v;
         }
         if let Some(v) = env_nonempty("WM_MODEL_AUTO_TRAIN") {
-            file.model.auto_train.enabled = match v.to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => true,
-                "false" | "0" | "no" | "off" => false,
-                other => bail!("WM_MODEL_AUTO_TRAIN must be true or false, got '{other}'"),
-            };
+            file.model.auto_train.enabled = parse_bool("WM_MODEL_AUTO_TRAIN", &v)?;
+        }
+        if let Some(v) = env_nonempty("WM_FORECAST") {
+            file.forecast.enabled = parse_bool("WM_FORECAST", &v)?;
+        }
+        if let Some(v) = env_nonempty("WM_FORECAST_MODEL") {
+            file.forecast.model = v;
         }
         let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let loc_dir = {
@@ -440,6 +540,7 @@ impl AppConfig {
             contact: env_nonempty("WM_CONTACT"),
             user_agent: env_nonempty("WM_USER_AGENT"),
             admin_token: env_nonempty("WM_ADMIN_TOKEN"),
+            open_meteo_api_key: env_nonempty("WM_OPEN_METEO_API_KEY"),
         };
         let cfg = Self {
             file,
@@ -462,10 +563,35 @@ impl AppConfig {
             ("polymarket_clob", &p.polymarket_clob),
             ("polymarket_ws", &p.polymarket_ws),
             ("iem", &p.iem),
+            ("open_meteo", &p.open_meteo),
         ] {
             s.policy
                 .validate()
                 .with_context(|| format!("providers.{name}"))?;
+        }
+        let f = &self.file.forecast;
+        if !(1..=7).contains(&f.lead_days) {
+            bail!("forecast.lead_days must be 1..=7 (a same-day series is not knowledge-safe)");
+        }
+        if f.ready_local_minute >= 24 * 60 {
+            bail!("forecast.ready_local_minute must be < 1440");
+        }
+        if f.refresh_minutes < 15 {
+            bail!("forecast.refresh_minutes must be ≥ 15");
+        }
+        if f.min_eval_days < 30 {
+            bail!("forecast.min_eval_days must be ≥ 30");
+        }
+        if f.model.is_empty()
+            || !f
+                .model
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            bail!(
+                "forecast.model must be an Open-Meteo model id (a-z, 0-9, _), got '{}'",
+                f.model
+            );
         }
         self.file.risk.validate().context("risk")?;
         if self.locations.is_empty() {
@@ -504,6 +630,37 @@ impl AppConfig {
             self.env.contact.as_deref(),
         )
         .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    /// The forecast product fetched live and used in training; `None` when
+    /// forecasts are disabled.
+    pub fn forecast_product(&self) -> Option<wm_core::forecast::ForecastProduct> {
+        let f = &self.file.forecast;
+        (f.enabled && self.file.providers.open_meteo.enabled).then(|| {
+            wm_core::forecast::ForecastProduct {
+                provider: wm_core::ids::ProviderId::open_meteo(),
+                model: f.model.clone(),
+                lead_days: f.lead_days,
+                ready_local_minute: f.ready_local_minute,
+            }
+        })
+    }
+
+    /// Open-Meteo host: the customer host when a subscription key is set and
+    /// the configured host is the free one.
+    pub fn open_meteo_base_url(&self) -> String {
+        let configured = self
+            .file
+            .providers
+            .open_meteo
+            .base_url
+            .trim_end_matches('/');
+        if self.env.open_meteo_api_key.is_some() && configured == wm_weather::open_meteo::FREE_HOST
+        {
+            wm_weather::open_meteo::CUSTOMER_HOST.to_owned()
+        } else {
+            configured.to_owned()
+        }
     }
 
     pub fn buy_yes(&self) -> BuyYesConfig {
@@ -592,6 +749,47 @@ mod tests {
             AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
         cfg.file.providers.awc.policy.min_interval = std::time::Duration::from_secs(1);
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn forecast_defaults_and_host_selection() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        let p = cfg.forecast_product().unwrap();
+        assert_eq!(p.label(), "open_meteo/gfs_global/d1");
+        assert_eq!(p.ready_local_minute, 480);
+        assert_eq!(cfg.open_meteo_base_url(), wm_weather::open_meteo::FREE_HOST);
+        cfg.env.open_meteo_api_key = Some("k".into());
+        assert_eq!(
+            cfg.open_meteo_base_url(),
+            wm_weather::open_meteo::CUSTOMER_HOST
+        );
+        cfg.file.forecast.enabled = false;
+        assert!(cfg.forecast_product().is_none());
+        cfg.file.forecast.enabled = true;
+        cfg.file.forecast.lead_days = 0;
+        assert!(cfg.validate().is_err(), "lead 0 would leak same-day runs");
+        cfg.file.forecast.lead_days = 1;
+        cfg.file.forecast.model = "gfs&x=1".into();
+        assert!(cfg.validate().is_err(), "model id goes into a URL");
+        cfg.file.forecast.model = "ecmwf_ifs".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn secrets_never_appear_in_debug_output() {
+        let env = EnvSettings {
+            database_url: Some("postgres://wm:hunter2@db/wm".into()),
+            contact: Some("ops@example.org".into()),
+            user_agent: None,
+            admin_token: Some("tok-secret".into()),
+            open_meteo_api_key: Some("key-secret".into()),
+        };
+        let text = format!("{env:?}");
+        for secret in ["hunter2", "tok-secret", "key-secret"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert!(text.contains("ops@example.org"));
     }
 
     #[test]

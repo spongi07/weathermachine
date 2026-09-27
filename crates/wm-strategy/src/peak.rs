@@ -6,6 +6,7 @@
 //! the local heating cycle. This module only *measures* those features; the
 //! probability model estimates their predictive value from history.
 
+use crate::forecast::ForecastDay;
 use crate::state::{DayState, ObsPoint, ViewKind};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use chrono_tz::Tz;
@@ -70,6 +71,11 @@ pub struct PeakFeatures {
     pub observation_count: u32,
     /// `now − last observation`, minutes.
     pub data_age_minutes: i64,
+    /// Forecast rise (tenths °C) of the day's fixed-lead forecast at `now`,
+    /// see [`crate::forecast`]. `None`: no usable forecast (the model then
+    /// uses only observation features).
+    #[serde(default)]
+    pub forecast_rise_tenths: Option<i32>,
 }
 
 impl PeakFeatures {
@@ -156,6 +162,18 @@ impl PeakDetectionEngine {
     }
 
     pub fn assess(&self, state: &DayState, tz: Tz, now: DateTime<Utc>) -> Option<PeakAssessment> {
+        self.assess_with(state, tz, now, None)
+    }
+
+    /// [`Self::assess`] plus the forecast rise from `forecast` — the day's
+    /// fixed-lead series, which must be for `state.date`.
+    pub fn assess_with(
+        &self,
+        state: &DayState,
+        tz: Tz,
+        now: DateTime<Utc>,
+        forecast: Option<&ForecastDay>,
+    ) -> Option<PeakAssessment> {
         let high = state.high?;
         let current = state.current?;
         let after: Vec<ObsPoint> = state
@@ -193,6 +211,9 @@ impl PeakDetectionEngine {
             data_age_minutes: state
                 .last_observation_at
                 .map_or(i64::MAX, |t| (now - t).num_minutes()),
+            forecast_rise_tenths: forecast
+                .filter(|f| f.date == state.date)
+                .and_then(|f| f.rise_tenths(now)),
         };
         let near_high = features.drop_tenths <= self.config.watch_margin_tenths;
         let in_heating = (self.config.watch_start_after_noon..=self.config.watch_end_after_noon)
@@ -331,5 +352,50 @@ mod tests {
         assert_eq!(a.features.drop_tenths, 10);
         assert_eq!(a.features.data_age_minutes, 5);
         assert!((a.features.minutes_after_solar_noon - (15 * 60 + 5 - 13 * 60 - 44)).abs() <= 5);
+        assert_eq!(a.features.forecast_rise_tenths, None, "no forecast given");
+    }
+
+    #[test]
+    fn forecast_rise_comes_only_from_the_same_day() {
+        let mut e = TemperatureStateEngine::new(3);
+        let st = StationId::new("EHAM").unwrap();
+        e.register_station(st.clone(), Amsterdam);
+        e.apply_observation(&obs("2026-07-01T12:00:00Z", 180));
+        e.apply_observation(&obs("2026-07-01T13:00:00Z", 170));
+        let now = utc("2026-07-01T13:05:00Z");
+        let date = wm_core::time::local_date(now, Amsterdam);
+        let s = e.day_state(&st, date, ViewKind::All, now).unwrap();
+        let start = wm_core::time::local_day_start(date, Amsterdam);
+        // Forecast: 20.0 °C until 15:00 UTC, then a late warm-up to 21.5 °C.
+        let series: Vec<(DateTime<Utc>, i32)> = (0..=24)
+            .map(|h| {
+                let t = start + chrono::Duration::hours(h);
+                (
+                    t,
+                    if t > utc("2026-07-01T15:00:00Z") {
+                        215
+                    } else {
+                        200
+                    },
+                )
+            })
+            .collect();
+        let fc = ForecastDay::from_series(date, Amsterdam, &series, utc("2026-07-01T06:00:00Z"))
+            .unwrap();
+        let engine = PeakDetectionEngine::default();
+        let a = engine.assess_with(&s, Amsterdam, now, Some(&fc)).unwrap();
+        assert_eq!(a.features.forecast_rise_tenths, Some(15));
+        let mut other = fc.clone();
+        other.date = date.succ_opt().unwrap();
+        let b = engine
+            .assess_with(&s, Amsterdam, now, Some(&other))
+            .unwrap();
+        assert_eq!(
+            b.features.forecast_rise_tenths, None,
+            "another day's forecast"
+        );
+        // Everything else is identical with or without the forecast.
+        let c = engine.assess(&s, Amsterdam, now).unwrap();
+        assert_eq!(b, c);
     }
 }

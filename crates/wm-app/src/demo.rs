@@ -375,6 +375,8 @@ pub async fn run(
         state: "loaded".into(),
         detail: format!("synthetic demo model ({days} synthetic days)"),
         progress: None,
+        forecast: None,
+        retraining: None,
     };
 
     let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, RunId::new_v7())?;

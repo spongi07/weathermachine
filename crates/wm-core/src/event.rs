@@ -103,15 +103,23 @@ pub struct CorrectionEvent {
     pub labeled: bool,
 }
 
-/// Forecast snapshot (Phase 11). Predictive input only.
+/// Forecast snapshot. Predictive input only: it never changes the observed
+/// high, a resolution view or a settlement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForecastEvent {
     pub location: LocationId,
     pub provider: ProviderId,
     pub model: String,
+    /// When the forecast was issued — for a fixed-lead series (`lead_days`)
+    /// the retrieval time, since its values come from many runs.
     pub issued_at: DateTime<Utc>,
     pub predicted_max: Option<TempC>,
+    /// Hourly values by valid time (UTC), ascending.
     pub hourly: Vec<(DateTime<Utc>, TempC)>,
+    /// `Some(n)`: every value was forecast n × 24 h before its valid time (the
+    /// same product in training and live). `None`: a single model run.
+    #[serde(default)]
+    pub lead_days: Option<u8>,
 }
 
 /// Market metadata/rules discovered or changed.

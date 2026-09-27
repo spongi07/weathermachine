@@ -16,7 +16,7 @@ live run · ⏳ not started · ⛔ deliberately blocked.
 | 8 | YES backtest | 🟡 engine ready | Walk-forward EV per threshold 0.90…0.99 with CIs, stable neighbourhood |
 | 9 | NO backtest | 🟡 engine ready | Same, per distance +1/+2/+3 |
 | 10 | Split/unwind backtest | 🟡 strategy C (research-only) and unwind styles ready | C vs wait-and-confirm on identical data, net of all costs |
-| 11 | Forecast integration | ⏳ port defined (`ForecastProvider`), isolation tested | A forecast feature improves walk-forward calibration |
+| 11 | Forecast integration | ✅ Open-Meteo day-1 series live + history, forecast-rise feature, prequential evaluation with placebo control and automatic adoption; 🟡 verdict on real EHAM data comes from the first training on the host | A forecast feature improves walk-forward calibration (decided by the evaluation, §19) |
 | 12 | Portfolio research | 🟡 scenario exposure and limits built | Correlation across days/cities measured; limits reviewed |
 | 13 | Paper trading | 🟡 runtime, dashboard and Portainer stack ready | Trained model deployed; ≥ 4 weeks of paper results consistent with backtests; open paper positions carried across restarts |
 | 14 | Live trading | ⛔ | See [09-operations.md §42](09-operations.md#42-live-trading) |
@@ -42,7 +42,9 @@ health, conservative polling, back off, zero trades.
    `weather-machine model train`, or `research peak-survival --csv …`
    (repeat with `--filter hourly-nws-faa` for the hourly view).
 2. Review P(final | N minutes) per season, hour, drop and trajectory, with
-   CIs. Only then: forecasts (Phase 11), then prices (Phases 8–10).
+   CIs, and the forecast evaluation in the same report (Phase 11: verdict,
+   log loss with and without the forecast and against a placebo, P(final)
+   by forecast rise). Then prices (Phases 8–10).
 
 ## Immediate next steps
 

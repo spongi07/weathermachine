@@ -253,14 +253,33 @@ pub async fn execute(cli: Cli) -> Result<()> {
             } else {
                 "auto-train off"
             };
-            match setup::find_model(&cfg) {
-                setup::ModelLoad::Loaded(m) => println!(
-                    "model: {} ({} samples, {} → {})",
-                    m.id,
-                    m.total_samples(),
-                    m.trained_from,
-                    m.trained_to
+            match cfg.forecast_product() {
+                Some(p) => println!(
+                    "day-1 forecast: {} via {}{} — used only if the training evaluation adopts it",
+                    p.label(),
+                    cfg.open_meteo_base_url(),
+                    if cfg.env.open_meteo_api_key.is_some() {
+                        " (API key set)"
+                    } else {
+                        " (free tier: non-commercial use)"
+                    }
                 ),
+                None => println!("day-1 forecast: off"),
+            }
+            match setup::find_model(&cfg) {
+                setup::ModelLoad::Loaded(m) => {
+                    println!(
+                        "model: {} ({} samples, {} → {})",
+                        m.id,
+                        m.total_samples(),
+                        m.trained_from,
+                        m.trained_to
+                    );
+                    match &m.forecast {
+                        Some(f) => println!("model forecast: {}", f.verdict),
+                        None => println!("model forecast: not evaluated yet"),
+                    }
+                }
                 setup::ModelLoad::Missing(p) => {
                     println!(
                         "model: not yet at {} ({auto}; no weather trades until then)",
@@ -415,6 +434,7 @@ async fn model_train(
         .context("the IEM provider is disabled in the configuration")?;
     let archive = IemArchive::new(Arc::clone(fetcher), &cfg.file.providers.iem.base_url);
     let plan = TrainPlan::from_config(&cfg, path, clock.now().date_naive())?;
+    let forecast = setup::forecast_client(&cfg, &providers);
     let (_stop_tx, mut stop_rx) = watch::channel(false);
     let progress = |p: Progress| match p {
         Progress::Downloading { year, done, total } => {
@@ -422,11 +442,24 @@ async fn model_train(
                 "[{done}/{total}] {year}: cached or downloading from IEM (one request at a time)"
             );
         }
+        Progress::Forecast { year, done } => {
+            println!(
+                "forecast {year}: cached or downloading from Open-Meteo ({done} years so far)"
+            );
+        }
         Progress::Training { observations } => {
-            println!("training on {observations} historical reports…");
+            println!("training and evaluating on {observations} historical reports…");
         }
     };
-    let o = training::train(&archive, &plan, None, &progress, &mut stop_rx).await?;
+    let o = training::train(
+        &archive,
+        forecast.as_ref(),
+        &plan,
+        None,
+        &progress,
+        &mut stop_rx,
+    )
+    .await?;
     println!(
         "model {} written to {} — {} days ({} → {}), {} samples; {} years downloaded, {} cached",
         o.model_id,
@@ -438,7 +471,10 @@ async fn model_train(
         o.years_downloaded,
         o.years_cached
     );
-    println!("survival report: {}", plan.report_out.display());
+    if let Some(v) = &o.forecast_verdict {
+        println!("day-1 forecast: {v}");
+    }
+    println!("report: {}", plan.report_out.display());
     println!("restart the service to load the model");
     Ok(())
 }
@@ -520,9 +556,7 @@ async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
         Ok(Err(e)) => tracing::error!(error = %e, "HTTP server task failed"),
         _ => {}
     }
-    if let Err(e) = &result
-        && e.downcast_ref::<runtime::RestartRequested>().is_none()
-    {
+    if let Err(e) = &result {
         tracing::error!(error = %format!("{e:#}"), "runtime stopped with an error");
     }
     result

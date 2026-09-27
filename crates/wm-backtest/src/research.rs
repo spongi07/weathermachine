@@ -8,6 +8,9 @@
 //! HYPOTHESIS TO BACKTEST — not a fact: the probability rises with N, with
 //! larger drops, with steady declines and later in the afternoon.
 
+use crate::forecast_eval::{
+    EvaluationConfig, ForecastEvaluation, ForecastHistory, PLACEBO_OFFSET_DAYS, Scorer,
+};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -16,9 +19,9 @@ use wm_core::ids::StationId;
 use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::weather::Observation;
-use wm_strategy::probability::{drop_bucket, hour_bucket};
+use wm_strategy::probability::{drop_bucket, hour_bucket, rise_bucket};
 use wm_strategy::{
-    CONFIRMATION_WINDOWS, EmpiricalPeakModel, PeakConfig, PeakDetectionEngine,
+    CONFIRMATION_WINDOWS, EmpiricalPeakModel, PeakConfig, PeakDetectionEngine, PeakFeatures,
     TemperatureStateEngine, ViewKind,
 };
 
@@ -119,17 +122,58 @@ pub fn study(
     observations: &[Observation],
     cfg: &StudyConfig,
 ) -> (SurvivalReport, EmpiricalPeakModel) {
+    let out = run_study(observations, cfg, None, None);
+    (out.report, out.model)
+}
+
+/// Result of [`study_with_forecasts`].
+#[derive(Debug, Clone)]
+pub struct StudyOutput {
+    pub report: SurvivalReport,
+    /// Trained on every day, with a forecast refinement level. Whether it
+    /// may be used with forecasts is the evaluation's decision
+    /// ([`EmpiricalPeakModel::without_refinements`] otherwise).
+    pub model: EmpiricalPeakModel,
+    pub evaluation: Option<ForecastEvaluation>,
+}
+
+/// [`study`] joined with a fixed-lead forecast history: the survival table
+/// gains forecast-rise strata, the model a forecast refinement level, and a
+/// prequential evaluation measures whether the forecast improves decisions.
+pub fn study_with_forecasts(
+    observations: &[Observation],
+    cfg: &StudyConfig,
+    forecasts: &ForecastHistory,
+    eval: EvaluationConfig,
+) -> StudyOutput {
+    run_study(observations, cfg, Some(forecasts), Some(Scorer::new(eval)))
+}
+
+fn run_study(
+    observations: &[Observation],
+    cfg: &StudyConfig,
+    forecasts: Option<&ForecastHistory>,
+    mut scorer: Option<Scorer>,
+) -> StudyOutput {
     let view = view_of(cfg.filter);
     let mut engine = TemperatureStateEngine::new(3);
     engine.register_station(cfg.station.clone(), cfg.tz);
     let peak = PeakDetectionEngine::new(cfg.peak.clone());
+    let levels = if forecasts.is_some() {
+        EmpiricalPeakModel::with_forecast_refinement(EmpiricalPeakModel::default_levels())
+    } else {
+        EmpiricalPeakModel::default_levels()
+    };
     let mut model = EmpiricalPeakModel::new(
         format!("empirical-{}-{}", cfg.station, view.label()),
         cfg.station.to_string(),
         view.label(),
         cfg.k_classes,
-        EmpiricalPeakModel::default_levels(),
+        levels,
     );
+    let mut days_with_forecast = 0u64;
+    // Same levels, trained with placebo forecasts (evaluation only).
+    let mut placebo_model = scorer.as_ref().map(|_| model.clone());
 
     let mut by_day: BTreeMap<NaiveDate, Vec<&Observation>> = BTreeMap::new();
     for o in observations.iter().filter(|o| o.key.station == cfg.station) {
@@ -153,18 +197,27 @@ pub fn study(
             continue;
         };
         days += 1;
+        let forecast = forecasts.and_then(|h| h.days.get(date));
+        days_with_forecast += u64::from(forecast.is_some());
+        let placebo = match (&placebo_model, forecasts) {
+            (Some(_), Some(h)) => h.placebo_day(*date, cfg.tz, PLACEBO_OFFSET_DAYS),
+            _ => None,
+        };
         // Evaluate as of each eligible observation time (knowledge-consistent).
+        // The day is scored before it is learned: no day informs itself.
         let times: Vec<DateTime<Utc>> = final_state.points.iter().map(|p| p.observed_at).collect();
         let mut used: BTreeSet<(u32, DateTime<Utc>)> = BTreeSet::new();
+        let mut samples = Vec::with_capacity(times.len());
         for t in times {
             let Some(s) = engine.day_state(&cfg.station, *date, view, t) else {
                 continue;
             };
-            let Some(a) = peak.assess(&s, cfg.tz, t) else {
+            let Some(a) = peak.assess_with(&s, cfg.tz, t, forecast) else {
                 continue;
             };
-            let f = &a.features;
-            model.observe(f, final_high - f.high_whole);
+            let f = a.features;
+            let increment = final_high - f.high_whole;
+            let placebo_rise = placebo.as_ref().and_then(|p| p.rise_tenths(t));
             for w in CONFIRMATION_WINDOWS {
                 // One sample per (window, high-touch): the first observation whose
                 // observed coverage since the high reaches the window.
@@ -173,19 +226,38 @@ pub fn study(
                     && used.insert((w, f.high_at))
                 {
                     let is_final = final_high == f.high_whole;
-                    let strata = [
+                    let mut strata = vec![
                         "all".to_owned(),
                         format!("season={}", f.season.as_str()),
                         format!("hour={}", hour_bucket(f.local_minute_now)),
                         format!("drop={}", drop_bucket(f.drop_tenths)),
                         format!("trajectory={}", f.trajectory.as_str()),
                     ];
+                    if let Some(r) = f.forecast_rise_tenths {
+                        strata.push(format!("forecast_rise={}", rise_bucket(r)));
+                    }
                     for st in strata {
                         let e = table.entry((w, st)).or_insert((0, 0));
                         e.0 += 1;
                         e.1 += u64::from(is_final);
                     }
+                    if let (Some(sc), Some(pm)) = (scorer.as_mut(), placebo_model.as_ref())
+                        && w == sc.window()
+                    {
+                        sc.score(*date, &model, pm, &f, placebo_rise, increment);
+                    }
                 }
+            }
+            samples.push((f, placebo_rise, increment));
+        }
+        for (f, placebo_rise, increment) in &samples {
+            model.observe(f, *increment);
+            if let Some(pm) = placebo_model.as_mut() {
+                let pf = PeakFeatures {
+                    forecast_rise_tenths: *placebo_rise,
+                    ..f.clone()
+                };
+                pm.observe(&pf, *increment);
             }
         }
         engine.prune(*date);
@@ -211,8 +283,12 @@ pub fn study(
         model.trained_from = f;
         model.trained_to = t;
     }
-    (
-        SurvivalReport {
+    let evaluation = match (scorer, forecasts) {
+        (Some(sc), Some(h)) => Some(sc.finish(&h.product, days_with_forecast)),
+        _ => None,
+    };
+    StudyOutput {
+        report: SurvivalReport {
             station: cfg.station.to_string(),
             view: view.label(),
             days,
@@ -221,7 +297,8 @@ pub fn study(
             rows,
         },
         model,
-    )
+        evaluation,
+    }
 }
 
 /// Walk-forward split: train on `train_days`, skip `embargo_days`, test on

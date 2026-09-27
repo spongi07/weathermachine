@@ -31,6 +31,7 @@ use wm_core::event::{
     EventEnvelope, EventSource, MarketSnapshotEvent, ObservationEvent, OperatorCommand,
     OrderBookEvent, TimerEvent, TimerKind, WeatherMachineEvent,
 };
+use wm_core::forecast::ForecastProduct;
 use wm_core::health::{CircuitState, ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{EventSlug, RunId, StationId, TokenId};
 use wm_core::market::{DailyTemperatureMarket, OrderBook, Side};
@@ -47,37 +48,43 @@ use wm_polymarket::{
 };
 use wm_storage::PgStore;
 use wm_storage::wm_execution_record::OrderRow;
-use wm_strategy::{NoEdgeModel, ProbabilityModel};
+use wm_strategy::{EmpiricalPeakModel, NoEdgeModel, ProbabilityModel};
+use wm_weather::forecast::{ForecastProvider, ForecastQuery};
 use wm_weather::{
-    CollectorConfig, CollectorRegistry, CollectorStatus, IemArchive, PollingHints, StationCollector,
+    CollectorConfig, CollectorRegistry, CollectorStatus, IemArchive, OpenMeteoPreviousRuns,
+    PollingHints, StationCollector,
 };
-
-/// The runtime stopped so that the process restarts and loads a newly trained
-/// probability model (the container's restart policy brings it back).
-#[derive(Debug)]
-pub struct RestartRequested;
-
-impl std::fmt::Display for RestartRequested {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("restart requested to load the newly trained probability model")
-    }
-}
-
-impl std::error::Error for RestartRequested {}
-
-/// Process exit code for [`RestartRequested`] (EX_TEMPFAIL): any restart
-/// policy, including `on-failure`, brings the service back.
-pub const RESTART_EXIT_CODE: u8 = 75;
 
 type SharedModel = Arc<Mutex<ModelDto>>;
 
-fn set_model(status: &SharedModel, state: &str, detail: String, progress: Option<(u32, u32)>) {
-    let mut g = status
+fn update_model(status: &SharedModel, f: impl FnOnce(&mut ModelDto)) {
+    f(&mut status
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    g.state = state.to_owned();
-    g.detail = detail;
-    g.progress = progress;
+        .unwrap_or_else(std::sync::PoisonError::into_inner));
+}
+
+fn set_model(status: &SharedModel, state: &str, detail: String, progress: Option<(u32, u32)>) {
+    update_model(status, |g| {
+        g.state = state.to_owned();
+        g.detail = detail;
+        g.progress = progress;
+    });
+}
+
+fn set_loaded(status: &SharedModel, m: &EmpiricalPeakModel) {
+    update_model(status, |g| {
+        g.state = "loaded".into();
+        g.detail = format!(
+            "{} · {} samples · {} → {}",
+            m.id,
+            m.total_samples(),
+            m.trained_from,
+            m.trained_to
+        );
+        g.progress = None;
+        g.forecast = m.forecast.as_ref().map(|f| f.verdict.clone());
+        g.retraining = None;
+    });
 }
 
 /// Handles the runtime shares with the HTTP server.
@@ -576,21 +583,16 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, run_id)?;
     let model_status: SharedModel = Arc::new(Mutex::new(ModelDto::default()));
     let mut invalid_model: Option<String> = None;
-    let mut train_into: Option<std::path::PathBuf> = None;
+    // Model file the maintenance task keeps current, and the model it starts from.
+    let mut maintain: Option<(std::path::PathBuf, Option<Arc<EmpiricalPeakModel>>)> = None;
     let model: Arc<dyn ProbabilityModel> = match setup::find_model(&cfg) {
         ModelLoad::Loaded(m) => {
-            set_model(
-                &model_status,
-                "loaded",
-                format!(
-                    "{} · {} samples · {} → {}",
-                    m.id,
-                    m.total_samples(),
-                    m.trained_from,
-                    m.trained_to
-                ),
-                None,
-            );
+            set_loaded(&model_status, &m);
+            if cfg.file.model.auto_train.enabled
+                && let Some(path) = setup::model_path(&cfg)
+            {
+                maintain = Some((path, Some(Arc::clone(&m))));
+            }
             m
         }
         ModelLoad::Missing(path) if cfg.file.model.auto_train.enabled => {
@@ -600,7 +602,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 "starting: training from IEM METAR history".into(),
                 None,
             );
-            train_into = Some(path);
+            maintain = Some((path, None));
             Arc::new(NoEdgeModel)
         }
         ModelLoad::Missing(path) => {
@@ -656,41 +658,51 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         with_side(&side, |st| st.alert("critical", msg));
     }
 
-    // -- Probability model training (only while no model file exists) ------------------
-    let (model_ready_tx, mut model_ready_rx) = watch::channel(false);
-    let mut model_ready_open = true;
-    let mut keep_model_ready_tx = Some(model_ready_tx);
-    if let Some(path) = train_into {
+    // -- Probability model: first training, forecast evaluation, periodic retraining ----
+    // New models are swapped into the running engine; trading never stops.
+    let (models_tx, mut models_rx) = mpsc::channel::<Arc<EmpiricalPeakModel>>(2);
+    let mut models_open = true;
+    if let Some((path, current)) = maintain {
         match providers.fetcher("iem") {
             Some(f) => {
                 let archive = IemArchive::new(Arc::clone(f), &cfg.file.providers.iem.base_url);
                 let plan = TrainPlan::from_config(&cfg, path, clock.now().date_naive())?;
+                let at = &cfg.file.model.auto_train;
+                let policy = MaintenancePolicy {
+                    retry_after: std::time::Duration::from_secs(at.retry_after_secs.max(60)),
+                    retrain_after: (at.retrain_after_days > 0).then(|| {
+                        Duration::days(i64::try_from(at.retrain_after_days).unwrap_or(i64::MAX / 2))
+                    }),
+                    product: plan.forecast.as_ref().map(|f| f.product.clone()),
+                    retrain_existing: cfg.file.model.path.is_none(),
+                };
                 let audit: Option<Arc<dyn wm_core::ingest::IngestSink>> = store
                     .as_ref()
                     .map(|s| Arc::new(s.clone()) as Arc<dyn wm_core::ingest::IngestSink>);
-                tasks.push(tokio::spawn(auto_train_loop(
+                tasks.push(tokio::spawn(model_maintenance_loop(
                     archive,
+                    setup::forecast_client(&cfg, &providers),
                     plan,
-                    std::time::Duration::from_secs(
-                        cfg.file.model.auto_train.retry_after_secs.max(60),
-                    ),
+                    policy,
+                    current,
                     audit,
                     Arc::clone(&model_status),
                     Arc::clone(&side),
-                    keep_model_ready_tx
-                        .take()
-                        .unwrap_or_else(|| watch::channel(false).0),
+                    models_tx,
                     Arc::clone(&clock),
                     shutdown.clone(),
                 )));
             }
-            None => set_model(
+            None if current.is_none() => set_model(
                 &model_status,
                 "missing",
                 "no model and the IEM provider is disabled — no weather trades".into(),
                 None,
             ),
+            None => {}
         }
+    } else {
+        drop(models_tx);
     }
 
     // -- Station collectors (one per station, cross-process lease) -------------------
@@ -766,6 +778,36 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         collector_status.insert(ids.station.clone(), collector.status());
         hint_txs.insert(ids.station.clone(), hint_tx);
         tasks.push(tokio::spawn(collector.run(shutdown.clone())));
+    }
+
+    // -- Day-1 forecast (predictive input; used only by a model that adopted it) -----------
+    if let (Some(product), Some(client)) = (
+        cfg.forecast_product(),
+        setup::forecast_client(&cfg, &providers),
+    ) {
+        let targets = cfg
+            .locations
+            .iter()
+            .map(|l| {
+                let ids = setup::location_ids(l)?;
+                Ok(ForecastTarget {
+                    location: ids.location,
+                    tz: ids.timezone,
+                    latitude: l.station.latitude,
+                    longitude: l.station.longitude,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        tasks.push(tokio::spawn(forecast_loop(
+            client,
+            targets,
+            product,
+            std::time::Duration::from_secs(cfg.file.forecast.refresh_minutes.max(15) * 60),
+            events_tx.clone(),
+            Arc::clone(&side),
+            Arc::clone(&clock),
+            shutdown.clone(),
+        )));
     }
 
     // -- Markets: discovery, stream, REST fallback --------------------------------------
@@ -875,6 +917,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         "polymarket_clob",
         "polymarket_ws",
         "iem",
+        "open_meteo",
     ]
     .iter()
     .filter_map(|n| providers.gate(n).cloned())
@@ -887,7 +930,6 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     ));
     publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut shutdown_rx = shutdown.clone();
-    let mut restart = false;
     ready.store(true, Ordering::Release);
     tracing::info!("paper runtime ready");
 
@@ -920,14 +962,27 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 session.push(EventEnvelope::new(last_knowledge, EventSource::Live, WeatherMachineEvent::Timer(TimerEvent { due_at: last_knowledge, kind: TimerKind::Heartbeat })));
             }
             _ = publish_tick.tick() => publish = true,
-            r = model_ready_rx.changed(), if model_ready_open => match r {
-                Ok(()) if *model_ready_rx.borrow() => {
-                    tracing::info!("new probability model installed: restarting to load it");
-                    restart = true;
-                    break;
+            m = models_rx.recv(), if models_open => match m {
+                Some(m) => {
+                    let previous = session.engine().model_id().to_owned();
+                    session.engine_mut().set_model(Arc::clone(&m) as Arc<dyn ProbabilityModel>);
+                    set_loaded(&model_status, &m);
+                    tracing::info!(previous = %previous, model = %m.id, "probability model installed");
+                    if let Some(s) = store.clone() {
+                        let details = serde_json::json!({
+                            "run_id": run_id.to_string(),
+                            "previous": previous,
+                            "model": m.id,
+                            "forecast": m.forecast.as_ref().map(|f| f.verdict.clone()),
+                        });
+                        tokio::spawn(async move {
+                            let _ = s
+                                .record_system_event("info", "model", "probability model installed", &details)
+                                .await;
+                        });
+                    }
                 }
-                Ok(()) => {}
-                Err(_) => model_ready_open = false,
+                None => models_open = false,
             },
             r = shutdown_rx.changed() => if r.is_err() || *shutdown_rx.borrow() { break; },
         }
@@ -1011,18 +1066,10 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             .record_system_event(
                 "info",
                 "shutdown",
-                if restart {
-                    "weather machine restarting to load a new model"
-                } else {
-                    "weather machine stopped"
-                },
+                "weather machine stopped",
                 &serde_json::json!({ "run_id": run_id.to_string() }),
             )
             .await;
-    }
-    drop(keep_model_ready_tx);
-    if restart {
-        return Err(RestartRequested.into());
     }
     Ok(())
 }
@@ -1057,75 +1104,275 @@ async fn journal_retention_loop(
     }
 }
 
-/// Train until a model is installed, retrying after failures. Stops on
-/// shutdown; signals `ready` once the model file is in place.
-#[allow(clippy::too_many_arguments)]
-async fn auto_train_loop(
-    archive: IemArchive,
-    mut plan: TrainPlan,
+/// When the probability model is (re)trained.
+#[derive(Debug, Clone)]
+struct MaintenancePolicy {
+    /// Wait after a failed attempt.
     retry_after: std::time::Duration,
+    /// Retrain models older than this.
+    retrain_after: Option<Duration>,
+    /// The configured forecast product (`None`: forecasts off).
+    product: Option<ForecastProduct>,
+    /// `false` when the operator supplied the model file: train it only when
+    /// it is missing, never replace it.
+    retrain_existing: bool,
+}
+
+/// Why the model should be (re)trained now, if at all.
+fn training_due(
+    model: Option<&EmpiricalPeakModel>,
+    p: &MaintenancePolicy,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let Some(m) = model else {
+        return Some("no model yet".into());
+    };
+    if !p.retrain_existing {
+        return None;
+    }
+    let retry = Duration::from_std(p.retry_after).unwrap_or_else(|_| Duration::hours(6));
+    if let Some(product) = &p.product {
+        match &m.forecast {
+            None => return Some(format!("evaluate the {} forecast", product.label())),
+            Some(f) if f.product != *product => {
+                return Some(format!("forecast changed to {}", product.label()));
+            }
+            Some(f) if !f.evaluated && now - f.evaluated_at >= retry => {
+                return Some("forecast history was unavailable at the last training".into());
+            }
+            _ => {}
+        }
+    }
+    match p.retrain_after {
+        Some(age) if now - m.created_at >= age => Some(format!(
+            "model is {} days old",
+            (now - m.created_at).num_days()
+        )),
+        _ => None,
+    }
+}
+
+fn progress_text(p: &Progress) -> (String, Option<(u32, u32)>) {
+    match *p {
+        Progress::Downloading { year, done, total } => (
+            format!("downloading METAR history from IEM: {year} ({done}/{total} years)"),
+            Some((done, total)),
+        ),
+        Progress::Forecast { year, done } => (
+            format!("downloading day-1 forecast history: {year} ({done} years so far)"),
+            None,
+        ),
+        Progress::Training { observations } => (
+            format!("training and evaluating on {observations} historical reports"),
+            None,
+        ),
+    }
+}
+
+/// Keeps the model current: trains it when missing, evaluates the forecast
+/// once it is enabled, and retrains periodically — in the background, while
+/// the current model keeps trading. Each new model goes to the engine loop.
+#[allow(clippy::too_many_arguments)]
+async fn model_maintenance_loop(
+    archive: IemArchive,
+    forecast: Option<OpenMeteoPreviousRuns>,
+    mut plan: TrainPlan,
+    policy: MaintenancePolicy,
+    mut current: Option<Arc<EmpiricalPeakModel>>,
     audit: Option<Arc<dyn wm_core::ingest::IngestSink>>,
     status: SharedModel,
     side: SharedSide,
-    ready: watch::Sender<bool>,
+    installed: mpsc::Sender<Arc<EmpiricalPeakModel>>,
     clock: Arc<dyn Clock>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
     loop {
-        plan.today = clock.now().date_naive();
-        let st = Arc::clone(&status);
-        let progress = move |p: Progress| match p {
-            Progress::Downloading { year, done, total } => set_model(
-                &st,
-                "training",
-                format!("downloading METAR history from IEM: {year} ({done}/{total} years)"),
-                Some((done, total)),
-            ),
-            Progress::Training { observations } => set_model(
-                &st,
-                "training",
-                format!("training on {observations} historical reports"),
-                None,
-            ),
-        };
-        tracing::info!(station = %plan.station, from = plan.from_year, "training the probability model from IEM history");
-        match training::train(&archive, &plan, audit.as_ref(), &progress, &mut shutdown).await {
-            Ok(o) => {
-                let msg = format!(
-                    "model {} trained on {} days ({} → {}), {} samples; restarting to load it",
-                    o.model_id,
-                    o.days,
-                    o.from.map(|d| d.to_string()).unwrap_or_default(),
-                    o.to.map(|d| d.to_string()).unwrap_or_default(),
-                    o.samples
-                );
-                tracing::info!(
-                    years_downloaded = o.years_downloaded,
-                    years_cached = o.years_cached,
-                    observations = o.observations,
-                    "{msg}"
-                );
-                set_model(&status, "training", msg.clone(), None);
-                with_side(&side, |s| s.alert("info", msg));
-                let _ = ready.send(true);
-                return;
-            }
-            Err(_) if *shutdown.borrow() => return,
-            Err(e) => {
-                let retry_at = clock.now()
-                    + Duration::from_std(retry_after).unwrap_or_else(|_| Duration::hours(6));
-                let msg = format!(
-                    "model training failed: {e:#}; next attempt {} UTC — no weather trades until then",
-                    retry_at.format("%Y-%m-%d %H:%M")
-                );
-                tracing::warn!("{msg}");
-                set_model(&status, "failed", msg.clone(), None);
-                with_side(&side, |s| s.alert("warning", msg));
-                tokio::select! {
-                    _ = tokio::time::sleep(retry_after) => {}
-                    r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+        let now = clock.now();
+        let wait = match training_due(current.as_deref(), &policy, now) {
+            None => CHECK_EVERY,
+            Some(reason) => {
+                plan.today = now.date_naive();
+                let background = current.is_some();
+                let st = Arc::clone(&status);
+                let progress = move |p: Progress| {
+                    let (text, fraction) = progress_text(&p);
+                    if background {
+                        update_model(&st, |g| g.retraining = Some(format!("retraining: {text}")));
+                    } else {
+                        set_model(&st, "training", text, fraction);
+                    }
+                };
+                tracing::info!(station = %plan.station, %reason, background, "training the probability model");
+                if background {
+                    update_model(&status, |g| {
+                        g.retraining = Some(format!("retraining: {reason}"))
+                    });
+                } else {
+                    set_model(&status, "training", format!("starting: {reason}"), None);
+                }
+                let result = training::train(
+                    &archive,
+                    forecast.as_ref(),
+                    &plan,
+                    audit.as_ref(),
+                    &progress,
+                    &mut shutdown,
+                )
+                .await
+                .and_then(|o| setup::read_model(&plan.model_out).map(|m| (o, m)));
+                match result {
+                    Ok((o, m)) => {
+                        let msg = format!(
+                            "model {} trained on {} days ({} → {}), {} samples{}",
+                            o.model_id,
+                            o.days,
+                            o.from.map(|d| d.to_string()).unwrap_or_default(),
+                            o.to.map(|d| d.to_string()).unwrap_or_default(),
+                            o.samples,
+                            o.forecast_verdict
+                                .as_deref()
+                                .map(|v| format!("; forecast {v}"))
+                                .unwrap_or_default()
+                        );
+                        tracing::info!(
+                            years_downloaded = o.years_downloaded,
+                            years_cached = o.years_cached,
+                            observations = o.observations,
+                            "{msg}"
+                        );
+                        with_side(&side, |s| s.alert("info", msg));
+                        let m = Arc::new(m);
+                        if installed.send(Arc::clone(&m)).await.is_err() {
+                            return;
+                        }
+                        current = Some(m);
+                        CHECK_EVERY
+                    }
+                    Err(_) if *shutdown.borrow() => return,
+                    Err(e) => {
+                        let retry_at = clock.now()
+                            + Duration::from_std(policy.retry_after)
+                                .unwrap_or_else(|_| Duration::hours(6));
+                        let next = retry_at.format("%Y-%m-%d %H:%M");
+                        match &current {
+                            Some(m) => {
+                                let msg = format!(
+                                    "retraining failed: {e:#}; keeping model {} — next attempt {next} UTC",
+                                    m.id
+                                );
+                                tracing::warn!("{msg}");
+                                update_model(&status, |g| g.retraining = None);
+                                with_side(&side, |s| s.alert("warning", msg));
+                            }
+                            None => {
+                                let msg = format!(
+                                    "model training failed: {e:#}; next attempt {next} UTC — no weather trades until then"
+                                );
+                                tracing::warn!("{msg}");
+                                set_model(&status, "failed", msg.clone(), None);
+                                with_side(&side, |s| s.alert("warning", msg));
+                            }
+                        }
+                        policy.retry_after
+                    }
                 }
             }
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+        }
+    }
+}
+
+/// A location whose day-1 forecast is fetched.
+#[derive(Debug, Clone)]
+struct ForecastTarget {
+    location: wm_core::ids::LocationId,
+    tz: chrono_tz::Tz,
+    latitude: f64,
+    longitude: f64,
+}
+
+/// Fetches each location's day-1 series every `refresh` and just after each
+/// day's ready time, and hands it to the engine. Failures only mean the
+/// model runs without the forecast; they are alerted once until recovery.
+#[allow(clippy::too_many_arguments)]
+async fn forecast_loop(
+    client: OpenMeteoPreviousRuns,
+    targets: Vec<ForecastTarget>,
+    product: ForecastProduct,
+    refresh: std::time::Duration,
+    events: mpsc::Sender<EventEnvelope>,
+    side: SharedSide,
+    clock: Arc<dyn Clock>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut failing = false;
+    loop {
+        for t in &targets {
+            let query = ForecastQuery {
+                location: t.location.clone(),
+                latitude: t.latitude,
+                longitude: t.longitude,
+                local_date: local_date(clock.now(), t.tz),
+            };
+            let fetched = tokio::select! {
+                r = client.fetch(&query, std::time::Duration::from_secs(60)) => r,
+                _ = shutdown.changed() => return,
+            };
+            match fetched {
+                Ok(ev) => {
+                    if failing {
+                        failing = false;
+                        with_side(&side, |s| s.alert("info", "day-1 forecast available again"));
+                    }
+                    let env = EventEnvelope::new(
+                        clock.now(),
+                        EventSource::Live,
+                        WeatherMachineEvent::ForecastUpdate(ev),
+                    );
+                    if events.send(env).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(location = %t.location, error = %e, "day-1 forecast unavailable");
+                    if !failing {
+                        failing = true;
+                        with_side(&side, |s| {
+                            s.alert(
+                                "warning",
+                                format!(
+                                    "day-1 forecast unavailable ({e}); the model runs without it"
+                                ),
+                            )
+                        });
+                    }
+                }
+            }
+        }
+        // Next refresh, or two minutes after the next local ready time.
+        let now = clock.now();
+        let next_ready = targets
+            .iter()
+            .map(|t| {
+                let today = local_date(now, t.tz);
+                let r = product.usable_from(today, t.tz);
+                if r > now {
+                    r
+                } else {
+                    product.usable_from(today.succ_opt().unwrap_or(today), t.tz)
+                }
+            })
+            .min();
+        let wait = next_ready
+            .and_then(|r| (r + Duration::minutes(2) - now).to_std().ok())
+            .map_or(refresh, |w| w.min(refresh));
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
         }
     }
 }
@@ -1378,6 +1625,95 @@ mod tests {
     use super::*;
     use wm_core::market::BookLevel;
     use wm_core::units::{Price, Shares};
+
+    fn product(model: &str) -> ForecastProduct {
+        ForecastProduct {
+            provider: wm_core::ids::ProviderId::open_meteo(),
+            model: model.into(),
+            lead_days: 1,
+            ready_local_minute: 480,
+        }
+    }
+
+    fn policy() -> MaintenancePolicy {
+        MaintenancePolicy {
+            retry_after: std::time::Duration::from_secs(6 * 3600),
+            retrain_after: Some(Duration::days(30)),
+            product: Some(product("gfs_global")),
+            retrain_existing: true,
+        }
+    }
+
+    fn model_at(created: &str, forecast: Option<(bool, &str)>) -> EmpiricalPeakModel {
+        let mut m =
+            EmpiricalPeakModel::new("m", "EHAM", "all", 4, EmpiricalPeakModel::default_levels());
+        m.created_at = t(created);
+        m.forecast = forecast.map(|(evaluated, model)| wm_strategy::ForecastModelInfo {
+            product: product(model),
+            adopted: false,
+            verdict: "v".into(),
+            days_with_forecast: 0,
+            evaluated,
+            evaluated_at: t(created),
+        });
+        m
+    }
+
+    #[test]
+    fn training_is_due_for_missing_unevaluated_changed_and_old_models() {
+        let p = policy();
+        let now = t("2026-09-27T12:00:00Z");
+        assert_eq!(training_due(None, &p, now).as_deref(), Some("no model yet"));
+        // A model trained before forecasts existed: evaluate them now.
+        let old = model_at("2026-09-26T12:00:00Z", None);
+        assert!(
+            training_due(Some(&old), &p, now)
+                .unwrap()
+                .contains("evaluate")
+        );
+        // Evaluated, fresh: nothing to do.
+        let fresh = model_at("2026-09-26T12:00:00Z", Some((true, "gfs_global")));
+        assert_eq!(training_due(Some(&fresh), &p, now), None);
+        // Another forecast model configured since.
+        let other = model_at("2026-09-26T12:00:00Z", Some((true, "ecmwf_ifs")));
+        assert!(
+            training_due(Some(&other), &p, now)
+                .unwrap()
+                .contains("changed")
+        );
+        // History was unavailable: retried only after `retry_after`.
+        let failed = model_at("2026-09-27T09:00:00Z", Some((false, "gfs_global")));
+        assert_eq!(training_due(Some(&failed), &p, now), None, "within 6 h");
+        assert!(training_due(Some(&failed), &p, t("2026-09-27T15:00:01Z")).is_some());
+        // Age.
+        let aged = model_at("2026-08-27T11:00:00Z", Some((true, "gfs_global")));
+        assert!(
+            training_due(Some(&aged), &p, now)
+                .unwrap()
+                .contains("31 days old")
+        );
+        let never = MaintenancePolicy {
+            retrain_after: None,
+            ..policy()
+        };
+        assert_eq!(training_due(Some(&aged), &never, now), None);
+        // Forecasts off: an unevaluated model is fine.
+        let off = MaintenancePolicy {
+            product: None,
+            ..policy()
+        };
+        assert_eq!(training_due(Some(&old), &off, now), None);
+        // An operator-supplied model file is never replaced.
+        let operator = MaintenancePolicy {
+            retrain_existing: false,
+            ..policy()
+        };
+        assert_eq!(training_due(Some(&aged), &operator, now), None);
+        assert!(
+            training_due(None, &operator, now).is_some(),
+            "but trained when missing"
+        );
+    }
 
     fn t(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

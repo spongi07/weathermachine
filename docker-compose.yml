@@ -69,9 +69,16 @@ services:
       WM_DASHBOARD_USER: ${WM_DASHBOARD_USER:-}
       WM_DASHBOARD_PASSWORD: ${WM_DASHBOARD_PASSWORD:-}
       # Model file; unset = /data/models/eham.json, trained automatically on
-      # first start from IEM METAR history (then one restart to load it).
+      # first start from IEM METAR history (loaded without a restart) and
+      # retrained in the background every 30 days.
       WM_MODEL_PATH: ${WM_MODEL_PATH:-}
       WM_MODEL_AUTO_TRAIN: ${WM_MODEL_AUTO_TRAIN:-true}
+      # Day-1 forecast (Open-Meteo). Used by the model only if the training
+      # evaluation proves it helps; false = never fetched.
+      WM_FORECAST: ${WM_FORECAST:-true}
+      WM_FORECAST_MODEL: ${WM_FORECAST_MODEL:-gfs_global}
+      # Open-Meteo subscription key (commercial use). Empty = free tier.
+      WM_OPEN_METEO_API_KEY: ${WM_OPEN_METEO_API_KEY:-}
       # Days of order-book updates kept in the replay journal (bounds disk use).
       WM_JOURNAL_RETENTION_DAYS: ${WM_JOURNAL_RETENTION_DAYS:-7}
       WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}

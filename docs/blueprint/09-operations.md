@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (257 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (286 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -102,10 +102,15 @@ latency, depth, fees and no mid fills. Settlement is from observed data
 Paper trading is Phase 13. It needs a trained model, recorded books and
 the Phase 0 filter confirmation to be meaningful. The model is trained on
 the host automatically when none exists: IEM history (one station-year per
-request, 15 s apart, finished years cached on the data volume) → the
-peak-survival study → at least 730 usable days → model and report written
-atomically → one restart (exit code 75) to load it. Until then the MODEL
-badge shows the progress and the engine does not trade weather.
+request, 15 s apart, finished years cached on the data volume) → day-1
+forecast history (Open-Meteo, newest year first, cached) → the peak-survival
+study with the forecast evaluation (§19) → at least 730 usable days → model
+and report written atomically → swapped into the running engine (no
+restart). Until then the MODEL badge shows the progress and the engine does
+not trade weather. Afterwards the model is retrained in the background when
+the forecast has not been evaluated yet, the forecast model changed, or the
+model is 30 days old (`retrain_after_days`); the current model keeps trading
+until the new one is swapped in (MODEL ↻ on the dashboard).
 
 ## 42. Live trading
 

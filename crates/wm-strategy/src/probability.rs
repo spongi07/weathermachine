@@ -13,6 +13,7 @@ use crate::peak::{PeakFeatures, TrajectoryClass};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use wm_core::forecast::ForecastProduct;
 use wm_core::market::TemperatureBucket;
 
 /// Distribution over the final-high increment.
@@ -97,6 +98,12 @@ impl IncrementDistribution {
 pub trait ProbabilityModel: Send + Sync {
     fn id(&self) -> &str;
     fn distribution(&self, features: &PeakFeatures) -> Option<IncrementDistribution>;
+    /// The forecast series this model conditions on, if any. The engine
+    /// derives the forecast rise only from events of this product, with the
+    /// product's knowledge rule; any other forecast is ignored.
+    fn forecast_product(&self) -> Option<&ForecastProduct> {
+        None
+    }
 }
 
 /// Fail-closed model: never provides a distribution, so no strategy can find edge.
@@ -122,6 +129,18 @@ pub enum FeatureDim {
     Drop,
     LocalHour,
     Trajectory,
+    /// Forecast rise bucket ([`rise_bucket`]); unavailable without a forecast.
+    ForecastRise,
+}
+
+impl FeatureDim {
+    /// A refinement dimension can be missing at inference time. Levels that
+    /// contain one are skipped when it is missing (the distribution is then
+    /// the one of the level above), and model support is counted on the
+    /// levels without refinement dimensions.
+    pub fn is_refinement(self) -> bool {
+        matches!(self, FeatureDim::ForecastRise)
+    }
 }
 
 /// Bucket boundaries for each dimension.
@@ -145,6 +164,17 @@ pub fn drop_bucket(tenths: i32) -> &'static str {
     }
 }
 
+/// Forecast rise buckets (tenths °C): strong cooling ahead (≤ −2.5 °C),
+/// cooling, flat (within ±0.4 °C) and warming (≥ +0.5 °C).
+pub fn rise_bucket(tenths: i32) -> &'static str {
+    match tenths {
+        i32::MIN..=-25 => "cool2",
+        -24..=-5 => "cool",
+        -4..=4 => "flat",
+        _ => "warm",
+    }
+}
+
 pub fn hour_bucket(local_minute: u16) -> &'static str {
     match local_minute / 60 {
         0..=11 => "h<12",
@@ -155,30 +185,54 @@ pub fn hour_bucket(local_minute: u16) -> &'static str {
     }
 }
 
-fn dim_value(dim: FeatureDim, f: &PeakFeatures) -> String {
-    match dim {
-        FeatureDim::Season => f.season.as_str().to_owned(),
-        FeatureDim::MinutesSinceHigh => minutes_bucket(f.minutes_since_high).to_owned(),
-        FeatureDim::Drop => drop_bucket(f.drop_tenths).to_owned(),
-        FeatureDim::LocalHour => hour_bucket(f.local_minute_now).to_owned(),
+fn dim_value(dim: FeatureDim, f: &PeakFeatures) -> Option<&'static str> {
+    Some(match dim {
+        FeatureDim::Season => f.season.as_str(),
+        FeatureDim::MinutesSinceHigh => minutes_bucket(f.minutes_since_high),
+        FeatureDim::Drop => drop_bucket(f.drop_tenths),
+        FeatureDim::LocalHour => hour_bucket(f.local_minute_now),
         FeatureDim::Trajectory => match f.trajectory {
-            TrajectoryClass::AtHigh => "at_high".to_owned(),
-            TrajectoryClass::SteadyDecline => "decline".to_owned(),
-            TrajectoryClass::Oscillating => "osc".to_owned(),
-            TrajectoryClass::Insufficient => "insuf".to_owned(),
+            TrajectoryClass::AtHigh => "at_high",
+            TrajectoryClass::SteadyDecline => "decline",
+            TrajectoryClass::Oscillating => "osc",
+            TrajectoryClass::Insufficient => "insuf",
         },
-    }
+        FeatureDim::ForecastRise => rise_bucket(f.forecast_rise_tenths?),
+    })
 }
 
-/// Cell key for a list of dimensions, e.g. `season=summer|msh=m060-089`.
-pub fn cell_key(dims: &[FeatureDim], f: &PeakFeatures) -> String {
+/// Cell key for a list of dimensions, e.g. `Season=summer|MinutesSinceHigh=m060-089`.
+/// `None` when a (refinement) dimension is unavailable for these features.
+pub fn cell_key(dims: &[FeatureDim], f: &PeakFeatures) -> Option<String> {
     if dims.is_empty() {
-        return "global".to_owned();
+        return Some("global".to_owned());
     }
-    dims.iter()
-        .map(|d| format!("{d:?}={}", dim_value(*d, f)))
-        .collect::<Vec<_>>()
-        .join("|")
+    let mut parts = Vec::with_capacity(dims.len());
+    for d in dims {
+        parts.push(format!("{d:?}={}", dim_value(*d, f)?));
+    }
+    Some(parts.join("|"))
+}
+
+/// How a model relates to forecasts; written by training.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForecastModelInfo {
+    /// The forecast series the training history was joined with.
+    pub product: ForecastProduct,
+    /// `true` when the out-of-sample evaluation showed a clear improvement:
+    /// the model then keeps its forecast refinement level and live forecasts
+    /// of `product` change its probabilities. `false`: no refinement, so
+    /// forecasts cannot influence trading.
+    pub adopted: bool,
+    /// One-line result of the evaluation (dashboard, logs).
+    pub verdict: String,
+    /// Training days that had a usable forecast.
+    pub days_with_forecast: u64,
+    /// `false` when the forecast history could not be obtained at training
+    /// (the model then has no refinement; training is retried later).
+    #[serde(default)]
+    pub evaluated: bool,
+    pub evaluated_at: DateTime<Utc>,
 }
 
 /// Empirical, hierarchically smoothed model (serializable artefact).
@@ -198,6 +252,9 @@ pub struct EmpiricalPeakModel {
     pub levels: Vec<Vec<FeatureDim>>,
     /// Counts per cell key: `counts[k]`.
     pub cells: HashMap<String, Vec<u64>>,
+    /// Forecast product and evaluation result (models trained with forecasts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<ForecastModelInfo>,
 }
 
 impl EmpiricalPeakModel {
@@ -220,6 +277,7 @@ impl EmpiricalPeakModel {
             prior_strength: 20.0,
             levels,
             cells: HashMap::new(),
+            forecast: None,
         }
     }
 
@@ -235,11 +293,42 @@ impl EmpiricalPeakModel {
         ]
     }
 
+    /// `levels` plus a forecast refinement of their most specific level.
+    pub fn with_forecast_refinement(mut levels: Vec<Vec<FeatureDim>>) -> Vec<Vec<FeatureDim>> {
+        let mut last = levels.last().cloned().unwrap_or_default();
+        if !last.contains(&FeatureDim::ForecastRise) {
+            last.push(FeatureDim::ForecastRise);
+            levels.push(last);
+        }
+        levels
+    }
+
+    /// Whether any level conditions on the forecast.
+    pub fn uses_forecast(&self) -> bool {
+        self.levels
+            .iter()
+            .any(|l| l.iter().any(|d| d.is_refinement()))
+    }
+
+    /// The same model without refinement levels and their cells: exactly the
+    /// distributions it gives when no forecast is available.
+    pub fn without_refinements(&self) -> Self {
+        let mut m = self.clone();
+        m.levels.retain(|l| !l.iter().any(|d| d.is_refinement()));
+        let tag = format!("{:?}=", FeatureDim::ForecastRise);
+        m.cells
+            .retain(|key, _| !key.split('|').any(|part| part.starts_with(&tag)));
+        m
+    }
+
     /// Record one training sample (features at time t, observed increment k).
+    /// Levels whose refinement dimension is unavailable are not counted.
     pub fn observe(&mut self, f: &PeakFeatures, increment: i32) {
         let k = (increment.max(0) as usize).min(self.k_classes - 1);
-        for dims in self.levels.clone() {
-            let key = cell_key(&dims, f);
+        for dims in &self.levels {
+            let Some(key) = cell_key(dims, f) else {
+                continue;
+            };
             let counts = self
                 .cells
                 .entry(key)
@@ -258,12 +347,27 @@ impl ProbabilityModel for EmpiricalPeakModel {
         &self.id
     }
 
+    fn forecast_product(&self) -> Option<&ForecastProduct> {
+        self.forecast
+            .as_ref()
+            .filter(|f| f.adopted && self.uses_forecast())
+            .map(|f| &f.product)
+    }
+
+    /// Descends the hierarchy while cells exist; each level shrinks toward
+    /// its parent. `support` is the sample count of the most specific level
+    /// *without* refinement dimensions, so the strategies' support gate means
+    /// the same with and without a forecast; a refinement cell with few
+    /// samples barely moves the parent's distribution (prior strength α).
     fn distribution(&self, f: &PeakFeatures) -> Option<IncrementDistribution> {
         let mut post: Option<Vec<f64>> = None;
         let mut support = 0u64;
+        let mut refined: Option<u64> = None;
         let mut used = String::new();
         for dims in &self.levels {
-            let key = cell_key(dims, f);
+            let Some(key) = cell_key(dims, f) else {
+                break;
+            };
             let Some(counts) = self.cells.get(&key) else {
                 break;
             };
@@ -282,14 +386,21 @@ impl ProbabilityModel for EmpiricalPeakModel {
                     .collect(),
             };
             post = Some(probs);
-            support = n;
+            if dims.iter().any(|d| d.is_refinement()) {
+                refined = Some(n);
+            } else {
+                support = n;
+            }
             used = key;
         }
         post.map(|probs| {
             IncrementDistribution {
                 probs,
                 support: support.min(u64::from(u32::MAX)) as u32,
-                source: format!("{}:{used}", self.id),
+                source: match refined {
+                    Some(n) => format!("{}:{used} (forecast cell n={n})", self.id),
+                    None => format!("{}:{used}", self.id),
+                },
             }
             .normalized()
         })
@@ -328,6 +439,7 @@ mod tests {
             season: Season::Summer,
             observation_count: 30,
             data_age_minutes: 3,
+            forecast_rise_tenths: None,
         }
     }
 
@@ -406,6 +518,131 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: EmpiricalPeakModel = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
+        assert!(
+            !json.contains("forecast"),
+            "no forecast block unless trained with one"
+        );
+    }
+
+    fn with_rise(minutes: i64, drop: i32, rise: Option<i32>) -> PeakFeatures {
+        PeakFeatures {
+            forecast_rise_tenths: rise,
+            ..features(minutes, drop)
+        }
+    }
+
+    fn refined_model() -> EmpiricalPeakModel {
+        let levels =
+            EmpiricalPeakModel::with_forecast_refinement(EmpiricalPeakModel::default_levels());
+        let mut m = EmpiricalPeakModel::new("t", "EHAM", "all", 4, levels);
+        // 400 days without a forecast: 90 % final.
+        for i in 0..400 {
+            m.observe(&with_rise(90, 10, None), if i % 10 == 0 { 1 } else { 0 });
+        }
+        // Days with a forecast: cooling ahead → always final; warming → 50 %.
+        for _ in 0..200 {
+            m.observe(&with_rise(90, 10, Some(-30)), 0);
+        }
+        for i in 0..200 {
+            m.observe(&with_rise(90, 10, Some(12)), i % 2);
+        }
+        m
+    }
+
+    #[test]
+    fn forecast_refinement_moves_probabilities_but_not_support() {
+        let m = refined_model();
+        assert!(m.uses_forecast());
+        let base = m.distribution(&with_rise(90, 10, None)).unwrap();
+        let cool = m.distribution(&with_rise(90, 10, Some(-30))).unwrap();
+        let warm = m.distribution(&with_rise(90, 10, Some(12))).unwrap();
+        assert!(cool.probs[0] > base.probs[0] && base.probs[0] > warm.probs[0]);
+        assert!(cool.probs[0] > 0.98, "{}", cool.probs[0]);
+        assert!(warm.probs[0] < 0.6, "{}", warm.probs[0]);
+        // Support is the base cell's count (800 samples), whatever the forecast.
+        assert_eq!((base.support, cool.support, warm.support), (800, 800, 800));
+        assert!(
+            cool.source
+                .ends_with("ForecastRise=cool2 (forecast cell n=200)"),
+            "{}",
+            cool.source
+        );
+        assert!(!base.source.contains("ForecastRise"));
+        // A rise bucket never seen in training falls back to the base cell.
+        let flat = m.distribution(&with_rise(90, 10, Some(0))).unwrap();
+        assert_eq!(flat, base);
+    }
+
+    #[test]
+    fn stripping_refinements_gives_the_no_forecast_model() {
+        let m = refined_model();
+        let stripped = m.without_refinements();
+        assert!(!stripped.uses_forecast());
+        assert_eq!(stripped.levels, EmpiricalPeakModel::default_levels());
+        assert!(stripped.cells.keys().all(|k| !k.contains("ForecastRise")));
+        // Same counts as a model trained without the refinement at all.
+        let mut plain =
+            EmpiricalPeakModel::new("t", "EHAM", "all", 4, EmpiricalPeakModel::default_levels());
+        plain.created_at = m.created_at;
+        plain.trained_from = m.trained_from;
+        plain.trained_to = m.trained_to;
+        for i in 0..400 {
+            plain.observe(&with_rise(90, 10, None), if i % 10 == 0 { 1 } else { 0 });
+        }
+        for _ in 0..200 {
+            plain.observe(&with_rise(90, 10, Some(-30)), 0);
+        }
+        for i in 0..200 {
+            plain.observe(&with_rise(90, 10, Some(12)), i % 2);
+        }
+        assert_eq!(stripped, plain);
+        // …and every forecast gives the no-forecast distribution.
+        let a = stripped
+            .distribution(&with_rise(90, 10, Some(-30)))
+            .unwrap();
+        let b = m.distribution(&with_rise(90, 10, None)).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn forecast_product_only_when_adopted_and_refined() {
+        let product = ForecastProduct {
+            provider: wm_core::ids::ProviderId::open_meteo(),
+            model: "gfs_global".into(),
+            lead_days: 1,
+            ready_local_minute: 480,
+        };
+        let info = |adopted| ForecastModelInfo {
+            product: product.clone(),
+            adopted,
+            verdict: "test".into(),
+            days_with_forecast: 1,
+            evaluated: true,
+            evaluated_at: Utc::now(),
+        };
+        let mut m = refined_model();
+        assert_eq!(m.forecast_product(), None, "no evaluation recorded");
+        m.forecast = Some(info(false));
+        assert_eq!(m.forecast_product(), None, "not adopted");
+        m.forecast = Some(info(true));
+        assert_eq!(m.forecast_product(), Some(&product));
+        let mut plain = m.without_refinements();
+        plain.forecast = Some(info(true));
+        assert_eq!(
+            plain.forecast_product(),
+            None,
+            "no refinement level to use it"
+        );
+        // Round trip, and older model files (no `forecast` block) still load.
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EmpiricalPeakModel>(&json).unwrap(),
+            m
+        );
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        old.as_object_mut().unwrap().remove("forecast");
+        let back: EmpiricalPeakModel = serde_json::from_value(old).unwrap();
+        assert!(back.forecast.is_none());
     }
 }
 

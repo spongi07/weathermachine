@@ -1,13 +1,13 @@
 //! The kernel implementation.
 
-use crate::snapshot::{EngineSnapshot, LocationSnapshot, ViewSnapshot};
+use crate::snapshot::{EngineSnapshot, ForecastSnapshot, LocationSnapshot, ViewSnapshot};
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use wm_core::event::{
-    EventEnvelope, OperatorCommand, OrderUpdateEvent, TimerKind, WeatherMachineEvent,
+    EventEnvelope, ForecastEvent, OperatorCommand, OrderUpdateEvent, TimerKind, WeatherMachineEvent,
 };
 use wm_core::health::{ProviderHealthSnapshot, station_state};
 use wm_core::ids::{
@@ -24,9 +24,10 @@ use wm_risk::{
     ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus,
 };
 use wm_strategy::{
-    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, PeakConfig,
-    PeakDetectionEngine, ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig, Strategy,
-    StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
+    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, ForecastDay,
+    PeakConfig, PeakDetectionEngine, ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig,
+    Strategy, StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation,
+    ViewKind,
 };
 
 /// A location the engine trades.
@@ -100,6 +101,37 @@ pub struct EngineOutput {
     pub alerts: Vec<String>,
 }
 
+/// A forecast series as received, keyed by location and product.
+#[derive(Debug, Clone)]
+struct StoredForecast {
+    event: ForecastEvent,
+    /// Knowledge time (envelope `available_at`).
+    received_at: DateTime<Utc>,
+}
+
+/// `(location, provider, model, lead_days)`.
+type ForecastKey = (LocationId, ProviderId, String, Option<u8>);
+
+fn forecast_key(e: &ForecastEvent) -> ForecastKey {
+    (
+        e.location.clone(),
+        e.provider.clone(),
+        e.model.clone(),
+        e.lead_days,
+    )
+}
+
+fn product_label(e: &ForecastEvent) -> String {
+    match e.lead_days {
+        Some(d) => format!("{}/{}/d{d}", e.provider, e.model),
+        None => format!("{}/{}", e.provider, e.model),
+    }
+}
+
+fn tenths_series(e: &ForecastEvent) -> Vec<(DateTime<Utc>, i32)> {
+    e.hourly.iter().map(|(t, v)| (*t, v.tenths())).collect()
+}
+
 /// The kernel.
 pub struct Engine {
     cfg: EngineConfig,
@@ -131,6 +163,7 @@ pub struct Engine {
     stats: EngineStats,
     realized_pnl_total: Usd,
     recent_rejections: HashMap<String, DateTime<Utc>>,
+    forecasts: HashMap<ForecastKey, StoredForecast>,
 }
 
 /// Largest hole (minutes) in a day series, counting local midnight → first
@@ -198,8 +231,19 @@ impl Engine {
             stats: EngineStats::default(),
             realized_pnl_total: Usd::ZERO,
             recent_rejections: HashMap::new(),
+            forecasts: HashMap::new(),
             cfg,
         }
+    }
+
+    /// Swap the probability model (e.g. after a retraining). Takes effect at
+    /// the next evaluation; decisions record the model id in their provenance.
+    pub fn set_model(&mut self, model: Arc<dyn ProbabilityModel>) {
+        self.model = model;
+    }
+
+    pub fn model_id(&self) -> &str {
+        self.model.id()
     }
 
     /// Replace the default strategy set (e.g. research configurations).
@@ -307,7 +351,28 @@ impl Engine {
                     self.evaluate_location(i, true, &mut out);
                 }
             }
-            WeatherMachineEvent::ForecastUpdate(_) => {}
+            WeatherMachineEvent::ForecastUpdate(f) => {
+                // Predictive input only: it never touches the observed high,
+                // the views' observations or settlement — at most the model's
+                // forecast feature, and only for the model's own product.
+                if let Some(i) = self.location_index(&f.location) {
+                    let key = forecast_key(f);
+                    let newer = self
+                        .forecasts
+                        .get(&key)
+                        .is_none_or(|s| s.received_at <= env.available_at);
+                    if newer {
+                        self.forecasts.insert(
+                            key,
+                            StoredForecast {
+                                event: f.clone(),
+                                received_at: env.available_at,
+                            },
+                        );
+                        self.evaluate_location(i, false, &mut out);
+                    }
+                }
+            }
             WeatherMachineEvent::MarketSnapshot(m) => {
                 let m = m.market.clone();
                 for o in &m.outcomes {
@@ -425,6 +490,7 @@ impl Engine {
             _ => vec![ObservationFilter::AllRows],
         };
         let peak = self.peak.get(&loc.location).cloned().unwrap_or_default();
+        let forecast = self.forecast_day(loc, today).ok();
         let mut evals = Vec::new();
         let mut snaps = Vec::new();
         let mut complete = true;
@@ -433,7 +499,7 @@ impl Engine {
             let state = self.temps.day_state(&loc.station, today, view, self.now);
             let assessment = state
                 .as_ref()
-                .and_then(|s| peak.assess(s, loc.timezone, self.now));
+                .and_then(|s| peak.assess_with(s, loc.timezone, self.now, forecast.as_ref()));
             let distribution = assessment
                 .as_ref()
                 .and_then(|a| self.model.distribution(&a.features));
@@ -457,6 +523,81 @@ impl Engine {
             }
         }
         (evals, snaps, complete)
+    }
+
+    /// Today's forecast as the model may use it: the model's own product,
+    /// retrieved no earlier than the product's ready time for `date`, and
+    /// covering the whole local day. `Err` says why not.
+    fn forecast_day(
+        &self,
+        loc: &EngineLocation,
+        date: chrono::NaiveDate,
+    ) -> Result<ForecastDay, String> {
+        let Some(product) = self.model.forecast_product() else {
+            return Err("model does not use forecasts".into());
+        };
+        let key = (
+            loc.location.clone(),
+            product.provider.clone(),
+            product.model.clone(),
+            Some(product.lead_days),
+        );
+        let Some(stored) = self.forecasts.get(&key) else {
+            return Err(format!("no {} forecast received", product.label()));
+        };
+        let ready = product.usable_from(date, loc.timezone);
+        if stored.received_at < ready {
+            return Err(format!(
+                "latest series retrieved before today's ready time ({} UTC)",
+                ready.format("%H:%M")
+            ));
+        }
+        ForecastDay::from_series(
+            date,
+            loc.timezone,
+            &tenths_series(&stored.event),
+            stored.received_at,
+        )
+        .ok_or_else(|| "series does not cover today completely".to_owned())
+    }
+
+    /// Dashboard view of a location's forecast: the model's product if it
+    /// has one, else the most recently received series.
+    fn forecast_snapshot(
+        &self,
+        loc: &EngineLocation,
+        date: chrono::NaiveDate,
+    ) -> Option<ForecastSnapshot> {
+        let wanted = self.model.forecast_product();
+        let stored = self
+            .forecasts
+            .values()
+            .filter(|s| s.event.location == loc.location)
+            .filter(|s| wanted.is_none_or(|p| p.matches(&s.event)))
+            .max_by_key(|s| s.received_at)?;
+        let (in_use, status, day) = match self.forecast_day(loc, date) {
+            Ok(day) => (true, "in use by the model".to_owned(), Some(day)),
+            Err(why) => (
+                false,
+                why,
+                ForecastDay::from_series(
+                    date,
+                    loc.timezone,
+                    &tenths_series(&stored.event),
+                    stored.received_at,
+                ),
+            ),
+        };
+        Some(ForecastSnapshot {
+            product: product_label(&stored.event),
+            received_at: stored.received_at,
+            in_use,
+            status,
+            day_max_tenths: day.as_ref().and_then(ForecastDay::day_max_tenths),
+            remaining_max_tenths: day.as_ref().and_then(|d| d.remaining_max_tenths(self.now)),
+            rise_tenths: day.as_ref().and_then(|d| d.rise_tenths(self.now)),
+            hourly: day.map(|d| d.hourly).unwrap_or_default(),
+        })
     }
 
     fn weather_status(&self, station: &StationId) -> WeatherStatus {
@@ -851,6 +992,7 @@ impl Engine {
                 books,
                 evaluations,
                 hint: self.hints.get(&loc.station).copied().unwrap_or_default(),
+                forecast: self.forecast_snapshot(loc, today),
             });
         }
         let open = self.orders.open_views();

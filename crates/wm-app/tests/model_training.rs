@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use wm_app::training::{self, Progress, TrainPlan};
+use wm_app::training::{self, ForecastPlan, Progress, TrainPlan};
 use wm_backtest::synthetic_history;
 use wm_core::ids::{ProviderId, StationId};
 use wm_core::time::SystemClock;
 use wm_net::{HttpFetcher, ProviderGate, RateLimitPolicy};
 use wm_strategy::PeakConfig;
-use wm_weather::IemArchive;
+use wm_weather::{IemArchive, OpenMeteoPreviousRuns};
 
 fn eham() -> StationId {
     StationId::new("EHAM").unwrap()
@@ -80,6 +80,7 @@ fn plan(dir: &Path, min_days: u64) -> TrainPlan {
         model_out: dir.join("models/eham.json"),
         report_out: dir.join("research/eham-survival.md"),
         min_days,
+        forecast: None,
     }
 }
 
@@ -87,13 +88,254 @@ async fn run(
     archive: &IemArchive,
     plan: &TrainPlan,
 ) -> (anyhow::Result<training::TrainOutcome>, Vec<Progress>) {
+    run_with(archive, None, plan).await
+}
+
+async fn run_with(
+    archive: &IemArchive,
+    forecast: Option<&OpenMeteoPreviousRuns>,
+    plan: &TrainPlan,
+) -> (anyhow::Result<training::TrainOutcome>, Vec<Progress>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let s2 = Arc::clone(&seen);
     let progress = move |p: Progress| s2.lock().unwrap().push(p);
     let (_stop, mut stop_rx) = watch::channel(false);
-    let r = training::train(archive, plan, None, &progress, &mut stop_rx).await;
+    let r = training::train(archive, forecast, plan, None, &progress, &mut stop_rx).await;
     let v = seen.lock().unwrap().clone();
     (r, v)
+}
+
+fn open_meteo(uri: &str) -> OpenMeteoPreviousRuns {
+    let mut policy = RateLimitPolicy::local_test();
+    policy.max_body_bytes = 4 * 1024 * 1024;
+    let gate = ProviderGate::new(
+        ProviderId::open_meteo(),
+        policy,
+        Arc::new(SystemClock::new()),
+        4,
+    );
+    OpenMeteoPreviousRuns::new(
+        Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap()),
+        uri,
+        None,
+        "gfs_global",
+        1,
+    )
+}
+
+/// Hourly day-1 series for `[start, end]` (UTC days), a plain diurnal curve.
+fn om_body(start: NaiveDate, end: NaiveDate) -> String {
+    let (mut times, mut values) = (Vec::new(), Vec::new());
+    let mut t = start.and_hms_opt(0, 0, 0).unwrap();
+    while t.date() <= end {
+        let hour = f64::from(t.format("%H").to_string().parse::<u32>().unwrap());
+        times.push(format!("\"{}\"", t.format("%Y-%m-%dT%H:%M")));
+        values.push(format!(
+            "{:.1}",
+            12.0 + 4.0 * ((hour - 13.0) / 24.0 * std::f64::consts::TAU).cos()
+        ));
+        t += Duration::hours(1);
+    }
+    format!(
+        r#"{{"utc_offset_seconds":0,"timezone":"GMT","hourly_units":{{"temperature_2m_previous_day1":"°C"}},"hourly":{{"time":[{}],"temperature_2m_previous_day1":[{}]}}}}"#,
+        times.join(","),
+        values.join(",")
+    )
+}
+
+async fn mount_om(server: &MockServer, start: &str, response: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path("/v1/forecast"))
+        .and(query_param("start_date", start))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn forecast_history_is_fetched_newest_first_cached_and_evaluated() {
+    let years = csv_by_year(d(2024, 10, 1), 200);
+    let server = MockServer::start().await;
+    for (y, body) in &years {
+        mount(
+            &server,
+            *y,
+            ResponseTemplate::new(200).set_body_string(body.clone()),
+        )
+        .await;
+    }
+    let ok = |a: NaiveDate, b: NaiveDate| {
+        ResponseTemplate::new(200).set_body_raw(om_body(a, b), "application/json")
+    };
+    // 2025 (up to yesterday) is served; the archive starts on 1 October 2024.
+    mount_om(&server, "2025-01-01", ok(d(2025, 1, 1), d(2025, 4, 18))).await;
+    mount_om(
+        &server,
+        "2024-01-01",
+        ResponseTemplate::new(400).set_body_string(
+            r#"{"error":true,"reason":"Parameter 'start_date' is out of allowed range from 2024-10-01 to 2025-04-26"}"#,
+        ),
+    )
+    .await;
+    mount_om(&server, "2024-10-01", ok(d(2024, 10, 1), d(2024, 12, 31))).await;
+    let dir = tempdir("forecast");
+    let mut plan = plan(&dir, 30);
+    plan.forecast = Some(ForecastPlan {
+        product: wm_core::forecast::ForecastProduct {
+            provider: ProviderId::open_meteo(),
+            model: "gfs_global".into(),
+            lead_days: 1,
+            ready_local_minute: 480,
+        },
+        latitude: 52.3156,
+        longitude: 4.7903,
+        from: d(2021, 3, 1),
+        cache_dir: dir.join("research/open-meteo/EHAM/gfs_global-d1"),
+        eval: wm_backtest::EvaluationConfig {
+            min_days: 30,
+            bootstrap_iterations: 200,
+            ..wm_backtest::EvaluationConfig::default()
+        },
+    });
+    let om = open_meteo(&server.uri());
+    let iem = archive(&server.uri());
+
+    let (r, progress) = run_with(&iem, Some(&om), &plan).await;
+    let o = r.unwrap();
+    let verdict = o.forecast_verdict.clone().unwrap();
+    assert!(
+        verdict.starts_with("adopted") || verdict.starts_with("not adopted"),
+        "{verdict}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|p| matches!(p, Progress::Forecast { year: 2025, .. }))
+    );
+    let requests = |server_reqs: &[wiremock::Request], start: &str| {
+        server_reqs
+            .iter()
+            .filter(|r| r.url.path() == "/v1/forecast")
+            .filter(|r| {
+                r.url
+                    .query_pairs()
+                    .any(|(k, v)| k == "start_date" && v == start)
+            })
+            .count()
+    };
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        (
+            requests(&reqs, "2025-01-01"),
+            requests(&reqs, "2024-01-01"),
+            requests(&reqs, "2024-10-01")
+        ),
+        (1, 1, 1)
+    );
+    assert!(
+        reqs.iter()
+            .filter(|r| r.url.path() == "/v1/forecast")
+            .all(|r| {
+                r.url
+                    .query_pairs()
+                    .any(|(k, v)| k == "hourly" && v == "temperature_2m_previous_day1")
+            })
+    );
+    let cache = dir.join("research/open-meteo/EHAM/gfs_global-d1");
+    assert!(cache.join("2024.json").is_file(), "finished year cached");
+    assert!(cache.join("2025-partial.json").is_file());
+    assert_eq!(
+        std::fs::read_to_string(cache.join("archive-start.txt")).unwrap(),
+        "2024-10-01"
+    );
+    let model = wm_app::setup::read_model(&plan.model_out).unwrap();
+    let info = model.forecast.clone().unwrap();
+    assert!(info.evaluated, "{}", info.verdict);
+    assert!(info.days_with_forecast > 150, "{}", info.days_with_forecast);
+    assert_eq!(model.uses_forecast(), info.adopted);
+    let report = std::fs::read_to_string(&plan.report_out).unwrap();
+    assert!(
+        report.contains("## Forecast evaluation") && report.contains("Placebo control"),
+        "{report}"
+    );
+    assert!(
+        report.contains("open_meteo/gfs_global/d1")
+            && report.contains("forecast archive starts 2024-10-01")
+    );
+
+    // Retraining: 2024 comes from the cache, years before the archive are
+    // not asked for again, only the current year is refreshed.
+    let (r, _) = run_with(&iem, Some(&om), &plan).await;
+    r.unwrap();
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        (
+            requests(&reqs, "2025-01-01"),
+            requests(&reqs, "2024-01-01"),
+            requests(&reqs, "2024-10-01")
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| r.url.path() == "/v1/forecast")
+            .count(),
+        4
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unreachable_forecast_source_leaves_the_model_without_it() {
+    let years = csv_by_year(d(2024, 10, 1), 200);
+    let server = MockServer::start().await;
+    for (y, body) in &years {
+        mount(
+            &server,
+            *y,
+            ResponseTemplate::new(200).set_body_string(body.clone()),
+        )
+        .await;
+    }
+    // Open-Meteo answers 503 (no mock for /v1/forecast would be 404).
+    Mock::given(method("GET"))
+        .and(path("/v1/forecast"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let dir = tempdir("forecast-down");
+    let mut plan = plan(&dir, 30);
+    plan.forecast = Some(ForecastPlan {
+        product: wm_core::forecast::ForecastProduct {
+            provider: ProviderId::open_meteo(),
+            model: "gfs_global".into(),
+            lead_days: 1,
+            ready_local_minute: 480,
+        },
+        latitude: 52.3,
+        longitude: 4.8,
+        from: d(2021, 3, 1),
+        cache_dir: dir.join("research/open-meteo/EHAM/gfs_global-d1"),
+        eval: wm_backtest::EvaluationConfig::default(),
+    });
+    let (r, _) = run_with(
+        &archive(&server.uri()),
+        Some(&open_meteo(&server.uri())),
+        &plan,
+    )
+    .await;
+    let o = r.unwrap();
+    assert!(!o.forecast_adopted);
+    let model = wm_app::setup::read_model(&plan.model_out).unwrap();
+    assert!(!model.uses_forecast());
+    let info = model.forecast.unwrap();
+    assert!(!info.evaluated, "retry later");
+    assert!(
+        info.verdict.starts_with("not evaluated"),
+        "{}",
+        info.verdict
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

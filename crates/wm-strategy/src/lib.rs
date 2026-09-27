@@ -5,17 +5,21 @@
 //! strategies A/B/C and the unwind engine. No I/O, no clocks, no randomness.
 
 pub mod ev;
+pub mod forecast;
 pub mod peak;
 pub mod probability;
 pub mod state;
 pub mod strategy;
 pub mod unwind;
 
+pub use forecast::ForecastDay;
 pub use peak::{
     CONFIRMATION_WINDOWS, PeakAssessment, PeakConfig, PeakDetectionEngine, PeakFeatures,
     TrajectoryClass,
 };
-pub use probability::{EmpiricalPeakModel, IncrementDistribution, NoEdgeModel, ProbabilityModel};
+pub use probability::{
+    EmpiricalPeakModel, ForecastModelInfo, IncrementDistribution, NoEdgeModel, ProbabilityModel,
+};
 pub use state::{DayState, HighInfo, ObsPoint, TemperatureStateEngine, ViewKind};
 pub use strategy::{
     BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, Proposal,

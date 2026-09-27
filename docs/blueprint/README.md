@@ -34,7 +34,7 @@ of three labels:
 | 16 | ProviderHealth model | [04-ingestion.md](04-ingestion.md#16-providerhealth-model) |
 | 17 | TemperatureStateEngine | [04-ingestion.md](04-ingestion.md#17-temperaturestateengine) |
 | 18 | ResolutionSource architecture | [05-markets.md](05-markets.md#18-resolutionsource-architecture) |
-| 19 | ForecastProvider | [05-markets.md](05-markets.md#19-forecastprovider) |
+| 19 | ForecastProvider and the day-1 forecast feature | [05-markets.md](05-markets.md#19-forecastprovider-and-the-day-1-forecast-feature) |
 | 20 | Polymarket integration | [05-markets.md](05-markets.md#20-polymarket-integration) |
 | 21 | TemperatureOutcomeMapper | [05-markets.md](05-markets.md#21-temperatureoutcomemapper) |
 | 22 | PeakDetectionEngine | [06-strategy.md](06-strategy.md#22-peakdetectionengine) |

@@ -355,3 +355,46 @@ async fn connection_reset_mid_response_is_a_failure_not_data() {
     );
     assert!(f.gate().stats().failures_total >= 1);
 }
+
+#[tokio::test]
+async fn client_errors_carry_the_reason_but_never_the_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            "{\"error\":true,\"reason\":\"Parameter 'start_date' is out of allowed range\"}\n",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let url = format!("{}/v1/forecast?apikey=SECRET-KEY-123", server.uri());
+    let err = f
+        .get(&FetchRequest::get(url, "/v1/forecast").max_gate_wait(Duration::from_secs(2)))
+        .await
+        .unwrap_err();
+    match &err {
+        FetchError::Status {
+            status: 400,
+            detail: Some(d),
+            ..
+        } => {
+            assert!(d.contains("out of allowed range"), "{d}");
+        }
+        e => panic!("unexpected {e:?}"),
+    }
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains("SECRET-KEY-123"), "{text}");
+    assert_eq!(err.record().unwrap().endpoint, "/v1/forecast");
+
+    // Transport errors: reqwest would name the URL; it is stripped.
+    let dead = MockServer::start().await;
+    let dead_url = format!("{}/v1/forecast?apikey=SECRET-KEY-123", dead.uri());
+    drop(dead);
+    let f = fetcher(RateLimitPolicy::local_test());
+    let err = f
+        .get(&FetchRequest::get(dead_url, "/v1/forecast").max_gate_wait(Duration::from_secs(2)))
+        .await
+        .unwrap_err();
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains("SECRET-KEY-123"), "{text}");
+}

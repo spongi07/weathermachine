@@ -20,4 +20,4 @@ pub use engine::{
     Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, StationHint,
     default_rejection_dedup_secs,
 };
-pub use snapshot::{EngineSnapshot, LocationSnapshot, ViewSnapshot};
+pub use snapshot::{EngineSnapshot, ForecastSnapshot, LocationSnapshot, ViewSnapshot};

@@ -194,20 +194,37 @@ fn StatusBar(
                 let model = {
                     let m = &s.model;
                     let (class, label) = match m.state.as_str() {
+                        "loaded" if m.retraining.is_some() => ("pill good", "MODEL ↻".to_owned()),
                         "loaded" => ("pill good", "MODEL".to_owned()),
                         "training" => ("pill warn", m.progress.map_or_else(|| "MODEL TRAINING".to_owned(), |(d, t)| format!("MODEL TRAINING {d}/{t}"))),
                         "failed" | "invalid" => ("pill bad", "MODEL ERROR".to_owned()),
                         _ => ("pill warn", "NO MODEL".to_owned()),
                     };
-                    let title = if m.detail.is_empty() { s.model_id.clone() } else { m.detail.clone() };
+                    let mut title = if m.detail.is_empty() { s.model_id.clone() } else { m.detail.clone() };
+                    if let Some(r) = &m.retraining {
+                        title.push_str(&format!(" — {r} (the current model keeps trading)"));
+                    }
                     view! { <span class=class title=title>{label}</span> }
                 };
-                vec![
+                // Day-1 forecast: used only when the evaluation adopted it.
+                let in_use = s.locations.iter().any(|l| l.forecast.as_ref().is_some_and(|f| f.in_use));
+                let forecast = s.model.forecast.clone().map(|verdict| {
+                    let adopted = verdict.starts_with("adopted");
+                    let (class, label) = match (in_use, adopted) {
+                        (true, _) => ("pill good", "FORECAST"),
+                        (false, true) => ("pill warn", "FORECAST WAITING"),
+                        (false, false) => ("pill", "forecast not used"),
+                    };
+                    view! { <span class=class title=format!("Day-1 forecast evaluation: {verdict}")>{label}</span> }.into_any()
+                });
+                let mut v = vec![
                     pill(s.storage_ok, "STORAGE".into(), "Audit storage (PostgreSQL); required for trading".into()).into_any(),
                     pill(s.execution_ok, "EXECUTION".into(), "Simulated paper venue".into()).into_any(),
                     model.into_any(),
-                    pill(s.market_stream.as_ref().is_none_or(|m| m.connected), "MARKET DATA".into(), "Polymarket market stream".into()).into_any(),
-                ]
+                ];
+                v.extend(forecast);
+                v.push(pill(s.market_stream.as_ref().is_none_or(|m| m.connected), "MARKET DATA".into(), "Polymarket market stream".into()).into_any());
+                v
             })
         })
     };
@@ -247,7 +264,7 @@ fn Banners(snap: Snap) -> impl IntoView {
             }
             if !s.demo && !s.model.loaded() {
                 let (class, text) = match s.model.state.as_str() {
-                    "training" => ("banner info", format!("No probability model yet, so no weather trades (by design). Training automatically from real METAR history — {}. The service restarts once to load it.", s.model.detail)),
+                    "training" => ("banner info", format!("No probability model yet, so no weather trades (by design). Training automatically from real METAR history — {}. It is loaded automatically when ready.", s.model.detail)),
                     "failed" | "invalid" => ("banner bad", fmt::sentence(&s.model.detail)),
                     _ => ("banner info", format!("No probability model, so no weather trades (by design): {}", s.model.detail)),
                 };
@@ -360,6 +377,7 @@ fn LocationSection(snap: Snap, id: String) -> impl IntoView {
                         <span><i class="ln run"></i>"running high"</span>
                         <span><i class="ln high"></i>"day high"</span>
                         <span><i class="ln noon"></i>"solar noon"</span>
+                        <span><i class="ln fc"></i>"day-1 forecast"</span>
                         <span>"30′…180′ confirmation windows after the last touch of the high"</span>
                     </div>
                 </div>
@@ -408,7 +426,25 @@ fn PeakPanel(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                     }
                 })
                 .collect::<Vec<_>>();
-            Some(view! { <div class="peak">{views}</div> })
+            let forecast = l.forecast.as_ref().map(|f| {
+                let c = |v: Option<f64>| v.map_or_else(|| DASH.to_owned(), |t| format!("{t:.1} °C"));
+                view! {
+                    <div class="fc-box" title="Each hourly value was forecast 24 h before its time — the same product the model was evaluated on. Predictive input only: never the observed high or settlement.">
+                        <div class="view-head">
+                            <b>"Day-1 forecast"</b>
+                            <span class={if f.in_use { "pill good" } else { "pill" }}>{if f.in_use { "USED BY MODEL" } else { "not used" }}</span>
+                            <span class="muted small">{format!("{} · received {}", f.product, fmt::utc_time(f.received_ms))}</span>
+                        </div>
+                        <div class="stats">
+                            <div><label>"Day max"</label><b>{c(f.day_max_c)}</b><small>"forecast"</small></div>
+                            <div><label>"Rest of day"</label><b>{c(f.remaining_max_c)}</b><small>"max from now"</small></div>
+                            <div><label>"Rise"</label><b>{fmt::signed(f.rise_c, 1)}</b><small>"°C later vs so far"</small></div>
+                        </div>
+                        <div class="muted fc-status">{fmt::sentence(&f.status)}</div>
+                    </div>
+                }
+            });
+            Some(view! { <div class="peak">{views}{forecast}</div> })
         })
     }
 }

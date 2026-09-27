@@ -49,10 +49,11 @@ parser upgrade bumps `RULES_PARSER_VERSION`.
 Amsterdam rules, risky-word detection without false positives ("underground",
 "specified"), and approval round-trip in PostgreSQL.
 
-## 19. ForecastProvider
+## 19. ForecastProvider and the day-1 forecast feature
 
-**PURPOSE.** Predictive features for Phase 11, never a substitute for the
-observation or resolution source.
+**PURPOSE.** A predictive input that may sharpen P(high is final) — never a
+substitute for the observation or resolution source, and used for trading
+only after it has been *measured* to help.
 
 ```rust
 pub trait ForecastProvider: Send + Sync {
@@ -62,20 +63,106 @@ pub trait ForecastProvider: Send + Sync {
     fn fetch<'a>(&'a self, q: &'a ForecastQuery, max_gate_wait: Duration)
         -> BoxFuture<'a, Result<ForecastEvent, ForecastError>>;
 }
-// ForecastEvent { location, provider, model, issued_at, predicted_max, hourly }
+// ForecastEvent { location, provider, model, issued_at, predicted_max, hourly, lead_days }
+// ForecastProduct { provider, model, lead_days, ready_local_minute }   (wm-core::forecast)
 ```
 
-* **KNOWN FACT (test `forecasts_never_change_the_observed_high_or_create_trades`).**
-  Injecting a forecast of 30 °C changes neither the observed high, the views,
-  the settlement value nor any decision.
-* Candidates (Phase 11): KNMI (open data platform), ECMWF, GFS, each behind
-  its own gate. Archives must provide *issue time* so replays avoid
-  forecast look-ahead (§33).
-* **HYPOTHESIS TO BACKTEST.** Adding a forecast of the remaining maximum
-  improves the calibration of P(high is final). It enters the model as a
-  feature only if walk-forward evaluation shows a stable improvement.
+**Product.** `OpenMeteoPreviousRuns` (`wm-weather::open_meteo`) requests
+`temperature_2m_previous_day1` from the Open-Meteo Previous Runs API: for
+every valid hour, the value of the model run initialised 24 hours earlier.
+The *same product* serves years of training history and today's live
+series. The "Historical Forecast API", by contrast, stitches together the
+first hours of consecutive runs — a same-day analysis that leaks the
+outcome into the past (that leak is what made the reviewed
+"weatherforecaster" bot look profitable; see
+[its review](../research/weatherforecaster-review.md)). Default model
+`gfs_global` (2 m temperature archived since March 2021; most other models
+since January 2024). One request per location per refresh (60 min) and one
+per history year; `open_meteo` gate: 10 s spacing, concurrency 1, 500 a
+day, backoff and circuit breaker. `WM_OPEN_METEO_API_KEY` switches to the
+customer host; the key is never logged or stored (audit records carry a
+key-free endpoint label and the HTTP layer strips URLs from errors).
 
-**TESTING.** `StaticForecastProvider` (archives and tests); kernel isolation test.
+**Knowledge rule.** A local day's series may be used from local midnight +
+`ready_local_minute` (08:00) — in training for every sample, live only if the
+series was *retrieved* at or after that instant (`ForecastProduct::usable_from`).
+For lead 1, every value of day D comes from runs initialised before about
+D 00:00 local, which are published hours before 08:00.
+
+**Feature.** `forecast rise` = maximum of the day's hourly forecast over the
+rest of the local day minus its maximum over the part already elapsed
+(`ForecastDay::rise_tenths`). Level errors of the forecast (grid cell vs.
+runway sensor, seasonal bias) cancel; what remains is whether the forecast
+expects the day to get warmer later — the situation in which an observed
+high is least likely to be final. A day not covered hourly and completely is
+no forecast at all.
+
+**Model.** The empirical model gains one refinement level,
+`[MinutesSinceHigh, Drop, Season, LocalHour, ForecastRise]` (buckets
+≤ −2.5 °C, cooling, ±0.4 °C, ≥ +0.5 °C), shrunk toward its parent like every
+level. Without a forecast the level is skipped, so the model then *is* the
+model without forecasts. `support` stays the count of the most specific
+level without the forecast, so the strategies' support gate means the same
+thing with and without it.
+
+**Evaluation and adoption (`wm-backtest::forecast_eval`).** Training joins
+the forecast history with the METAR history and runs a **prequential**
+(walk-forward, day by day) test: every decision point of day D — the first
+report with the daytime high confirmed for 60 minutes — is scored with the
+model as trained on the days *before* D, then D is learned. Both predictions
+come from the same model (forecast level skipped / used), and a **placebo**
+model is trained and scored identically with the forecast of 14 days earlier
+shifted onto the day (realistic shape and season, no information about the
+day). Rule fixed in advance: at least 365 scored days, and 95 % day-block
+bootstrap intervals of the change in multi-class log loss per decision that
+lie entirely below zero *both* against no forecast *and* against the
+placebo. Otherwise the installed model has no forecast level and forecasts
+cannot influence trading. Brier score, calibration, P(final) by rise bucket
+and a constant-price trading proxy are reported, not optimized. The verdict
+is stored in the model (`ForecastModelInfo`) and shown on the dashboard.
+
+**Live.** `forecast_loop` fetches each location's series hourly and two
+minutes after each day's ready time and sends a `ForecastUpdate`. The engine
+keeps the latest series per (location, product) and derives the feature only
+for the model's own product, under the knowledge rule; the dashboard shows
+the series (dashed line), the rise and why it is or is not in use. The model
+maintenance task retrains when the forecast was never evaluated, the product
+changed, history was unavailable (after 6 h), or the model is 30 days old —
+in the background, swapping the new model into the running engine.
+
+* **KNOWN FACT (tests).** A forecast never changes the observed high, the
+  views or settlement (`a_used_forecast_changes_probabilities_only_under_the_knowledge_rule`,
+  `forecasts_never_change_the_observed_high_or_create_trades`); a series
+  retrieved before the ready time and another model's series are ignored;
+  on synthetic weather with forecastable evening surges the evaluation adopts
+  an informative forecast and rejects one unrelated to the day, or known only
+  after the decisions (`crates/wm-backtest/tests/forecast_eval.rs`); no day
+  informs its own prediction, and without the refinement the model equals
+  the one trained without forecasts.
+* **ASSUMPTION.** Open-Meteo's `previous_day1` values come from runs
+  initialised ≥ 24 h before valid time (Open-Meteo documentation), and those
+  runs are published before 08:00 local.
+* **HYPOTHESIS TO BACKTEST — decided automatically on the host.** The
+  forecast rise improves P(high is final) at EHAM beyond the observed
+  trajectory. The training report (`/data/research/eham-survival.md`)
+  contains the evidence either way.
+
+**FAILURE MODES.** Open-Meteo unreachable, throttled or rejecting (unknown
+model, date outside the archive): live — the model runs without the forecast
+(fail-safe, it then is the pre-forecast model) and one alert is raised until
+recovery; training — the history walk stops at the archive start (remembered
+in `archive-start.txt`), and a failed download leaves the model without the
+forecast and schedules a retry. Partial or implausible series are no
+forecast.
+
+**TESTING.** Parser and client (`open_meteo` unit + wiremock tests: UTC,
+units, nulls, rejections with the archive's first date, API key never in
+records), `ForecastDay` coverage/DST tests, model refinement tests, kernel
+knowledge-rule and model-swap tests, evaluation tests on synthetic truth,
+training with a mock archive (newest year first, retry from the archive
+start, cache, marker, unreachable source), runtime end-to-end (forecast shown
+but unused by a model trained without it; model trained, evaluated and
+swapped in without a restart).
 
 ## 20. Polymarket integration
 

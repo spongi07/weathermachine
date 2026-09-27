@@ -15,7 +15,8 @@ use wm_net::{HttpFetcher, ProviderGate};
 use wm_polymarket::LocationMarketSpec;
 use wm_strategy::{EmpiricalPeakModel, NoEdgeModel, PeakConfig, ProbabilityModel};
 use wm_weather::{
-    AwcMetarSource, CadenceModel, NwsApiSource, ObservationSource, PollingPolicy, TgftpMetarSource,
+    AwcMetarSource, CadenceModel, NwsApiSource, ObservationSource, OpenMeteoPreviousRuns,
+    PollingPolicy, TgftpMetarSource,
 };
 
 /// Resolved identifiers of one configured location.
@@ -190,6 +191,19 @@ pub fn read_model(path: &std::path::Path) -> Result<EmpiricalPeakModel> {
     Ok(model)
 }
 
+/// Client for the configured day-1 forecast (`None`: forecasts disabled).
+pub fn forecast_client(cfg: &AppConfig, providers: &Providers) -> Option<OpenMeteoPreviousRuns> {
+    let product = cfg.forecast_product()?;
+    let fetcher = providers.fetcher("open_meteo")?;
+    Some(OpenMeteoPreviousRuns::new(
+        Arc::clone(fetcher),
+        cfg.open_meteo_base_url(),
+        cfg.env.open_meteo_api_key.clone(),
+        product.model,
+        product.lead_days,
+    ))
+}
+
 /// One rate-limit gate and fetcher per provider, shared by every station.
 pub struct Providers {
     pub fetchers: HashMap<&'static str, Arc<HttpFetcher>>,
@@ -204,6 +218,7 @@ fn provider_id(name: &str) -> ProviderId {
         "polymarket_gamma" => ProviderId::polymarket_gamma(),
         "polymarket_clob" => ProviderId::polymarket_clob(),
         "iem" => ProviderId::iem(),
+        "open_meteo" => ProviderId::open_meteo(),
         _ => ProviderId::polymarket_ws(),
     }
 }
@@ -211,7 +226,7 @@ fn provider_id(name: &str) -> ProviderId {
 impl Providers {
     pub fn build(cfg: &AppConfig, clock: Arc<dyn Clock>, user_agent: &str) -> Result<Self> {
         let p = &cfg.file.providers;
-        let sections: [(&'static str, &ProviderSection); 7] = [
+        let sections: [(&'static str, &ProviderSection); 8] = [
             ("awc", &p.awc),
             ("tgftp", &p.tgftp),
             ("nws_api", &p.nws_api),
@@ -219,6 +234,7 @@ impl Providers {
             ("polymarket_clob", &p.polymarket_clob),
             ("polymarket_ws", &p.polymarket_ws),
             ("iem", &p.iem),
+            ("open_meteo", &p.open_meteo),
         ];
         let mut fetchers = HashMap::new();
         let mut gates = HashMap::new();

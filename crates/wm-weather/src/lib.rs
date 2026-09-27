@@ -3,8 +3,9 @@
 //! Weather observation ingestion: METAR parsing, official NOAA/NWS providers,
 //! normalization, deduplication/correction tracking, provider health, adaptive
 //! schedule-aware polling, the single-per-station collector, the separate
-//! forecast port (predictive inputs only, never resolution data), and the IEM
-//! archive client used to train the probability model.
+//! forecast port (predictive inputs only, never resolution data) with the
+//! Open-Meteo fixed-lead client, and the IEM archive client used to train the
+//! probability model.
 
 pub mod collector;
 pub mod forecast;
@@ -12,6 +13,7 @@ pub mod health;
 pub mod history;
 pub mod ledger;
 pub mod metar;
+pub mod open_meteo;
 pub mod polling;
 pub mod providers;
 pub mod registry;
@@ -22,6 +24,7 @@ pub use forecast::{ForecastError, ForecastProvider, ForecastQuery, StaticForecas
 pub use health::{HealthConfig, HealthTracker};
 pub use history::{HistoryError, HistoryYear, IemArchive};
 pub use ledger::{Classified, ObservationLedger};
+pub use open_meteo::{ForecastSeries, OpenMeteoError, OpenMeteoPreviousRuns};
 pub use polling::{
     CadenceModel, PollDecision, PollingHints, PollingMode, PollingParams, PollingPolicy,
 };

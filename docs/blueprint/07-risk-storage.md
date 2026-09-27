@@ -40,9 +40,12 @@ reported, never just the first. Client order ids are deterministic
 | OrderRate | ≤ 6 orders/min | — |
 | Oversell | never sell more than held | — |
 
-*Forecast freshness* applies once a model uses forecast features (Phase 11).
-Such a model must then reject stale forecasts, and the check will join this
-table. Today forecasts cannot influence decisions (§19).
+*Forecast freshness* is enforced by construction (§19): a model that adopted
+the day-1 forecast uses a series only for the local day it covers, only when
+it was retrieved after that day's ready time and only if it covers the day
+completely. Anything else means "no forecast", and the model then gives the
+distributions of the model without forecasts — the forecast can never be
+stale, only absent.
 
 Weather gates apply to *opening, weather-dependent* intents. Reductions and
 unwinds are never blocked by weather data, since reducing risk is always

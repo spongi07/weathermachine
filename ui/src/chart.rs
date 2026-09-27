@@ -44,10 +44,22 @@ pub fn temperature_chart(loc: &LocationDto) -> AnyView {
     let now_min = minutes_of(&loc.local_time);
     let primary: Option<&ViewDto> = loc.views.first();
     let high = primary.and_then(|v| v.high_c);
+    let forecast: Vec<(f64, f64)> = loc
+        .forecast
+        .as_ref()
+        .map(|f| {
+            f.hourly
+                .iter()
+                .map(|p| (f64::from(p.minute), p.temp_c))
+                .collect()
+        })
+        .unwrap_or_default();
     let (lo, hi) = pts
         .iter()
-        .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
-    let (lo, hi) = if pts.is_empty() {
+        .map(|p| p.1)
+        .chain(forecast.iter().map(|p| p.1))
+        .fold((f64::MAX, f64::MIN), |(a, b), t| (a.min(t), b.max(t)));
+    let (lo, hi) = if pts.is_empty() && forecast.is_empty() {
         (5.0, 25.0)
     } else {
         (lo.floor() - 1.0, hi.ceil() + 1.0)
@@ -174,12 +186,34 @@ pub fn temperature_chart(loc: &LocationDto) -> AnyView {
         view! { <text class="cur-label" x=f1(s.x(*m) + 7.0) y=f1(s.y(*temp) + 4.0)>{format!("{temp:.0}°")}</text> }
     });
     let empty = pts.is_empty().then(|| view! { <text class="empty" x=f1(W / 2.0) y=f1(H / 2.0) text-anchor="middle">"no observations for the local day yet"</text> });
+    // Day-1 forecast (dashed): predictive only, never the observed high.
+    let forecast_line = (forecast.len() > 1).then(|| {
+        let d = forecast
+            .iter()
+            .enumerate()
+            .map(|(i, (m, t))| {
+                format!(
+                    "{}{:.1},{:.1}",
+                    if i == 0 { "M" } else { " L" },
+                    s.x(*m),
+                    s.y(*t)
+                )
+            })
+            .collect::<String>();
+        let tip = loc
+            .forecast
+            .as_ref()
+            .map(|f| format!("day-1 forecast {} · {}", f.product, f.status))
+            .unwrap_or_default();
+        view! { <path class="forecast" d=d><title>{tip}</title></path> }
+    });
 
     view! {
         <svg class="chart" viewBox=format!("0 0 {W} {H}") role="img" aria-label="Intraday temperature">
             {grid}
             {noon}
             {windows}
+            {forecast_line}
             <path class="runhigh" d=path></path>
             {high_line}
             {dots}
