@@ -398,3 +398,179 @@ async fn station_lease_is_exclusive_across_connections() {
     drop(again);
     db.drop_db().await;
 }
+
+fn book_event(seq: u64, at: DateTime<Utc>, token: &str) -> EventEnvelope {
+    let lv = |p: &str, s: &str| wm_core::market::BookLevel {
+        price: Price::parse(p).unwrap(),
+        size: Shares::parse(s).unwrap(),
+    };
+    let mut e = EventEnvelope::new(
+        at,
+        EventSource::Live,
+        WeatherMachineEvent::OrderBookUpdate(wm_core::event::OrderBookEvent {
+            book: wm_core::market::OrderBook {
+                token: TokenId::new(token).unwrap(),
+                bids: vec![lv("0.45", "100"), lv("0.44", "50")],
+                asks: vec![lv("0.47", "80")],
+                tick_size: Price::parse("0.01").unwrap(),
+                min_order_size: Shares::parse("5").unwrap(),
+                exchange_ts: None,
+                received_at: at,
+                hash: None,
+            },
+        }),
+    );
+    e.seq = seq;
+    e
+}
+
+async fn count(s: &PgStore, sql: &'static str) -> i64 {
+    sqlx::query(sql)
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap()
+}
+
+/// One engine batch is one transaction (a failure leaves nothing behind, so a
+/// retry cannot duplicate), large batches go in as multi-row inserts, and
+/// retention removes only old order-book updates from the journal.
+#[tokio::test]
+async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let run = RunId::deterministic(21);
+    // Whole seconds: PostgreSQL stores microseconds, `Utc::now()` has nanoseconds.
+    let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+    s.record_run(&run, RunMode::Paper, "m", &serde_json::json!({}), now)
+        .await
+        .unwrap();
+    let old = now - Duration::days(10);
+    let mut events: Vec<EventEnvelope> = (1..=1500)
+        .map(|i| book_event(i, old + Duration::seconds(i as i64), "tok-a"))
+        .collect();
+    let mut w = EventEnvelope::new(
+        old,
+        EventSource::Live,
+        WeatherMachineEvent::WeatherObservation(ObservationEvent {
+            observation: obs("2026-09-16T12:25:00Z", 17, 1, "2026-09-16T12:28:00Z"),
+            class: DedupClass::New,
+        }),
+    );
+    w.seq = 1501;
+    events.push(w);
+    events.extend((1502..=1504).map(|i| book_event(i, now, "tok-b")));
+    let decision = DecisionRecord {
+        decision_id: DecisionId(7),
+        strategy: StrategyId::new("A_buy_yes_final_high").unwrap(),
+        at: now,
+        location: LocationId::new("amsterdam").unwrap(),
+        event_slug: None,
+        summary: "test".into(),
+        inputs: serde_json::json!({}),
+        outputs: serde_json::json!({}),
+        approved: true,
+        reasons: vec![],
+    };
+    let order = wm_storage::wm_execution_record::OrderRow {
+        client_order_id: "wm-batch-1".into(),
+        decision_id: 7,
+        strategy: "A_buy_yes_final_high".into(),
+        location: "amsterdam".into(),
+        event_slug: "e".into(),
+        token: "tok-b".into(),
+        condition_id: "0xc".into(),
+        outcome_side: "YES".into(),
+        side: "BUY".into(),
+        kind: "limit".into(),
+        limit_price_micros: 950_000,
+        shares_micros: 10_000_000,
+        tif: serde_json::json!("fok"),
+        status: "filled".into(),
+        filled_micros: 10_000_000,
+        avg_price_micros: Some(950_000),
+        fees_micros: 2_375,
+        venue_order_id: None,
+        reason: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let fill = |id: &str| Fill {
+        client_order_id: ClientOrderId::new(id).unwrap(),
+        token: TokenId::new("tok-b").unwrap(),
+        side: Side::Buy,
+        price: Price::parse("0.95").unwrap(),
+        shares: Shares::parse("10").unwrap(),
+        fee: Usd::from_micros(2_375),
+        liquidity: Liquidity::Taker,
+        ts: now,
+    };
+    let books: Vec<wm_core::market::OrderBook> = events[1501..1503]
+        .iter()
+        .filter_map(|e| match &e.event {
+            WeatherMachineEvent::OrderBookUpdate(b) => Some(b.book.clone()),
+            _ => None,
+        })
+        .collect();
+    s.persist_engine_batch(
+        &run,
+        wm_storage::EngineBatch {
+            events: &events,
+            decisions: std::slice::from_ref(&decision),
+            orders: std::slice::from_ref(&order),
+            fills: &[fill("wm-batch-1")],
+            books: &books,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 1504);
+    assert_eq!(count(s, "SELECT count(*) FROM decision_snapshots").await, 1);
+    assert_eq!(count(s, "SELECT count(*) FROM fills").await, 1);
+    assert_eq!(
+        count(s, "SELECT count(*) FROM orderbook_snapshots").await,
+        2
+    );
+    assert_eq!(
+        s.load_journal(&run).await.unwrap(),
+        events,
+        "multi-row insert is exact"
+    );
+
+    // A batch whose last statement fails (fill for an unknown order) leaves
+    // nothing behind: its journal rows are rolled back with it.
+    let more: Vec<EventEnvelope> = (1505..=1510).map(|i| book_event(i, now, "tok-b")).collect();
+    let failed = s
+        .persist_engine_batch(
+            &run,
+            wm_storage::EngineBatch {
+                events: &more,
+                decisions: &[],
+                orders: &[],
+                fills: &[fill("wm-unknown")],
+                books: &[],
+            },
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 1504);
+    assert_eq!(count(s, "SELECT count(*) FROM fills").await, 1);
+
+    // Retention: old order-book updates go, everything else stays.
+    let deleted = s
+        .prune_journal_books(now - Duration::days(7))
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1500);
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 4);
+    assert_eq!(
+        count(
+            s,
+            "SELECT count(*) FROM event_journal WHERE kind = 'weather_observation'"
+        )
+        .await,
+        1
+    );
+    db.drop_db().await;
+}

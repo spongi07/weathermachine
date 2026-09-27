@@ -192,8 +192,10 @@ Per poll, `IngestBatch` is written atomically:
 * Health transitions go to `provider_health_events`.
 
 **FAILURE MODES.** A failed write marks the collector's storage as failing.
-The engine loop's own persistence failures turn `storage_ok` off, which
-blocks new positions (audit is a precondition to trade).
+The engine loop's own persistence failures, or a backlog the writer has not
+accepted yet, turn `storage_ok` off, which blocks new positions (audit is a
+precondition to trade). Engine records are retried until written, never
+dropped ([07-risk-storage.md](07-risk-storage.md)).
 **TESTING.** `wm-storage/tests/pg_store.rs` (fresh database per test) and
 the PostgreSQL runtime test.
 

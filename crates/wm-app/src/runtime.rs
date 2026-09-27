@@ -98,6 +98,13 @@ struct PersistBatch {
     books: Vec<OrderBook>,
 }
 
+/// Events coalesced into one write: bursts collapse into a single transaction.
+const MAX_COALESCED_EVENTS: usize = 20_000;
+/// Events held back while storage is slow or down. Beyond this, order-book
+/// journal entries (the bulk) are shed first; decisions, orders, fills and
+/// every other event are never dropped.
+const MAX_PENDING_EVENTS: usize = 200_000;
+
 impl PersistBatch {
     fn is_empty(&self) -> bool {
         self.events.is_empty()
@@ -105,6 +112,28 @@ impl PersistBatch {
             && self.orders.is_empty()
             && self.fills.is_empty()
             && self.books.is_empty()
+    }
+
+    /// Append a later batch (order preserved: later order states win).
+    fn merge(&mut self, later: PersistBatch) {
+        self.events.extend(later.events);
+        self.decisions.extend(later.decisions);
+        self.orders.extend(later.orders);
+        self.fills.extend(later.fills);
+        self.books.extend(later.books);
+    }
+
+    /// Last resort when storage is stalled: drop order-book entries once the
+    /// batch exceeds `cap` events. Returns how many were dropped.
+    fn shed_books(&mut self, cap: usize) -> usize {
+        if self.events.len() <= cap {
+            return 0;
+        }
+        let before = self.events.len() + self.books.len();
+        self.events
+            .retain(|e| !matches!(e.event, WeatherMachineEvent::OrderBookUpdate(_)));
+        self.books.clear();
+        before - self.events.len()
     }
 }
 
@@ -144,32 +173,86 @@ async fn persistence_loop(
     mut rx: mpsc::Receiver<PersistBatch>,
     ok: Arc<AtomicBool>,
     journal: bool,
+    side: SharedSide,
 ) {
-    while let Some(b) = rx.recv().await {
-        let res: Result<(), wm_storage::StorageError> = async {
-            if journal && !b.events.is_empty() {
-                store.append_events(&run, &b.events).await?;
+    let mut pending = PersistBatch::default();
+    let mut backoff = std::time::Duration::from_secs(1);
+    let mut failures = 0u32;
+    loop {
+        if pending.is_empty() {
+            match rx.recv().await {
+                Some(b) => pending = b,
+                None => return,
             }
-            store.record_decisions(&run, &b.decisions).await?;
-            for o in &b.orders {
-                store.upsert_order(&run, o).await?;
-            }
-            for f in &b.fills {
-                store.record_fill(f).await?;
-            }
-            for book in &b.books {
-                store.record_orderbook(book).await?;
-            }
-            Ok(())
         }
-        .await;
-        match res {
-            Ok(()) => ok.store(true, Ordering::Release),
+        // Coalesce everything already queued into this write.
+        let mut closed = false;
+        while pending.events.len() < MAX_COALESCED_EVENTS {
+            match rx.try_recv() {
+                Ok(b) => pending.merge(b),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        let batch = wm_storage::EngineBatch {
+            events: if journal { &pending.events } else { &[] },
+            decisions: &pending.decisions,
+            orders: &pending.orders,
+            fills: &pending.fills,
+            books: &pending.books,
+        };
+        match store.persist_engine_batch(&run, batch).await {
+            Ok(()) => {
+                pending = PersistBatch::default();
+                ok.store(true, Ordering::Release);
+                if failures > 0 {
+                    with_side(&side, |st| {
+                        st.alert("info", format!("audit storage recovered after {failures} failed write(s); nothing was lost"))
+                    });
+                }
+                failures = 0;
+                backoff = std::time::Duration::from_secs(1);
+                if closed {
+                    return;
+                }
+            }
             Err(e) => {
                 ok.store(false, Ordering::Release);
+                failures += 1;
                 metrics::counter!("wm_persist_failures_total", "component" => "engine")
                     .increment(1);
-                tracing::error!(error = %e, "engine persistence failed — new positions blocked until storage recovers");
+                tracing::error!(error = %e, pending_events = pending.events.len(), retry_in_s = backoff.as_secs(), "engine persistence failed — new positions blocked; retrying the same batch");
+                if failures == 1 {
+                    with_side(&side, |st| {
+                        st.alert(
+                            "critical",
+                            format!(
+                                "audit storage write failed ({e}); new positions blocked, retrying"
+                            ),
+                        )
+                    });
+                }
+                let shed = pending.shed_books(MAX_PENDING_EVENTS);
+                if shed > 0 {
+                    metrics::counter!("wm_journal_shed_total").increment(shed as u64);
+                    with_side(&side, |st| {
+                        st.alert("critical", format!("journal gap: {shed} order-book updates not persisted while storage was down"))
+                    });
+                }
+                if closed && failures >= 3 {
+                    tracing::error!(
+                        events = pending.events.len(),
+                        decisions = pending.decisions.len(),
+                        orders = pending.orders.len(),
+                        "shutting down with unpersisted engine records"
+                    );
+                    return;
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
             }
         }
     }
@@ -224,10 +307,22 @@ struct SideState {
 
 impl SideState {
     fn alert(&mut self, level: &str, message: impl Into<String>) {
+        let message = message.into();
+        let now = Utc::now().timestamp_millis();
+        // One line per incident: the same alert within a minute is not repeated.
+        if self
+            .alerts
+            .iter()
+            .rev()
+            .take(10)
+            .any(|a| a.level == level && a.message == message && now - a.at_ms < 60_000)
+        {
+            return;
+        }
         self.alerts.push_back(AlertDto {
-            at_ms: Utc::now().timestamp_millis(),
+            at_ms: now,
             level: level.into(),
-            message: message.into(),
+            message,
         });
         while self.alerts.len() > 80 {
             self.alerts.pop_front();
@@ -381,7 +476,9 @@ async fn book_fallback_loop(
                         let env = EventEnvelope::new(
                             clock.now(),
                             EventSource::Live,
-                            WeatherMachineEvent::OrderBookUpdate(OrderBookEvent { book }),
+                            WeatherMachineEvent::OrderBookUpdate(OrderBookEvent {
+                                book: book.truncated(wm_core::market::ENGINE_BOOK_DEPTH),
+                            }),
                         );
                         if events.send(env).await.is_err() {
                             return;
@@ -735,9 +832,22 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             rx,
             Arc::clone(&storage_ok),
             cfg.file.app.journal,
+            Arc::clone(&side),
         )));
         tx
     });
+
+    // -- Journal retention (bounded disk use) ----------------------------------------------
+    if let Some(s) = store.clone()
+        && cfg.file.app.journal_book_retention_days > 0
+    {
+        tasks.push(tokio::spawn(journal_retention_loop(
+            s,
+            cfg.file.app.journal_book_retention_days,
+            Arc::clone(&clock),
+            shutdown.clone(),
+        )));
+    }
 
     // -- Engine loop ---------------------------------------------------------------------
     let mut session =
@@ -751,6 +861,9 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     }
     let mut loop_state = EngineLoopState {
         record_books: cfg.file.app.record_orderbooks,
+        books: BookRecorder::new(Duration::seconds(
+            i64::try_from(cfg.file.app.book_record_interval_secs.max(1)).unwrap_or(10),
+        )),
         ..EngineLoopState::default()
     };
     let warm = session.run_until(clock.now());
@@ -818,11 +931,12 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             },
             r = shutdown_rx.changed() => if r.is_err() || *shutdown_rx.borrow() { break; },
         }
-        let ok = storage_ok.load(Ordering::Acquire);
+        let ok = storage_ok.load(Ordering::Acquire) && !loop_state.backlogged;
         session.engine_mut().set_storage_ok(ok);
         metrics::gauge!("wm_storage_ok").set(if ok { 1.0 } else { 0.0 });
         let out = session.run_until(clock.now());
         loop_state.absorb(&session, out, &persist_tx, &storage_ok, &hint_txs, &side);
+        loop_state.flush(clock.now(), &persist_tx, &storage_ok, &side);
         if publish {
             let snap = session.engine().snapshot();
             metrics::gauge!("wm_global_exposure_usd").set(snap.exposure.global_worst_case.as_f64());
@@ -868,6 +982,23 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     tracing::info!("shutting down");
     let _ = stop_tx.send(true);
     ready.store(false, Ordering::Release);
+    // Hand over anything still held back (full queue or pending book changes)
+    // before closing the writer's queue.
+    if let Some(tx) = &persist_tx {
+        let mut held = loop_state.overflow.take().unwrap_or_default();
+        if loop_state.record_books {
+            loop_state
+                .books
+                .due(clock.now() + Duration::days(1), &mut held.books);
+        }
+        if !held.is_empty()
+            && tokio::time::timeout(std::time::Duration::from_secs(10), tx.send(held))
+                .await
+                .is_err()
+        {
+            tracing::error!("persistence writer did not accept the final batch within 10 s");
+        }
+    }
     drop(persist_tx);
     for t in tasks {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), t).await;
@@ -894,6 +1025,36 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         return Err(RestartRequested.into());
     }
     Ok(())
+}
+
+/// Hourly: delete journal order-book updates older than the retention.
+async fn journal_retention_loop(
+    store: PgStore,
+    days: u32,
+    clock: Arc<dyn Clock>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    // First pass shortly after start, then hourly.
+    let mut wait = std::time::Duration::from_secs(120);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+        }
+        wait = std::time::Duration::from_secs(3600);
+        let before = clock.now() - Duration::days(i64::from(days));
+        match store.prune_journal_books(before).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                deleted = n,
+                days,
+                "journal order-book updates past retention deleted"
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "journal retention pass failed; retrying in an hour")
+            }
+        }
+    }
 }
 
 /// Train until a model is installed, retrying after failures. Stops on
@@ -973,7 +1134,79 @@ async fn auto_train_loop(
 #[derive(Default)]
 struct EngineLoopState {
     record_books: bool,
-    last_book_record: HashMap<TokenId, DateTime<Utc>>,
+    books: BookRecorder,
+    /// Batches the writer could not accept yet (queue full). Merged and sent
+    /// first on the next attempt; never dropped.
+    overflow: Option<PersistBatch>,
+    /// Inside a backlog episode (one alert per episode, positions blocked).
+    backlogged: bool,
+}
+
+/// Market-history recorder: a token's book is stored when it changed, at most
+/// once per `interval`; the latest change inside the interval is kept and
+/// stored when the interval ends, so the end of a burst is never lost.
+#[derive(Default)]
+struct BookRecorder {
+    interval: Duration,
+    last: HashMap<TokenId, (DateTime<Utc>, u64)>,
+    pending: HashMap<TokenId, OrderBook>,
+}
+
+fn book_fingerprint(b: &OrderBook) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for l in b.bids.iter().chain(b.asks.iter()) {
+        l.price.micros().hash(&mut h);
+        l.size.micros().hash(&mut h);
+    }
+    b.bids.len().hash(&mut h);
+    h.finish()
+}
+
+impl BookRecorder {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            ..Self::default()
+        }
+    }
+
+    fn offer(&mut self, book: &OrderBook, at: DateTime<Utc>, out: &mut Vec<OrderBook>) {
+        let fp = book_fingerprint(book);
+        match self.last.get(&book.token) {
+            Some((_, f)) if *f == fp => {
+                self.pending.remove(&book.token);
+            }
+            Some((t, _)) if at - *t < self.interval => {
+                self.pending.insert(book.token.clone(), book.clone());
+            }
+            _ => {
+                self.last.insert(book.token.clone(), (at, fp));
+                self.pending.remove(&book.token);
+                out.push(book.clone());
+            }
+        }
+    }
+
+    /// Store pending changes whose interval has ended.
+    fn due(&mut self, now: DateTime<Utc>, out: &mut Vec<OrderBook>) {
+        let ready: Vec<TokenId> = self
+            .pending
+            .keys()
+            .filter(|t| {
+                self.last
+                    .get(*t)
+                    .is_none_or(|(at, _)| now - *at >= self.interval)
+            })
+            .cloned()
+            .collect();
+        for t in ready {
+            if let Some(b) = self.pending.remove(&t) {
+                self.last.insert(t, (now, book_fingerprint(&b)));
+                out.push(b);
+            }
+        }
+    }
 }
 
 impl EngineLoopState {
@@ -1049,12 +1282,8 @@ impl EngineLoopState {
                     }
                 }
                 WeatherMachineEvent::OrderBookUpdate(b) if self.record_books => {
-                    let last = self.last_book_record.get(&b.book.token).copied();
-                    if last.is_none_or(|t| env.available_at - t >= Duration::seconds(5)) {
-                        self.last_book_record
-                            .insert(b.book.token.clone(), env.available_at);
-                        batch.books.push(b.book.clone());
-                    }
+                    self.books
+                        .offer(&b.book, env.available_at, &mut batch.books);
                 }
                 _ => {}
             }
@@ -1068,18 +1297,228 @@ impl EngineLoopState {
             .map(order_row)
             .collect();
         batch.events = out.processed;
+        self.submit(batch, tx, storage_ok, side);
+    }
+
+    /// Periodic work without new kernel output: store book changes whose
+    /// interval ended and retry a held-back batch.
+    fn flush(
+        &mut self,
+        now: DateTime<Utc>,
+        persist: &Option<mpsc::Sender<PersistBatch>>,
+        storage_ok: &Arc<AtomicBool>,
+        side: &SharedSide,
+    ) {
+        let Some(tx) = persist else { return };
+        let mut batch = PersistBatch::default();
+        if self.record_books {
+            self.books.due(now, &mut batch.books);
+        }
+        self.submit(batch, tx, storage_ok, side);
+    }
+
+    /// Hand a batch to the writer. A full queue never loses records: the batch
+    /// is held (merged with anything held before) and new positions stay
+    /// blocked until the writer has caught up.
+    fn submit(
+        &mut self,
+        batch: PersistBatch,
+        tx: &mpsc::Sender<PersistBatch>,
+        storage_ok: &Arc<AtomicBool>,
+        side: &SharedSide,
+    ) {
+        let batch = match self.overflow.take() {
+            Some(mut held) => {
+                held.merge(batch);
+                held
+            }
+            None => batch,
+        };
         if batch.is_empty() {
             return;
         }
         match tx.try_send(batch) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
+            Ok(()) => {
+                if self.backlogged {
+                    self.backlogged = false;
+                    with_side(side, |st| {
+                        st.alert(
+                            "info",
+                            "persistence caught up — nothing was lost; new positions allowed again",
+                        )
+                    });
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(mut held)) => {
                 storage_ok.store(false, Ordering::Release);
-                with_side(side, |st| {
-                    st.alert("critical", "persistence backlog — new positions blocked")
-                });
+                if !self.backlogged {
+                    self.backlogged = true;
+                    metrics::counter!("wm_persist_backlog_episodes_total").increment(1);
+                    with_side(side, |st| {
+                        st.alert("critical", "persistence backlog — new positions blocked until the writer catches up")
+                    });
+                }
+                let shed = held.shed_books(MAX_PENDING_EVENTS);
+                if shed > 0 {
+                    metrics::counter!("wm_journal_shed_total").increment(shed as u64);
+                    with_side(side, |st| {
+                        st.alert("critical", format!("journal gap: {shed} order-book updates not persisted while storage was stalled"))
+                    });
+                }
+                self.overflow = Some(held);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => storage_ok.store(false, Ordering::Release),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use wm_core::market::BookLevel;
+    use wm_core::units::{Price, Shares};
+
+    fn t(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn book(token: &str, bid: &str, at: &str) -> OrderBook {
+        OrderBook {
+            token: TokenId::new(token).unwrap(),
+            bids: vec![BookLevel {
+                price: Price::parse(bid).unwrap(),
+                size: Shares::parse("100").unwrap(),
+            }],
+            asks: vec![],
+            tick_size: Price::parse("0.01").unwrap(),
+            min_order_size: Shares::parse("5").unwrap(),
+            exchange_ts: None,
+            received_at: t(at),
+            hash: None,
+        }
+    }
+
+    fn book_env(b: OrderBook) -> EventEnvelope {
+        EventEnvelope::new(
+            b.received_at,
+            EventSource::Live,
+            WeatherMachineEvent::OrderBookUpdate(OrderBookEvent { book: b }),
+        )
+    }
+
+    #[test]
+    fn recorder_stores_changes_at_most_once_per_interval_and_keeps_the_last() {
+        let mut r = BookRecorder::new(Duration::seconds(10));
+        let mut out = Vec::new();
+        r.offer(
+            &book("a", "0.40", "2026-09-27T12:00:00Z"),
+            t("2026-09-27T12:00:00Z"),
+            &mut out,
+        );
+        assert_eq!(out.len(), 1, "first sight is stored");
+        r.offer(
+            &book("a", "0.40", "2026-09-27T12:00:03Z"),
+            t("2026-09-27T12:00:03Z"),
+            &mut out,
+        );
+        assert_eq!(out.len(), 1, "unchanged book is not stored again");
+        r.offer(
+            &book("a", "0.41", "2026-09-27T12:00:04Z"),
+            t("2026-09-27T12:00:04Z"),
+            &mut out,
+        );
+        r.offer(
+            &book("a", "0.42", "2026-09-27T12:00:06Z"),
+            t("2026-09-27T12:00:06Z"),
+            &mut out,
+        );
+        assert_eq!(out.len(), 1, "changes inside the interval are held");
+        r.due(t("2026-09-27T12:00:09Z"), &mut out);
+        assert_eq!(out.len(), 1);
+        r.due(t("2026-09-27T12:00:10Z"), &mut out);
+        assert_eq!(
+            out.len(),
+            2,
+            "the latest held change is stored when the interval ends"
+        );
+        assert_eq!(out[1].bids[0].price, Price::parse("0.42").unwrap());
+        r.due(t("2026-09-27T12:01:00Z"), &mut out);
+        assert_eq!(out.len(), 2, "nothing pending");
+        // A change back to an already stored state is still a change.
+        r.offer(
+            &book("a", "0.40", "2026-09-27T12:01:00Z"),
+            t("2026-09-27T12:01:00Z"),
+            &mut out,
+        );
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn a_full_queue_holds_batches_blocks_trading_and_alerts_once() {
+        let (tx, mut rx) = mpsc::channel::<PersistBatch>(1);
+        let ok = Arc::new(AtomicBool::new(true));
+        let side: SharedSide = Arc::new(Mutex::new(SideState::default()));
+        let mut st = EngineLoopState::default();
+        let batch = |n: usize| PersistBatch {
+            events: (0..n)
+                .map(|_| book_env(book("a", "0.40", "2026-09-27T12:00:00Z")))
+                .collect(),
+            ..PersistBatch::default()
+        };
+        st.submit(batch(1), &tx, &ok, &side);
+        assert!(!st.backlogged);
+        for _ in 0..5 {
+            st.submit(batch(2), &tx, &ok, &side);
+        }
+        assert!(st.backlogged);
+        assert!(!ok.load(Ordering::Acquire), "new positions blocked");
+        assert_eq!(
+            st.overflow.as_ref().unwrap().events.len(),
+            10,
+            "nothing dropped"
+        );
+        let alerts = |side: &SharedSide| with_side(side, |s| s.alerts.len());
+        assert_eq!(alerts(&side), 1, "one alert per episode");
+        // The writer catches up: the held batch goes out whole and in order.
+        assert_eq!(rx.try_recv().unwrap().events.len(), 1);
+        st.flush(t("2026-09-27T12:00:01Z"), &Some(tx.clone()), &ok, &side);
+        assert!(!st.backlogged && st.overflow.is_none());
+        assert_eq!(rx.try_recv().unwrap().events.len(), 10);
+        assert_eq!(alerts(&side), 2, "recovery is announced");
+    }
+
+    #[test]
+    fn shedding_drops_only_order_book_entries() {
+        let mut b = PersistBatch {
+            events: (0..5)
+                .map(|_| book_env(book("a", "0.40", "2026-09-27T12:00:00Z")))
+                .chain(std::iter::once(EventEnvelope::new(
+                    t("2026-09-27T12:00:00Z"),
+                    EventSource::Operator,
+                    WeatherMachineEvent::Timer(TimerEvent {
+                        due_at: t("2026-09-27T12:00:00Z"),
+                        kind: TimerKind::Heartbeat,
+                    }),
+                )))
+                .collect(),
+            books: vec![book("a", "0.40", "2026-09-27T12:00:00Z")],
+            ..PersistBatch::default()
+        };
+        assert_eq!(b.shed_books(10), 0, "under the cap nothing is shed");
+        assert_eq!(b.shed_books(3), 6);
+        assert_eq!(b.events.len(), 1);
+        assert!(matches!(b.events[0].event, WeatherMachineEvent::Timer(_)));
+        assert!(b.books.is_empty());
+    }
+
+    #[test]
+    fn identical_alerts_within_a_minute_are_not_repeated() {
+        let mut s = SideState::default();
+        for _ in 0..30 {
+            s.alert("critical", "persistence backlog");
+        }
+        s.alert("info", "something else");
+        assert_eq!(s.alerts.len(), 2);
     }
 }

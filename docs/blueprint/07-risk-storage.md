@@ -105,10 +105,34 @@ unit tests for hedges and pending buys, and the global cap in `each_gate_rejects
 journal). Raw payloads are always kept. Every decision row links to its run
 and config. Advisory locks provide per-station collector leases.
 
-**FAILURE MODES.** A write failure turns `storage_ok` off, which blocks new
-positions. A full persistence queue does the same. Migrations run before any
+**Engine writes.** The engine loop never waits for the database. It hands
+each batch (journal entries, decisions, orders, fills, book snapshots) to a
+writer task, which coalesces whatever is queued (up to 20,000 events) into
+**one transaction** with multi-row inserts. A failed write rolls back
+completely and the same batch is retried with backoff (1 s → 30 s), so
+nothing is lost or duplicated. If the queue is full, the engine holds the
+batch and resends it; nothing is dropped. Only if storage stays stalled
+beyond 200,000 held events are order-book entries shed (alert
+"journal gap", metric `wm_journal_shed_total`); decisions, orders, fills
+and all other events are never shed.
+
+**Bounded growth.** Order-book updates are ~99 % of engine inputs (about
+1.5 million a day for three days of Amsterdam markets). They are journaled
+with 5 levels per side and deleted from the journal after
+`journal_book_retention_days` (7; `WM_JOURNAL_RETENTION_DAYS`, 0 = keep).
+Market history lives on in `orderbook_snapshots` (changes only, ≤ 1 per
+10 s per token). Nightly backups exclude the replay journal by default
+(`WM_BACKUP_JOURNAL=true` includes it).
+
+**FAILURE MODES.** A write failure, or a batch the writer has not accepted
+yet, turns `storage_ok` off, which blocks new positions until the backlog is
+written (one alert per episode, one on recovery). Migrations run before any
 collector starts.
 **TESTING.** `wm-storage/tests/pg_store.rs` (each test in a fresh database):
 ingest round-trip, versioning, journal round-trip, rules approval, lease
-exclusivity. The runtime PostgreSQL test covers persistence, warm restart
-and no duplicate rows.
+exclusivity, `engine_batch_is_atomic_and_old_book_updates_are_pruned`.
+Runtime unit tests: `a_full_queue_holds_batches_blocks_trading_and_alerts_once`,
+`shedding_drops_only_order_book_entries`,
+`recorder_stores_changes_at_most_once_per_interval_and_keeps_the_last`. The
+runtime PostgreSQL test covers persistence, warm restart and no duplicate
+rows.

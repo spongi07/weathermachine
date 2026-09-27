@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (252 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (257 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -46,7 +46,8 @@ Provider behaviours required by the brief:
   * Engine and trading: `wm_engine_events_total`, `wm_engine_handle_seconds`,
     `wm_decisions_total`, `wm_orders_approved_total`,
     `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`,
-    `wm_persist_failures_total`, `wm_duplicate_observations_total`.
+    `wm_persist_failures_total`, `wm_persist_backlog_episodes_total`,
+    `wm_journal_shed_total` (should stay 0), `wm_duplicate_observations_total`.
 * **Request audit:** one `provider_requests` row per request (§15). The
   actual provider load is a SQL query away, e.g. requests per hour per
   provider.
@@ -69,7 +70,13 @@ container (restart policy) instead of limping on.
   into duplicates (tested: 0 new, no duplicate rows).
 * **Journal:** every engine input of a run is stored (`event_journal`), so
   the run can be replayed exactly or backtested with new parameters
-  (`backtest --journal <run-id>`).
+  (`backtest --journal <run-id>`). Order-book updates in it are kept for 7
+  days (`WM_JOURNAL_RETENTION_DAYS`), which bounds disk use; exact replay
+  covers that window. The audit trail itself (observations, decisions,
+  orders, fills, recorded books) is kept.
+* **Persistence backlog:** engine records are written in coalesced
+  transactions and retried on failure; a full queue holds them instead of
+  dropping them. New positions stay blocked until the backlog is written.
 * **Single writer:** the station lease is released on shutdown and dropped
   automatically when the connection dies, so a standby instance can take
   over.

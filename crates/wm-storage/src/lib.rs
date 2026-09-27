@@ -378,20 +378,52 @@ impl PgStore {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
-        for e in events {
-            sqlx::query("INSERT INTO event_journal (run_id, seq, available_at, recorded_at, source, kind, payload) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-                .bind(run.0)
-                .bind(e.seq as i64)
-                .bind(e.available_at)
-                .bind(e.recorded_at)
-                .bind(source_str(e.source))
-                .bind(e.event.kind())
-                .bind(sqlx::types::Json(&e.event))
-                .execute(&mut *tx)
-                .await?;
-        }
+        insert_journal(&mut tx, run, events).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Everything one engine batch produced, in a single transaction: the
+    /// journal, decisions, orders, fills and sampled books. A failure rolls
+    /// the whole batch back, so the caller can retry it without duplicates.
+    pub async fn persist_engine_batch(&self, run: &RunId, b: EngineBatch<'_>) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_journal(&mut tx, run, b.events).await?;
+        for d in b.decisions {
+            insert_decision(&mut tx, run, d).await?;
+        }
+        for o in b.orders {
+            upsert_order_row(&mut tx, run, o).await?;
+        }
+        for f in b.fills {
+            insert_fill(&mut tx, f).await?;
+        }
+        insert_orderbooks(&mut tx, b.books).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Delete journal order-book updates older than `before`, in chunks.
+    /// Recent runs stay exactly replayable; older market history lives on in
+    /// the sampled `orderbook_snapshots`. Returns the number of rows deleted.
+    pub async fn prune_journal_books(&self, before: DateTime<Utc>) -> Result<u64> {
+        let mut total = 0;
+        loop {
+            let n = sqlx::query(
+                "DELETE FROM event_journal WHERE ctid IN (
+                   SELECT ctid FROM event_journal
+                   WHERE kind = 'order_book_update' AND available_at < $1
+                   LIMIT 20000)",
+            )
+            .bind(before)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            total += n;
+            if n < 20_000 {
+                return Ok(total);
+            }
+        }
     }
 
     /// Load a run's journal in sequence order (exact replay / recovery).
@@ -526,23 +558,8 @@ impl PgStore {
     }
 
     pub async fn record_orderbook(&self, b: &OrderBook) -> Result<()> {
-        let levels = serde_json::json!({ "bids": b.bids, "asks": b.asks });
-        sqlx::query(
-            "INSERT INTO orderbook_snapshots (token_id, captured_at, exchange_ts, best_bid_micros, best_ask_micros, bid_size_micros, ask_size_micros, levels, hash)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        )
-        .bind(b.token.as_str())
-        .bind(b.received_at)
-        .bind(b.exchange_ts)
-        .bind(b.best_bid().map(|l| l.price.micros() as i32))
-        .bind(b.best_ask().map(|l| l.price.micros() as i32))
-        .bind(b.best_bid().map(|l| l.size.micros()))
-        .bind(b.best_ask().map(|l| l.size.micros()))
-        .bind(sqlx::types::Json(levels))
-        .bind(b.hash.as_deref())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        insert_orderbooks(&mut conn, std::slice::from_ref(b)).await
     }
 
     // -- Decisions, orders, fills ---------------------------------------------------
@@ -553,79 +570,20 @@ impl PgStore {
         }
         let mut tx = self.pool.begin().await?;
         for d in records {
-            sqlx::query(
-                "INSERT INTO decision_snapshots (run_id, decision_id, strategy, at, location_id, event_slug, summary, inputs, outputs, approved, reasons)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING",
-            )
-            .bind(run.0)
-            .bind(d.decision_id.0 as i64)
-            .bind(d.strategy.as_str())
-            .bind(d.at)
-            .bind(d.location.as_str())
-            .bind(d.event_slug.as_ref().map(|s| s.as_str()))
-            .bind(&d.summary)
-            .bind(sqlx::types::Json(&d.inputs))
-            .bind(sqlx::types::Json(&d.outputs))
-            .bind(d.approved)
-            .bind(&d.reasons)
-            .execute(&mut *tx)
-            .await?;
+            insert_decision(&mut tx, run, d).await?;
         }
         tx.commit().await?;
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_order(&self, run: &RunId, o: &wm_execution_record::OrderRow) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO orders (client_order_id, run_id, decision_id, strategy, location_id, event_slug, token_id, condition_id, outcome_side, side, kind, limit_price_micros, shares_micros, tif, status, filled_micros, avg_price_micros, fees_micros, venue_order_id, reason, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
-             ON CONFLICT (client_order_id) DO UPDATE SET status = EXCLUDED.status, filled_micros = EXCLUDED.filled_micros, avg_price_micros = EXCLUDED.avg_price_micros,
-               fees_micros = EXCLUDED.fees_micros, venue_order_id = EXCLUDED.venue_order_id, reason = EXCLUDED.reason, updated_at = EXCLUDED.updated_at",
-        )
-        .bind(&o.client_order_id)
-        .bind(run.0)
-        .bind(o.decision_id)
-        .bind(&o.strategy)
-        .bind(&o.location)
-        .bind(&o.event_slug)
-        .bind(&o.token)
-        .bind(&o.condition_id)
-        .bind(&o.outcome_side)
-        .bind(&o.side)
-        .bind(&o.kind)
-        .bind(o.limit_price_micros)
-        .bind(o.shares_micros)
-        .bind(sqlx::types::Json(&o.tif))
-        .bind(&o.status)
-        .bind(o.filled_micros)
-        .bind(o.avg_price_micros)
-        .bind(o.fees_micros)
-        .bind(o.venue_order_id.as_deref())
-        .bind(o.reason.as_deref())
-        .bind(o.created_at)
-        .bind(o.updated_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        upsert_order_row(&mut conn, run, o).await
     }
 
     pub async fn record_fill(&self, f: &Fill) -> Result<()> {
-        sqlx::query("INSERT INTO fills (client_order_id, token_id, side, price_micros, shares_micros, fee_micros, liquidity, ts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
-            .bind(f.client_order_id.as_str())
-            .bind(f.token.as_str())
-            .bind(side_str(f.side))
-            .bind(f.price.micros() as i32)
-            .bind(f.shares.micros())
-            .bind(f.fee.micros())
-            .bind(match f.liquidity {
-                Liquidity::Maker => "maker",
-                Liquidity::Taker => "taker",
-            })
-            .bind(f.ts)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        insert_fill(&mut conn, f).await
     }
 
     // -- Statistics -------------------------------------------------------------------
@@ -703,6 +661,175 @@ impl PgStore {
             .await?;
         Ok(())
     }
+}
+
+/// One engine persistence unit (see [`PgStore::persist_engine_batch`]).
+#[derive(Debug, Clone, Copy)]
+pub struct EngineBatch<'a> {
+    /// Journal entries (empty when journaling is off).
+    pub events: &'a [EventEnvelope],
+    pub decisions: &'a [DecisionRecord],
+    pub orders: &'a [wm_execution_record::OrderRow],
+    pub fills: &'a [Fill],
+    pub books: &'a [OrderBook],
+}
+
+/// Rows per multi-row statement.
+const INSERT_CHUNK: usize = 2_000;
+
+async fn insert_journal(
+    conn: &mut PgConnection,
+    run: &RunId,
+    events: &[EventEnvelope],
+) -> Result<()> {
+    for chunk in events.chunks(INSERT_CHUNK) {
+        let seq: Vec<i64> = chunk.iter().map(|e| e.seq as i64).collect();
+        let available: Vec<DateTime<Utc>> = chunk.iter().map(|e| e.available_at).collect();
+        let recorded: Vec<DateTime<Utc>> = chunk.iter().map(|e| e.recorded_at).collect();
+        let source: Vec<&str> = chunk.iter().map(|e| source_str(e.source)).collect();
+        let kind: Vec<&str> = chunk.iter().map(|e| e.event.kind()).collect();
+        let payload: Vec<sqlx::types::Json<&wm_core::event::WeatherMachineEvent>> =
+            chunk.iter().map(|e| sqlx::types::Json(&e.event)).collect();
+        sqlx::query(
+            "INSERT INTO event_journal (run_id, seq, available_at, recorded_at, source, kind, payload)
+             SELECT $1, u.seq, u.available_at, u.recorded_at, u.source, u.kind, u.payload
+             FROM UNNEST($2::bigint[], $3::timestamptz[], $4::timestamptz[], $5::text[], $6::text[], $7::jsonb[])
+               AS u(seq, available_at, recorded_at, source, kind, payload)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(run.0)
+        .bind(&seq)
+        .bind(&available)
+        .bind(&recorded)
+        .bind(&source)
+        .bind(&kind)
+        .bind(&payload)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn insert_orderbooks(conn: &mut PgConnection, books: &[OrderBook]) -> Result<()> {
+    for chunk in books.chunks(INSERT_CHUNK) {
+        let token: Vec<&str> = chunk.iter().map(|b| b.token.as_str()).collect();
+        let captured: Vec<DateTime<Utc>> = chunk.iter().map(|b| b.received_at).collect();
+        let exchange_ts: Vec<Option<DateTime<Utc>>> = chunk.iter().map(|b| b.exchange_ts).collect();
+        let bid: Vec<Option<i32>> = chunk
+            .iter()
+            .map(|b| b.best_bid().map(|l| l.price.micros() as i32))
+            .collect();
+        let ask: Vec<Option<i32>> = chunk
+            .iter()
+            .map(|b| b.best_ask().map(|l| l.price.micros() as i32))
+            .collect();
+        let bid_size: Vec<Option<i64>> = chunk
+            .iter()
+            .map(|b| b.best_bid().map(|l| l.size.micros()))
+            .collect();
+        let ask_size: Vec<Option<i64>> = chunk
+            .iter()
+            .map(|b| b.best_ask().map(|l| l.size.micros()))
+            .collect();
+        let levels: Vec<sqlx::types::Json<serde_json::Value>> = chunk
+            .iter()
+            .map(|b| sqlx::types::Json(serde_json::json!({ "bids": b.bids, "asks": b.asks })))
+            .collect();
+        let hash: Vec<Option<&str>> = chunk.iter().map(|b| b.hash.as_deref()).collect();
+        sqlx::query(
+            "INSERT INTO orderbook_snapshots (token_id, captured_at, exchange_ts, best_bid_micros, best_ask_micros, bid_size_micros, ask_size_micros, levels, hash)
+             SELECT * FROM UNNEST($1::text[], $2::timestamptz[], $3::timestamptz[], $4::int4[], $5::int4[], $6::int8[], $7::int8[], $8::jsonb[], $9::text[])",
+        )
+        .bind(&token)
+        .bind(&captured)
+        .bind(&exchange_ts)
+        .bind(&bid)
+        .bind(&ask)
+        .bind(&bid_size)
+        .bind(&ask_size)
+        .bind(&levels)
+        .bind(&hash)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn insert_decision(conn: &mut PgConnection, run: &RunId, d: &DecisionRecord) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO decision_snapshots (run_id, decision_id, strategy, at, location_id, event_slug, summary, inputs, outputs, approved, reasons)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING",
+    )
+    .bind(run.0)
+    .bind(d.decision_id.0 as i64)
+    .bind(d.strategy.as_str())
+    .bind(d.at)
+    .bind(d.location.as_str())
+    .bind(d.event_slug.as_ref().map(|s| s.as_str()))
+    .bind(&d.summary)
+    .bind(sqlx::types::Json(&d.inputs))
+    .bind(sqlx::types::Json(&d.outputs))
+    .bind(d.approved)
+    .bind(&d.reasons)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_order_row(
+    conn: &mut PgConnection,
+    run: &RunId,
+    o: &wm_execution_record::OrderRow,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO orders (client_order_id, run_id, decision_id, strategy, location_id, event_slug, token_id, condition_id, outcome_side, side, kind, limit_price_micros, shares_micros, tif, status, filled_micros, avg_price_micros, fees_micros, venue_order_id, reason, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+         ON CONFLICT (client_order_id) DO UPDATE SET status = EXCLUDED.status, filled_micros = EXCLUDED.filled_micros, avg_price_micros = EXCLUDED.avg_price_micros,
+           fees_micros = EXCLUDED.fees_micros, venue_order_id = EXCLUDED.venue_order_id, reason = EXCLUDED.reason, updated_at = EXCLUDED.updated_at",
+    )
+    .bind(&o.client_order_id)
+    .bind(run.0)
+    .bind(o.decision_id)
+    .bind(&o.strategy)
+    .bind(&o.location)
+    .bind(&o.event_slug)
+    .bind(&o.token)
+    .bind(&o.condition_id)
+    .bind(&o.outcome_side)
+    .bind(&o.side)
+    .bind(&o.kind)
+    .bind(o.limit_price_micros)
+    .bind(o.shares_micros)
+    .bind(sqlx::types::Json(&o.tif))
+    .bind(&o.status)
+    .bind(o.filled_micros)
+    .bind(o.avg_price_micros)
+    .bind(o.fees_micros)
+    .bind(o.venue_order_id.as_deref())
+    .bind(o.reason.as_deref())
+    .bind(o.created_at)
+    .bind(o.updated_at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+async fn insert_fill(conn: &mut PgConnection, f: &Fill) -> Result<()> {
+    sqlx::query("INSERT INTO fills (client_order_id, token_id, side, price_micros, shares_micros, fee_micros, liquidity, ts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(f.client_order_id.as_str())
+        .bind(f.token.as_str())
+        .bind(side_str(f.side))
+        .bind(f.price.micros() as i32)
+        .bind(f.shares.micros())
+        .bind(f.fee.micros())
+        .bind(match f.liquidity {
+            Liquidity::Maker => "maker",
+            Liquidity::Taker => "taker",
+        })
+        .bind(f.ts)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 impl IngestSink for PgStore {

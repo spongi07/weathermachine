@@ -16,6 +16,7 @@
 //! | `WM_MODEL_PATH`     | trained probability model JSON                     |
 //! | `WM_MODEL_AUTO_TRAIN` | `false` disables training from IEM history       |
 //! | `WM_DATA_DIR`       | writable data directory (models, history cache)    |
+//! | `WM_JOURNAL_RETENTION_DAYS` | days of order-book updates kept in the journal |
 //! | `WM_LOG_FORMAT`     | `json` \| `pretty`                                   |
 
 use anyhow::{Context, Result, bail};
@@ -44,6 +45,23 @@ pub struct AppSection {
     pub record_orderbooks: bool,
     pub heartbeat_secs: u64,
     pub snapshot_interval_ms: u64,
+    /// Market history: a token's book is stored when it changed, at most once
+    /// per this many seconds.
+    #[serde(default = "default_book_record_interval_secs")]
+    pub book_record_interval_secs: u64,
+    /// Order-book updates in the replay journal are deleted after this many
+    /// days (0 = keep). Other journal entries and the recorded market history
+    /// are kept.
+    #[serde(default = "default_journal_book_retention_days")]
+    pub journal_book_retention_days: u32,
+}
+
+fn default_book_record_interval_secs() -> u64 {
+    10
+}
+
+fn default_journal_book_retention_days() -> u32 {
+    7
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -376,6 +394,11 @@ impl AppConfig {
         }
         if let Some(v) = env_nonempty("WM_MODEL_PATH") {
             file.model.path = Some(v);
+        }
+        if let Some(v) = env_nonempty("WM_JOURNAL_RETENTION_DAYS") {
+            file.app.journal_book_retention_days = v.parse().with_context(|| {
+                format!("WM_JOURNAL_RETENTION_DAYS must be a whole number of days, got '{v}'")
+            })?;
         }
         if let Some(v) = env_nonempty("WM_DATA_DIR") {
             file.model.auto_train.data_dir = v;

@@ -89,6 +89,8 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_MODEL_PATH` | Model file (default `/data/models/<station>.json`); without a model, no weather trades |
 | `WM_MODEL_AUTO_TRAIN` | `false` stops automatic training from IEM history (default `true`) |
 | `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
+| `WM_JOURNAL_RETENTION_DAYS` | Days of order-book updates kept in the replay journal (default 7; 0 = keep) |
+| `WM_BACKUP_JOURNAL` | Stack only: include the replay journal in nightly backups (default `false`) |
 | `WM_MODE`, `WM_HTTP_BIND`, `WM_UI_DIR`, `WM_LOG_FORMAT`, `WM_CONFIG` | Overrides |
 
 ## Development

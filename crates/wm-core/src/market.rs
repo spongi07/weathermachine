@@ -265,7 +265,19 @@ pub struct OrderBook {
     pub hash: Option<String>,
 }
 
+/// Levels per side the engine keeps (and journals). Positions are small
+/// (≤ $10), so fills and depth checks never reach beyond the top levels, and
+/// deeper levels only inflate the journal.
+pub const ENGINE_BOOK_DEPTH: usize = 5;
+
 impl OrderBook {
+    /// Keep the best `depth` levels per side (bids descending, asks ascending).
+    pub fn truncated(mut self, depth: usize) -> Self {
+        self.bids.truncate(depth);
+        self.asks.truncate(depth);
+        self
+    }
+
     /// Sort levels and drop empty ones.
     pub fn normalize(&mut self) {
         self.bids.retain(|l| l.size.micros() > 0);

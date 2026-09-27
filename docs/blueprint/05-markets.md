@@ -100,8 +100,11 @@ strategies never touch it.
   which is not implemented by design.
 * **ASSUMPTION (secondary reports).** The venue's historical order-book
   endpoint stopped returning new snapshots around 20 Feb 2026. Weather
-  Machine therefore records its own books (`orderbook_snapshots`, sampled
-  per token every ≥ 5 s) for true order-book backtests later.
+  Machine therefore records its own books (`orderbook_snapshots`: a token's
+  top 5 levels per side whenever the book changed, at most once per 10 s,
+  the last change of a burst included) for true order-book backtests later.
+  The engine itself keeps 5 levels per side (`ENGINE_BOOK_DEPTH`): positions
+  are ≤ $10, so fills and depth checks never reach deeper.
 
 **FAILURE MODES.** WS disconnect → local books invalidated → stale-book gate
 blocks trading → REST fallback polls the books → reconnect with a gated

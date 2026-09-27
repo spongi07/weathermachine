@@ -69,7 +69,7 @@ What the stack contains:
 |---|---|---|
 | `postgres` | `postgres:18-alpine` | Volume `pgdata` at `/var/lib/postgresql` (PG 18 layout). Not published on the host. |
 | `weather-machine` | GHCR image | `run` = paper-trading service; waits for a healthy database, applies migrations automatically, read-only root filesystem, non-root (uid 65532), all capabilities dropped, `no-new-privileges`, CPU/memory limits, log rotation. |
-| `db-backup` | `postgres:18-alpine` | `pg_dump --format=custom` every 24 h into volume `backups`, keeps `WM_BACKUP_KEEP_DAYS` (14). |
+| `db-backup` | `postgres:18-alpine` | `pg_dump --format=custom` every 24 h into volume `backups`, keeps `WM_BACKUP_KEEP_DAYS` (14). The replay journal is excluded unless `WM_BACKUP_JOURNAL=true`. |
 
 Health: the image has a built-in probe (`weather-machine healthcheck`) — no
 shell or curl needed. Portainer shows *healthy* once the engine loop publishes
@@ -147,7 +147,8 @@ docker run --rm -e WM_CONTACT=you@example.org ghcr.io/spongi07/weathermachine:la
 | Restart safety | Crash-only design: the process state is rebuilt from PostgreSQL (observations, journal) on start. A second instance cannot poll the same station (PostgreSQL advisory lease). |
 | Backups | Volume `backups`. Restore (stop `weather-machine` first): `docker run --rm -it --network weather-machine_default -e PGPASSWORD=… -v weather-machine_backups:/b postgres:18-alpine pg_restore -h postgres -U wm -d weather_machine --clean --if-exists /b/<file>.dump` |
 | Logs | JSON lines (Portainer → container → Logs). Change verbosity with `RUST_LOG`. |
-| Metrics | Scrape `/metrics` (Basic auth applies if configured). Key series: `nws_requests_total`, `nws_429_total`, `nws_failures_total`, `nws_cache_hits`, `nws_new_observations_total`, `wm_engine_events_total`, `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`. |
+| Metrics | Scrape `/metrics` (Basic auth applies if configured). Key series: `nws_requests_total`, `nws_429_total`, `nws_failures_total`, `nws_cache_hits`, `nws_new_observations_total`, `wm_engine_events_total`, `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`, `wm_persist_backlog_episodes_total`, `wm_journal_shed_total`. |
+| Disk | The market stream delivers ~1.5 million order-book updates a day. They are journaled with 5 levels per side and deleted from the journal after 7 days (`WM_JOURNAL_RETENTION_DAYS`), so the database levels off at a few GB plus the recorded market history (books stored on change, ≤ 1 per 10 s per token), which grows by roughly 100–300 MB a day. Check with *Volumes* in Portainer or `docker system df -v`. |
 
 ## 6. Exposing the dashboard safely
 
@@ -172,6 +173,7 @@ path prefix.
 | **MODEL TRAINING** / banner "No probability model yet" | Normal on the first start: the history download and training take a few minutes, then the service restarts once. |
 | **MODEL ERROR**: `model training failed: … connection failed` | The host cannot reach `mesonet.agron.iastate.edu`. Allow outbound HTTPS to it; the service retries every 6 h (or restart it). |
 | Container restarted once with exit code 75 | Expected: it restarts to load the newly trained model. |
+| Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
 | Providers *throttled* / *unavailable* | The rate limiter backs off (Retry-After honoured, circuit breaker); trading of that station stays blocked until data is healthy and fresh. Do not lower the polling floors. |
 | `collector lease held by another instance` | Another Weather Machine is running against the same database; stop it. |

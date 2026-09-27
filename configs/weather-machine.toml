@@ -14,6 +14,8 @@ locations_dir = "configs/locations"
 auto_migrate = true
 journal = true                    # durable event journal (crash recovery / exact replay)
 record_orderbooks = true          # historical books are not available from the venue: record them
+book_record_interval_secs = 10    # a token's book is stored when it changed, at most every 10 s
+journal_book_retention_days = 7   # order-book updates in the replay journal (0 = keep forever)
 heartbeat_secs = 60
 snapshot_interval_ms = 500        # dashboard push cadence (never affects trading)
 

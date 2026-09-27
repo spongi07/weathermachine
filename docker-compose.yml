@@ -72,6 +72,8 @@ services:
       # first start from IEM METAR history (then one restart to load it).
       WM_MODEL_PATH: ${WM_MODEL_PATH:-}
       WM_MODEL_AUTO_TRAIN: ${WM_MODEL_AUTO_TRAIN:-true}
+      # Days of order-book updates kept in the replay journal (bounds disk use).
+      WM_JOURNAL_RETENTION_DAYS: ${WM_JOURNAL_RETENTION_DAYS:-7}
       WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn,hyper=warn,reqwest=warn,tungstenite=warn}
     ports:
@@ -110,13 +112,20 @@ services:
       PGDATABASE: weather_machine
       PGPASSWORD: ${WM_DB_PASSWORD:?WM_DB_PASSWORD must be set}
       BACKUP_KEEP_DAYS: ${WM_BACKUP_KEEP_DAYS:-14}
+      # The replay journal (every engine input, mostly order-book updates) is
+      # large and only needed for exact replay of recent runs; the audit trail
+      # (observations, raw payloads, decisions, orders, fills, market history)
+      # is always backed up. Set WM_BACKUP_JOURNAL=true to include it anyway.
+      BACKUP_JOURNAL: ${WM_BACKUP_JOURNAL:-false}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
         while true; do
           f="/backups/weather_machine-$$(date -u +%Y%m%dT%H%M%SZ).dump"
-          if pg_dump --format=custom --file="$$f.partial" && mv "$$f.partial" "$$f"; then
+          skip=""
+          [ "$${BACKUP_JOURNAL}" = "true" ] || skip="--exclude-table-data=event_journal"
+          if pg_dump --format=custom $${skip} --file="$$f.partial" && mv "$$f.partial" "$$f"; then
             echo "backup written: $$f"
           else
             echo "backup FAILED" >&2

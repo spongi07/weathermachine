@@ -311,7 +311,7 @@ impl Default for MarketStreamConfig {
         Self {
             url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(),
             ping_interval: Duration::from_secs(10),
-            book_depth: 10,
+            book_depth: wm_core::market::ENGINE_BOOK_DEPTH,
             max_reconnect_wait: Duration::from_secs(300),
         }
     }
