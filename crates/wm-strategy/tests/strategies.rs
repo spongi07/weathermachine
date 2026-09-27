@@ -711,9 +711,17 @@ fn strategy_d_leaves_the_settlement_discount_of_long_dead_buckets_alone() {
     let out = CertainOutcomes::new(CertainConfig::default())
         .evaluate(&ctx(&m, &b, &v, &pos, &pend, &loc));
     assert!(out.proposals.is_empty());
-    let e = out.evaluations.iter().find(|e| e.bucket_label == "14°C").unwrap();
+    let e = out
+        .evaluations
+        .iter()
+        .find(|e| e.bucket_label == "14°C")
+        .unwrap();
     // 1 − 0.99 − fee 0.000495 − slippage 0.002 = 0.0075 < 0.02
-    assert!(e.blockers.iter().any(|x| x == "edge 0.0075 < 0.0200"), "{:?}", e.blockers);
+    assert!(
+        e.blockers.iter().any(|x| x == "edge 0.0075 < 0.0200"),
+        "{:?}",
+        e.blockers
+    );
 }
 
 #[test]
