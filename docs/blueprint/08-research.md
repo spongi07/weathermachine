@@ -172,6 +172,11 @@ the days downloaded so far are studied.
 * **Prequential replay.** The history is replayed with the live state, peak
   and model code, and each day is scored with the model trained on the days
   before it.
+* **Complete days only.** A market day whose METAR history ends more than
+  90 min before local midnight is listed as skipped, not scored and not
+  resolution-checked. The archive is read up to 00:00 UTC of the current
+  day, so a run before then holds only the first hours of the day that
+  just ended.
 * **Decision points.** Every report from 09:00 local. The state is taken as
   of the report; the market as of the report plus the decision delay
   (`--delay-secs`, default 180).
@@ -223,7 +228,8 @@ the days downloaded so far are studied.
   variants are replayed (24 for A and B, 6 for E), so the best one
   overstates what to expect: a variant only counts if it stays profitable
   on days after it was chosen. E gets its own verdict line comparing the
-  three variants;
+  three variants, and its losing trades are listed with the bucket that
+  resolved and the variants that took them;
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
   both clocks, the forecast rise and headroom, both structures' cells and
   P(high stays), the market and ask of the high's bucket, its taker flow

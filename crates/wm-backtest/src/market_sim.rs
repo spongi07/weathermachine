@@ -252,6 +252,9 @@ pub struct SimTrade {
     pub won: bool,
     /// At the configured stake, after the taker fee and slippage.
     pub pnl_usd: f64,
+    /// The bucket that resolved YES.
+    #[serde(default)]
+    pub resolved: String,
 }
 
 /// Results of one variant.
@@ -429,6 +432,7 @@ pub(crate) fn simulate_day(
                                 p_used,
                                 won,
                                 pnl_usd: sim.stake_usd / price * per_share,
+                                resolved: labels[winner].clone(),
                             });
                         }
                     }
@@ -491,6 +495,7 @@ pub(crate) fn simulate_day(
                         .min(p_model),
                     won,
                     pnl_usd: sim.stake_usd / price * per_share,
+                    resolved: labels[winner].clone(),
                 });
             }
         }
@@ -771,6 +776,7 @@ fn grouped(trades: &[&SimTrade]) -> Vec<String> {
 
 pub(crate) fn strategies_markdown(
     rows: &[StrategyRow],
+    trades: &[SimTrade],
     sim: &MarketSimConfig,
     verdict: &[String],
 ) -> String {
@@ -819,6 +825,53 @@ pub(crate) fn strategies_markdown(
             r.ci_low,
             r.ci_high,
             r.total_usd
+        );
+    }
+    s.push_str(&e_losses_markdown(trades));
+    s
+}
+
+/// Strategy E's losing trades, one row per trade, with the variants and
+/// structures that took it.
+fn e_losses_markdown(trades: &[SimTrade]) -> String {
+    let mut groups: Vec<(&SimTrade, Vec<(&str, &str)>)> = Vec::new();
+    for t in trades
+        .iter()
+        .filter(|t| t.strategy.starts_with('E') && !t.won)
+    {
+        let same = |g: &&SimTrade| {
+            g.date == t.date
+                && g.report == t.report
+                && g.bucket == t.bucket
+                && g.price.to_bits() == t.price.to_bits()
+        };
+        match groups.iter_mut().find(|(g, _)| same(g)) {
+            Some((_, by)) => by.push((&t.strategy, &t.structure)),
+            None => groups.push((t, vec![(&t.strategy, &t.structure)])),
+        }
+    }
+    if groups.is_empty() {
+        return String::new();
+    }
+    groups.sort_by(|a, b| (a.0.date, &a.0.report).cmp(&(b.0.date, &b.0.report)));
+    let mut s = "\nStrategy E's losing trades (at these prices one loss costs as much as 20–30 wins):\n\n| date | report | bought | ask | resolved | taken by |\n|---|---|---|---:|---|---|\n".to_owned();
+    for (t, by) in groups {
+        let mut variants: Vec<(&str, Vec<&str>)> = Vec::new();
+        for (v, structure) in by {
+            match variants.iter_mut().find(|(x, _)| *x == v) {
+                Some((_, ss)) => ss.push(structure),
+                None => variants.push((v, vec![structure])),
+            }
+        }
+        let taken = variants
+            .iter()
+            .map(|(v, ss)| format!("{v} ({})", ss.join(", ")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            s,
+            "| {} | {} | YES {} | {:.3} | {} | {taken} |",
+            t.date, t.report, t.bucket, t.price, t.resolved
         );
     }
     s
@@ -905,7 +958,40 @@ mod tests {
             p_used: 0.9,
             won,
             pnl_usd: 1.5,
+            resolved: if won { "21°C" } else { "22°C" }.into(),
         }
+    }
+
+    #[test]
+    fn e_losses_are_listed_once_with_everyone_who_took_them() {
+        let loss = |strategy: &str, structure: &str| SimTrade {
+            strategy: strategy.into(),
+            price: 0.965,
+            ..trade(structure, 60, "0.90–0.99", false)
+        };
+        let ts = [
+            loss("E", "current"),
+            loss("E w/o book", "current"),
+            loss("E", "candidate"),
+            SimTrade {
+                strategy: "E".into(),
+                ..trade("current", 60, "0.90–0.99", true)
+            },
+            trade("current", 60, "0.90–0.99", false),
+        ];
+        let md = e_losses_markdown(&ts);
+        assert_eq!(
+            md.lines()
+                .filter(|l| l.starts_with("| 2026"))
+                .collect::<Vec<_>>(),
+            vec![
+                "| 2026-09-28 | 12:25 | YES 21°C | 0.965 | 22°C | E (current, candidate), E w/o book (current) |"
+            ]
+        );
+        assert!(
+            e_losses_markdown(&ts[3..]).is_empty(),
+            "A's losses and E's wins are not listed"
+        );
     }
 
     #[test]

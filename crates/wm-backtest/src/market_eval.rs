@@ -422,6 +422,12 @@ fn flow(
     f
 }
 
+/// A market day whose METAR history ends more than this many minutes before
+/// local midnight is incomplete and not scored. The archive is read up to
+/// 00:00 UTC of the current day, so the day that just ended is only partly
+/// there until then.
+const MAX_TAIL_GAP_MIN: i64 = 90;
+
 /// Delay bins of the latency table (seconds after the observation).
 const LATENCY_BINS: [(&str, i64, i64); 6] = [
     (
@@ -552,10 +558,21 @@ pub fn market_study(
 
         if let Some(md) = markets.get(date) {
             seen_market.insert(*date);
+            let tail_gap = times.last().map_or(i64::MAX, |t| (end - *t).num_minutes());
             if md.winner >= md.buckets.len() || md.labels.len() != md.buckets.len() {
                 report
                     .skipped_days
                     .push((*date, "market without a valid winner".into()));
+            } else if tail_gap > MAX_TAIL_GAP_MIN {
+                report.skipped_days.push((
+                    *date,
+                    format!(
+                        "METAR history incomplete: it ends at {} local, {tail_gap} min before the day did (the archive is read up to 00:00 UTC, so rerun after that)",
+                        times
+                            .last()
+                            .map_or_else(|| "—".to_owned(), |t| local_hm(*t, cfg.tz))
+                    ),
+                ));
             } else {
                 report.resolution_checked += 1;
                 if md.buckets[md.winner].contains(final_high) {
@@ -1378,6 +1395,7 @@ impl MarketStudyReport {
         }
         s.push_str(&market_sim::strategies_markdown(
             &self.strategies,
+            &self.sim_trades,
             &self.sim,
             &self.strategy_verdict,
         ));
@@ -1628,6 +1646,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_day_the_archive_holds_only_in_part_is_not_scored() {
+        let (obs, highs) = history();
+        // The latest day as read before 00:00 UTC: only its first two hours.
+        let (last, h) = highs.iter().next_back().map(|(d, h)| (*d, *h)).unwrap();
+        let cut = local(last, 2, 0);
+        let obs: Vec<Observation> = obs
+            .into_iter()
+            .filter(|o| o.key.observed_at < cut)
+            .collect();
+        let (d, h2) = last_days(&highs, 1)[0];
+        let days = vec![
+            market_day(d, h2, &|i, w| if i == w { 0.9 } else { 0.02 }),
+            market_day(last, h, &|i, w| if i == w { 0.9 } else { 0.02 }),
+        ];
+        let r = market_study(&obs, None, &days, &cfg());
+        assert_eq!(r.skipped_days.len(), 1, "{:?}", r.skipped_days);
+        let (day, why) = &r.skipped_days[0];
+        assert_eq!(*day, last);
+        assert!(
+            why.starts_with("METAR history incomplete: it ends at 01:55 local"),
+            "{why}"
+        );
+        // Neither scored nor counted as a resolution mismatch.
+        assert_eq!((r.resolution_checked, r.resolution_agreed), (1, 1));
+        assert!(r.resolution_mismatches.is_empty());
+        assert_eq!(r.scored_days, 1);
+    }
+
     fn report_obs(t: DateTime<Utc>, whole: i32) -> Observation {
         Observation {
             key: ObservationKey {
@@ -1671,6 +1718,10 @@ mod tests {
     fn stale_quotes_on_dead_buckets_are_timed_from_the_observation() {
         let d = date(2026, 7, 1);
         let t = |h: u32, m: u32, s: i64| local(d, h, m) + Duration::seconds(s);
+        // A complete day: the afternoon and evening stay below the high.
+        let evening = (12..24)
+            .flat_map(|h| [(h, 55), (h + 1, 25)])
+            .filter(|(h, _)| *h < 24);
         let obs: Vec<Observation> = [
             (t(10, 25, 0), 17),
             (t(10, 55, 0), 18), // kills 17 (no trades there: not an event)
@@ -1678,8 +1729,9 @@ mod tests {
             (t(11, 55, 0), 19), // kills 18, still priced at ~0.39
             (t(12, 25, 0), 19),
         ]
-        .iter()
-        .map(|(at, v)| report_obs(*at, *v))
+        .into_iter()
+        .chain(evening.map(|(h, m)| (t(h, m, 0), 18)))
+        .map(|(at, v)| report_obs(at, v))
         .collect();
         let (buckets, labels) = buckets_around(19);
         let dead = labels.iter().position(|l| l == "18°C").unwrap();
@@ -1891,6 +1943,9 @@ mod tests {
                 t.shares = if t.taker_buys_yes { 60.0 } else { 5.0 };
             }
         }
+        // One lifting day resolves a bucket higher: E's trade on it loses.
+        let lost_day = days[2].date;
+        days[2].winner += 1;
         let replay_day = days[0].date;
         let mut c = cfg();
         // The synthetic afternoon cools 1 °C only late: a wider window.
@@ -1920,13 +1975,18 @@ mod tests {
         // lower, inside the window.
         let fee = |p: f64| 0.05 * p * (1.0 - p);
         let won = 10.0 / 0.952 * (1.0 - 0.952 - fee(0.952) - 0.005);
+        let lost = 10.0 / 0.952 * (-0.952 - fee(0.952) - 0.005);
         for t in trades("E") {
             assert!(lifting.contains(&t.date), "{t:?}");
-            assert_eq!((t.side.as_str(), t.price, t.won), ("YES", 0.952, true));
-            assert!((t.pnl_usd - won).abs() < 1e-9);
+            assert_eq!((t.side.as_str(), t.price), ("YES", 0.952));
+            assert_eq!(t.won, t.date != lost_day, "{t:?}");
+            assert_eq!(t.won, t.bucket == t.resolved, "{t:?}");
+            let want = if t.won { won } else { lost };
+            assert!((t.pnl_usd - want).abs() < 1e-9);
             assert!(t.report.as_str() >= "12:00" && t.report.as_str() < "23:00");
             assert!(t.p_used <= t.p_model + 1e-12);
         }
+        assert!(trades("E").iter().any(|t| !t.won));
         assert!(
             trades("E w/o book")
                 .iter()
@@ -1958,11 +2018,15 @@ mod tests {
         assert!(afternoon.bought_high.unwrap() >= 120.0, "{afternoon:?}");
         assert!(afternoon.sold_high.unwrap() <= 15.0, "{afternoon:?}");
         let md = r.to_markdown();
+        let lost_row = format!("| {lost_day} | ");
         for section in [
             "Strategy E buys YES on the bucket holding the high",
             "| E **live** | current | 60′ | 0.90–0.99 |",
             "| E w/o book | current | 60′ | 0.90–0.99 |",
             "| bought / sold |",
+            "Strategy E's losing trades",
+            "E (current, candidate), E w/o book (current, candidate)",
+            &lost_row,
         ] {
             assert!(md.contains(section), "missing {section}\n{md}");
         }

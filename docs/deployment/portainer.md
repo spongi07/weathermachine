@@ -189,6 +189,10 @@ book is not archived, so the replay stands in for it with the trades. Each
 probabilities, the market, the high bucket's taker flow and every simulated
 trade.
 
+Run it after 00:00 UTC (02:00 in Amsterdam in summer) to include the day
+that just ended. Before then the METAR archive holds only its first hours,
+and the report lists that day as skipped.
+
 It reads each day's event from Gamma and its trades from the Polymarket Data
 API. That is one or two requests per day, two per second at most, and
 settled days are cached in `/data/research/polymarket/EHAM/`. The METAR

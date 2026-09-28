@@ -193,6 +193,24 @@ Read the E line of the verdict and the E rows:
 * The 95 % interval: with a few dozen trades one loss decides the total. A
   positive total whose interval includes zero is not evidence.
 
+**Result on EHAM, 1 June – 27 September 2026** (119 settled days, run of
+28 September):
+
+| variant | trades | won | total ($10 per trade) |
+|---|---:|---:|---:|
+| E | 79 | 76 | −$7.72 |
+| E w/o book | 86 | 83 | −$4.15 |
+| E + model, current structure | 70 | 68 | −$8.03 |
+| E + model, candidate structure | 71 | 69 | −$5.45 |
+
+* E lost $0.10 per trade (95 % CI −$0.55 … +$0.29).
+* The book stand-in removed seven winners and none of the three losers.
+* The mean ask was 0.964, where break-even is 97.1 %; E won 96.2 %.
+
+On these days the rule has no edge. By the time the high is an hour old
+and a degree lower, the market already prices the bucket so high that the
+favourite–longshot margin no longer covers fee, slippage and the rare loss.
+
 Live, every evaluation line names E's blocker, e.g.
 `E 21°C YES · ask 0.95 … — book not shrinking: 300 → 290 shares offered ≤ 0.96 in 30m (−3%, need −30%)`.
 Every paper trade records the time, the drop and the book numbers in its
