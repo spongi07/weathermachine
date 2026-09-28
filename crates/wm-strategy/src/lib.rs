@@ -2,8 +2,9 @@
 //!
 //! The pure decision core shared by backtest, paper and live runs:
 //! temperature state, peak features, probability models, EV math,
-//! strategies A/B/C/D and the unwind engine. No I/O, no clocks, no randomness.
+//! strategies A/B/C/D/E and the unwind engine. No I/O, no clocks, no randomness.
 
+pub mod book_confirmed;
 pub mod certain;
 pub mod ev;
 pub mod forecast;
@@ -13,6 +14,7 @@ pub mod state;
 pub mod strategy;
 pub mod unwind;
 
+pub use book_confirmed::{BookConfirmedConfig, BookConfirmedHigh};
 pub use certain::{CertainConfig, CertainOutcomes};
 pub use forecast::ForecastDay;
 pub use peak::{

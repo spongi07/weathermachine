@@ -30,8 +30,10 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   background and swapped in without a restart) → strategies (A: buy YES of
   the final-high bucket, B: buy NO above it, C: split/unwind research, D:
   outcomes the observations have already decided, bought on the report
-  itself) → risk engine → simulated venue. A and B pool the model with the
-  market's price: the book can veto a trade, never create one.
+  itself, E: YES on the high's bucket at 0.90–0.99 once the clock, a
+  cooling temperature and a shrinking order book agree) → risk engine →
+  simulated venue. A and B pool the model with the market's price: the book
+  can veto a trade, never create one.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:
@@ -84,7 +86,7 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
 | `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train both model structures, evaluate the forecast and pick the structure; `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
-| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B at traded prices, a report-by-report replay of each `--day`, resolution check |
+| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices, a report-by-report replay of each `--day`, resolution check |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules (read-only) |
 | `weather-machine rules approve --sha256 … --reviewer …` | Human approval of a rules text |
@@ -140,4 +142,5 @@ to GHCR.
   why its backtest edge came from look-ahead, and what was (not) ported.
 * [Where the edge is — and where it is not](docs/research/edge-research.md):
   the market versus models, decided outcomes (strategy D), pooling with the
-  book, and how to measure it on EHAM's settled markets.
+  book, the evidence behind strategy E, and how to measure it on EHAM's
+  settled markets.

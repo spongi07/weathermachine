@@ -990,3 +990,300 @@ fn strategy_b_pools_each_bucket_with_its_own_book() {
     assert!((e19.market_p.unwrap() - 0.998).abs() < 1e-12);
     assert!((e19.p_win.unwrap() - 0.988).abs() < 1e-12);
 }
+
+// ---------------------------------------------------------------------------
+// Strategy E — the high, confirmed by clock, temperature and a shrinking book
+// ---------------------------------------------------------------------------
+
+use wm_core::market::BookLevel;
+use wm_strategy::{BookConfirmedConfig, BookConfirmedHigh, StrategyOutput};
+
+/// A book with one bid and the given asks (price, shares).
+fn ladder(token: &TokenId, at: &str, bid: &str, asks: &[(&str, i64)]) -> OrderBook {
+    let mut b = synthetic_book(token, Some(bid), None, 200, utc(at));
+    b.asks = asks
+        .iter()
+        .map(|(p, s)| BookLevel {
+            price: Price::parse(p).unwrap(),
+            size: Shares::from_whole(*s),
+        })
+        .collect();
+    b
+}
+
+/// The high's YES book 32 minutes before `NOW`: 300 shares from 0.94.
+fn e_then(m: &DailyTemperatureMarket) -> OrderBook {
+    ladder(
+        &yes(m, 18),
+        "2026-07-01T13:00:00Z",
+        "0.93",
+        &[("0.94", 100), ("0.95", 100), ("0.96", 100)],
+    )
+}
+
+/// The fixture books with the high's YES book at `NOW` offering `asks`.
+fn e_books(m: &DailyTemperatureMarket, asks: &[(&str, i64)]) -> HashMap<TokenId, OrderBook> {
+    let mut b = books(m);
+    b.insert(yes(m, 18), ladder(&yes(m, 18), NOW, "0.94", asks));
+    b
+}
+
+/// Buyers lifted 0.94 and part of 0.95: 300 → 160 shares offered.
+fn e_shrunk(m: &DailyTemperatureMarket) -> HashMap<TokenId, OrderBook> {
+    e_books(m, &[("0.95", 60), ("0.96", 100)])
+}
+
+/// Strategy E with its history fed `then` (as the engine does on every
+/// book update), evaluated at `NOW`.
+fn run_e(
+    m: &DailyTemperatureMarket,
+    cfg: BookConfirmedConfig,
+    then: Option<&OrderBook>,
+    b: &HashMap<TokenId, OrderBook>,
+    v: &[ViewEvaluation],
+    pending: &HashSet<TokenId>,
+) -> StrategyOutput {
+    let mut e = BookConfirmedHigh::new(cfg);
+    if let Some(t) = then {
+        e.observe_book(t);
+    }
+    let (pos, loc) = (PositionBook::new(), LocationId::new("amsterdam").unwrap());
+    e.evaluate(&ctx(m, b, v, &pos, pending, &loc))
+}
+
+#[test]
+fn strategy_e_buys_the_high_once_the_temperature_fell_and_the_book_shrank() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let out = run_e(
+        &m,
+        BookConfirmedConfig::default(),
+        Some(&e_then(&m)),
+        &e_shrunk(&m),
+        &v,
+        &HashSet::new(),
+    );
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+    let p = &out.proposals[0];
+    assert_eq!(p.strategy.as_str(), "E_book_confirmed_high");
+    assert_eq!(p.bucket_label, "18°C");
+    assert_eq!(
+        (p.side, p.outcome_side, p.kind, p.tif),
+        (
+            Side::Buy,
+            OutcomeSide::Yes,
+            IntentKind::Open,
+            TimeInForce::Fak
+        )
+    );
+    assert_eq!(p.limit_price, Price::parse("0.95").unwrap());
+    assert_eq!(p.shares, Shares::from_whole(10));
+    assert!(p.weather_dependent && !p.research_only);
+    assert!(
+        p.rationale[0].starts_with("15:32 local: high 18°C first reached 90m ago")
+            && p.rationale[0].contains("1.0 °C below"),
+        "{:?}",
+        p.rationale
+    );
+    assert!(
+        p.rationale[1].contains("300 → 160 shares offered ≤ 0.96 in 30m (−47%)")
+            && p.rationale[1].ends_with("best ask 0.94 → 0.95"),
+        "{:?}",
+        p.rationale
+    );
+    let e = &out.evaluations[0];
+    assert!(e.signal && e.blockers.is_empty(), "{e:?}");
+    // Shown, not a gate: the model pooled with the book's midpoint, never
+    // above the model, and the EV at that probability.
+    assert!((e.model_p.unwrap() - 0.985).abs() < 1e-12);
+    assert!((e.market_p.unwrap() - 0.945).abs() < 1e-9);
+    let p_win = e.p_win.unwrap();
+    assert!(p_win > 0.945 && p_win <= 0.985, "{p_win}");
+    assert!((p.p_win - p_win).abs() < 1e-12);
+    assert!(e.ev_per_share.is_some() && e.break_even.is_some());
+}
+
+#[test]
+fn strategy_e_blockers() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let d = BookConfirmedConfig::default();
+    let then = e_then(&m);
+    let shrunk = e_shrunk(&m);
+    let none = HashSet::new();
+    let blocked = |cfg: BookConfirmedConfig,
+                   then: Option<&OrderBook>,
+                   b: &HashMap<TokenId, OrderBook>,
+                   pending: &HashSet<TokenId>,
+                   want: &str| {
+        let out = run_e(&m, cfg, then, b, &v, pending);
+        assert!(out.proposals.is_empty(), "{want}: {:?}", out.proposals);
+        let e = &out.evaluations[0];
+        assert!(
+            !e.signal && e.blockers.iter().any(|x| x.contains(want)),
+            "want '{want}', got {:?}",
+            e.blockers
+        );
+    };
+    let with = |f: fn(&mut BookConfirmedConfig)| {
+        let mut c = d.clone();
+        f(&mut c);
+        c
+    };
+    blocked(
+        with(|c| c.enabled = false),
+        Some(&then),
+        &shrunk,
+        &none,
+        "strategy disabled",
+    );
+    // The clock.
+    blocked(
+        with(|c| c.start_local_minute = 16 * 60),
+        Some(&then),
+        &shrunk,
+        &none,
+        "15:32 outside 16:00–18:00",
+    );
+    blocked(
+        with(|c| c.end_local_minute = 15 * 60),
+        Some(&then),
+        &shrunk,
+        &none,
+        "15:32 outside 12:00–15:00",
+    );
+    // The temperature: the high held long enough, and fallen far enough.
+    blocked(
+        with(|c| c.min_minutes_at_high = 120),
+        Some(&then),
+        &shrunk,
+        &none,
+        "high reached 90m ago < 120m",
+    );
+    blocked(
+        with(|c| c.min_drop_tenths = 20),
+        Some(&then),
+        &shrunk,
+        &none,
+        "1.0 °C below the high < 2.0",
+    );
+    blocked(
+        with(|c| c.max_data_age_minutes = 1),
+        Some(&then),
+        &shrunk,
+        &none,
+        "weather data too old",
+    );
+    // The book: history, shrink, a held ask, depth to start from.
+    blocked(
+        d.clone(),
+        None,
+        &shrunk,
+        &none,
+        "book history shorter than 30m",
+    );
+    blocked(
+        d.clone(),
+        Some(&then),
+        &e_books(&m, &[("0.94", 100), ("0.95", 100), ("0.96", 90)]),
+        &none,
+        "book not shrinking: 300 → 290 shares offered ≤ 0.96 in 30m (−3%, need −30%)",
+    );
+    blocked(
+        d.clone(),
+        Some(&ladder(
+            &yes(&m, 18),
+            "2026-07-01T13:00:00Z",
+            "0.95",
+            &[("0.96", 300)],
+        )),
+        &shrunk,
+        &none,
+        "best ask fell 0.96 → 0.95",
+    );
+    blocked(
+        d.clone(),
+        Some(&ladder(
+            &yes(&m, 18),
+            "2026-07-01T13:00:00Z",
+            "0.93",
+            &[("0.94", 20), ("0.95", 20)],
+        )),
+        &e_books(&m, &[("0.95", 5), ("0.96", 100)]),
+        &none,
+        "only 40 shares offered ≤ 0.95 30m ago (< 50)",
+    );
+    // The price range, a fresh book, no stacking.
+    blocked(
+        d.clone(),
+        Some(&then),
+        &e_books(&m, &[("0.995", 60)]),
+        &none,
+        "ask 0.995 outside [0.90, 0.99]",
+    );
+    let mut stale = shrunk.clone();
+    stale.get_mut(&yes(&m, 18)).unwrap().received_at = utc("2026-07-01T13:31:00Z");
+    blocked(d.clone(), Some(&then), &stale, &none, "order book stale");
+    blocked(
+        d.clone(),
+        Some(&then),
+        &shrunk,
+        &HashSet::from([yes(&m, 18)]),
+        "already positioned",
+    );
+}
+
+#[test]
+fn strategy_e_needs_a_model_and_can_require_its_agreement() {
+    let m = market();
+    let then = e_then(&m);
+    let b = e_shrunk(&m);
+    let none = HashSet::new();
+    let veto = |p: f64| BookConfirmedConfig {
+        min_model_p: p,
+        ..BookConfirmedConfig::default()
+    };
+    let blockers = |out: &StrategyOutput| out.evaluations[0].blockers.clone();
+    // Fail closed: no model, no trade — with or without a veto.
+    let no_model = views(&confirmed_series(), NOW, None);
+    for p in [0.0, 0.9] {
+        let out = run_e(&m, veto(p), Some(&then), &b, &no_model, &none);
+        assert_eq!(blockers(&out), vec!["no probability model".to_owned()]);
+        assert!(out.proposals.is_empty());
+    }
+    // A model below the bar vetoes; at or above it the rule goes through.
+    let modelled = views(&confirmed_series(), NOW, Some(good_dist()));
+    let out = run_e(&m, veto(0.99), Some(&then), &b, &modelled, &none);
+    assert_eq!(blockers(&out), vec!["model 0.985 < 0.990".to_owned()]);
+    let out = run_e(&m, veto(0.98), Some(&then), &b, &modelled, &none);
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+}
+
+#[test]
+fn strategy_e_sees_the_book_between_evaluations() {
+    // The engine feeds every book update; evaluations may be sparse.
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let mut e = BookConfirmedHigh::new(BookConfirmedConfig::default());
+    for (at, asks) in [
+        ("2026-07-01T12:50:00Z", &[("0.93", 200), ("0.95", 200)][..]),
+        ("2026-07-01T13:01:00Z", &[("0.94", 150), ("0.95", 200)][..]),
+        ("2026-07-01T13:20:00Z", &[("0.95", 120)][..]),
+    ] {
+        e.observe_book(&ladder(&yes(&m, 18), at, "0.92", asks));
+    }
+    // 30 minutes before NOW (13:02) the 13:01 state was in force: 350 shares.
+    let (pos, loc, none) = (
+        PositionBook::new(),
+        LocationId::new("amsterdam").unwrap(),
+        HashSet::new(),
+    );
+    let b = e_books(&m, &[("0.95", 100), ("0.97", 100)]);
+    let out = e.evaluate(&ctx(&m, &b, &v, &pos, &none, &loc));
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+    assert!(
+        out.proposals[0].rationale[1].contains("350 → 100 shares offered ≤ 0.95"),
+        "{:?}",
+        out.proposals[0].rationale
+    );
+}

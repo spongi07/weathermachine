@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
-    BacktestConfig, BacktestReport, Fidelity, MarketSimConfig, MarketStudyConfig, StudyConfig,
-    import_iem_csv, run_backtest, study,
+    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, MarketSimConfig, MarketStudyConfig,
+    StudyConfig, import_iem_csv, run_backtest, study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{RunId, StationId};
@@ -615,6 +615,7 @@ async fn research_market(
             max_market_spread: yes.max_market_spread.as_f64(),
             no_distances: no.distances.clone(),
             stake_usd: yes.notional.as_f64(),
+            e: BookConfirmedSim::from_live(&cfg.book_confirmed()),
         },
         timeline_days: days,
         ..MarketStudyConfig::new(train.station.clone(), train.tz, train.peak.clone())

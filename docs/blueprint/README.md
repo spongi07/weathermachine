@@ -45,6 +45,7 @@ of three labels:
 | 27 | SPLIT + UNWIND (strategy C) | [06-strategy.md](06-strategy.md#27-split--unwind--strategy-c) |
 | 27a | DECIDED OUTCOMES (strategy D) | [06-strategy.md](06-strategy.md#27a-decided-outcomes--strategy-d) |
 | 27b | Market pooling (A and B) | [06-strategy.md](06-strategy.md#27b-the-book-as-information--market-pooling-a-and-b) |
+| 27c | BOOK-CONFIRMED HIGH (strategy E) | [06-strategy.md](06-strategy.md#27c-book-confirmed-high--strategy-e) |
 | 28 | UnwindEngine | [06-strategy.md](06-strategy.md#28-unwindengine) |
 | 29 | RiskEngine | [07-risk-storage.md](07-risk-storage.md#29-riskengine) |
 | 30 | $10 / $100 exposure model | [07-risk-storage.md](07-risk-storage.md#30-10--100-exposure-model) |

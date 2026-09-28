@@ -11,11 +11,11 @@ use wm_core::event::{
 use wm_core::forecast::ForecastProduct;
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{LocationId, ProviderId, RunId, StationId};
-use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
+use wm_core::market::{BookLevel, DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
 use wm_core::resolution::ObservationFilter;
 use wm_core::synthetic::{synthetic_book, synthetic_temperature_market};
 use wm_core::trading::RunMode;
-use wm_core::units::{TempC, Usd};
+use wm_core::units::{Price, Shares, TempC, Usd};
 use wm_core::weather::{
     DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision,
 };
@@ -70,6 +70,7 @@ fn config(mode: RunMode) -> EngineConfig {
         buy_no: BuyNoConfig::default(),
         split_unwind: SplitUnwindConfig::default(),
         certain: wm_strategy::CertainConfig::default(),
+        book_confirmed: wm_strategy::BookConfirmedConfig::default(),
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: false,
         decision_log_capacity: 500,
@@ -315,6 +316,110 @@ fn paper_lifecycle_signal_risk_fill_settle() {
     let pnl = engine.settle(&m.event_slug, 18);
     assert!(pnl > Usd::ZERO, "pnl {pnl}");
     assert_eq!(engine.positions().open_positions().count(), 0);
+}
+
+/// Strategy E end to end: after the peak the high's YES offers thin out.
+/// The engine evaluates only on weather events here: the book in force 30
+/// minutes before the decision (13:20) is seen by no evaluation and reaches
+/// the strategy through `observe_book`. Compared with the 12:50 book an
+/// evaluation saw instead, the ask fell (0.96 → 0.95) and E would not trade.
+#[test]
+fn strategy_e_buys_the_high_when_its_book_shrinks_after_the_peak() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut cfg = config(RunMode::Paper);
+    // E alone on the high's bucket.
+    cfg.buy_yes.enabled = false;
+    cfg.buy_no.enabled = false;
+    cfg.certain.enabled = false;
+    let mut engine = Engine::new(
+        cfg.clone(),
+        Arc::new(FixedModel(vec![0.985, 0.012, 0.002, 0.001])),
+    );
+    let yes18 = m.outcome_for_value(18).unwrap().yes_token.clone();
+    let book = |at: &str, bid: &str, asks: &[(&str, i64)]| {
+        let mut b = synthetic_book(&yes18, Some(bid), None, 200, utc(at));
+        b.asks = asks
+            .iter()
+            .map(|(p, s)| BookLevel {
+                price: Price::parse(p).unwrap(),
+                size: Shares::from_whole(*s),
+            })
+            .collect();
+        env(
+            at,
+            WeatherMachineEvent::OrderBookUpdate(OrderBookEvent { book: b }),
+        )
+    };
+    let mut events = vec![
+        health_event("2026-07-01T06:00:00Z", ProviderHealthState::Healthy),
+        env(
+            "2026-07-01T06:00:01Z",
+            WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+        ),
+    ];
+    events.extend(night_and_morning());
+    for (t, x) in [
+        ("2026-07-01T10:25:00Z", 16),
+        ("2026-07-01T10:55:00Z", 17),
+        ("2026-07-01T11:25:00Z", 17),
+        ("2026-07-01T11:55:00Z", 18),
+        ("2026-07-01T12:25:00Z", 18),
+    ] {
+        events.push(obs_event(t, x));
+    }
+    events.push(book("2026-07-01T12:50:00Z", "0.94", &[("0.96", 300)]));
+    events.push(obs_event("2026-07-01T12:55:00Z", 17)); // at 12:58: no history yet
+    events.push(book(
+        "2026-07-01T13:20:00Z",
+        "0.92",
+        &[("0.93", 200), ("0.94", 200), ("0.95", 200)],
+    ));
+    events.push(book(
+        "2026-07-01T13:40:00Z",
+        "0.93",
+        &[("0.94", 150), ("0.95", 200)],
+    ));
+    events.push(book(
+        "2026-07-01T13:57:50Z",
+        "0.94",
+        &[("0.95", 120), ("0.96", 100)],
+    ));
+    events.push(obs_event("2026-07-01T13:55:00Z", 16)); // at 13:58: 600 → 120 offered
+    // Fail closed: without a model E stays silent.
+    let mut no_model = Engine::new(cfg, Arc::new(NoEdgeModel));
+    assert!(approvals(&run(&mut no_model, events.clone(), m.fees)).is_empty());
+    let outs = run(&mut engine, events, m.fees);
+    let a = approvals(&outs);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert!(a[0].starts_with("18°C Yes"), "{a:?}");
+    let approved = outs.iter().flat_map(|o| &o.approved).next().unwrap();
+    assert_eq!(approved.intent().strategy.as_str(), "E_book_confirmed_high");
+    assert_eq!(approved.intent().limit_price, Price::parse("0.95").unwrap());
+    assert!(
+        approved
+            .intent()
+            .rationale
+            .iter()
+            .any(|r| r.contains("600 → 120 shares offered ≤ 0.95")),
+        "{:?}",
+        approved.intent().rationale
+    );
+    // The 12:58 evaluation said why it waited.
+    let snap = engine.snapshot();
+    assert!(
+        snap.decisions.iter().any(|d| {
+            let o = d.outputs.to_string();
+            d.strategy.as_str() == "evaluation"
+                && o.contains("E 18°C YES")
+                && o.contains("book history shorter than 30m")
+        }),
+        "{:?}",
+        snap.decisions
+            .iter()
+            .map(|d| &d.outputs)
+            .collect::<Vec<_>>()
+    );
+    assert!(engine.positions().get(&yes18).is_some(), "filled in paper");
 }
 
 #[test]

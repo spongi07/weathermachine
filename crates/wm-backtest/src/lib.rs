@@ -20,7 +20,9 @@ pub use forecast_eval::{
 };
 pub use historical::{ImportStats, import_iem_csv};
 pub use market_eval::{MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade, market_study};
-pub use market_sim::{DayTimeline, MarketSimConfig, SimTrade, StrategyRow, TimelineRow};
+pub use market_sim::{
+    BookConfirmedSim, DayTimeline, MarketSimConfig, SimTrade, StrategyRow, TimelineRow,
+};
 pub use replay::{
     BacktestConfig, BacktestReport, Fidelity, SessionOutput, Settlement, SimulationSession,
     TradeRecord, bootstrap_mean_ci, run_backtest,

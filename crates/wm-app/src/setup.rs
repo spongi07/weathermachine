@@ -95,6 +95,7 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
         buy_no: cfg.buy_no(),
         split_unwind: cfg.split_unwind(),
         certain: cfg.certain(),
+        book_confirmed: cfg.book_confirmed(),
         unwind: cfg.file.strategies.unwind.clone(),
         evaluate_on_book_updates: true,
         decision_log_capacity: 2_000,

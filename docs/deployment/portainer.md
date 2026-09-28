@@ -182,9 +182,12 @@ docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
 Besides model versus market, the report replays strategies A and B at the
 prices the market actually traded. The replay runs with both model
 structures, confirmation 0′/30′/live and the live and a wider ask range. It
-shows trades, wins and P&L per variant. Each `--day` (repeatable) adds that
-day report by report: both models' cells and probabilities, the market and
-every simulated trade.
+shows trades, wins and P&L per variant. Strategy E runs three ways: as
+configured, without its book condition, and with the model's agreement. The
+book is not archived, so the replay stands in for it with the trades. Each
+`--day` (repeatable) adds that day report by report: both models' cells and
+probabilities, the market, the high bucket's taker flow and every simulated
+trade.
 
 It reads each day's event from Gamma and its trades from the Polymarket Data
 API. That is one or two requests per day, two per second at most, and

@@ -144,7 +144,8 @@ enough days.
 
 **PURPOSE.** Measure, on EHAM's own settled markets, what the market knows
 that the model does not, and the reverse. This is the evidence for
-`market_weight` (§27b) and for strategy D (§27a).
+`market_weight` (§27b) and for strategy D (§27a), and the test of
+strategy E (§27c).
 
 **INPUTS.**
 
@@ -190,6 +191,16 @@ the days downloaded so far are studied.
   the order fills at that price plus the slippage allowance, the taker fee
   is paid, and the model is pooled with the traded midpoint and capped at
   the model, as live. At most one trade per day, bucket and variant.
+* **Strategy E at traded prices.** E's clock, temperature and ask-range
+  conditions are replayed at every decision with the live settings. The
+  order book is not archived, so a stand-in built from the trades replaces
+  the book condition. In the lookback before the decision, takers must
+  have bought ≥ `min_depth_shares × min_depth_shrink` YES shares at or
+  below the price cap (15 by default, as many as the live rule needs gone
+  from the book), more than they sold, and the ask proxy must not have
+  fallen. Three variants are replayed: *E* (as configured), *E w/o book*
+  and *E + model* (model ≥ 0.90 as well). As live, E needs a model but no
+  model edge.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 
@@ -208,19 +219,26 @@ the days downloaded so far are studied.
 * agreement of the METAR high with the resolved bucket;
 * the candidate structure against the market and against the current one;
 * per variant: trades, wins, P&L per trade with a 95 % day-block interval,
-  and the total at the live stake, with the live rule marked. Twenty-four
-  variants are replayed, so the best one overstates what to expect: a
-  variant only counts if it stays profitable on days after it was chosen;
+  and the total at the live stake, with the live rule marked. Thirty
+  variants are replayed (24 for A and B, 6 for E), so the best one
+  overstates what to expect: a variant only counts if it stays profitable
+  on days after it was chosen. E gets its own verdict line comparing the
+  three variants;
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
   both clocks, the forecast rise and headroom, both structures' cells and
-  P(high stays), the market and ask of the high's bucket, and every
+  P(high stays), the market and ask of the high's bucket, its taker flow
+  over E's lookback (bought / sold, E's stand-in for the book), and every
   simulated trade;
 * a plain-language verdict.
 
 **LIMITS.** Trades show only liquidity someone took, which is a lower
 bound on what was offered. The midpoint of the last taker buy and sell
 approximates the book's midpoint. Simulated fills ignore depth, so they are
-optimistic in thin markets. The study is read-only and changes nothing.
+optimistic in thin markets. E's stand-in sees only offers that were taken:
+offers withdrawn or added without a trade are invisible to it, while the
+live rule reads the book itself. The replay decides only at report times,
+whereas live E is evaluated on every book update. The study is read-only
+and changes nothing.
 **TESTING.** Unit tests on synthetic history:
 
 * an oracle market beats the model;
@@ -232,7 +250,11 @@ optimistic in thin markets. The study is read-only and changes nothing.
 * strategies at traded prices: live-range gating, P&L arithmetic, one trade
   per day, bucket and variant, a mis-resolved day as a loss, and the day
   replay (`strategies_are_replayed_at_traded_prices`, plus `market_sim`
-  unit tests).
+  unit tests);
+* strategy E: the stand-in trades only where buyers lifted the offers, the
+  variants' relations, the flow columns
+  (`strategy_e_is_replayed_with_its_book_stand_in`), and the flow window
+  (`taker_flow_counts_the_lookback_and_the_ask_it_began_with`).
 
 Data API paging, the offset cap, window splitting, dedup and the request
 budget are tested against a mock server. An end-to-end run against mock

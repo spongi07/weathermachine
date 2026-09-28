@@ -339,6 +339,32 @@ max_data_age_minutes = 40
 max_book_age_ms = 15000
 max_jump_tenths = 30
 
+# Strategy E: buy YES on the bucket holding the day's high once the clock,
+# the temperature and the order book agree — inside the local time window,
+# the high first reached ≥ min_minutes_at_high ago and the latest report
+# ≥ min_drop_tenths below it, the YES shares offered up to max_price down by
+# ≥ min_depth_shrink over lookback_minutes with the best ask not falling, and
+# the ask within [min_price, max_price]. Rule-based: it claims no model edge,
+# but like A and B it stays silent without a loaded model, and min_model_p > 0
+# also makes the model's probability a veto. Its premise — late favourites
+# win slightly more often than their price — is thin against fee and spread,
+# so treat it as a hypothesis: `research market` replays it at traded prices.
+[strategies.book_confirmed]
+enabled = true
+start_local_minute = 720          # 12:00 local
+end_local_minute = 1080           # 18:00 local (exclusive)
+min_minutes_at_high = 60          # since the first report at the high
+min_drop_tenths = 10              # latest report ≥ 1.0 °C below the high
+lookback_minutes = 30
+min_depth_shrink = 0.30           # ≥ 30 % of the offered shares gone
+min_depth_shares = 50.0           # fewer offered at the start: no signal
+min_price = "0.90"
+max_price = "0.99"
+min_model_p = 0.0                 # 0 = no veto; e.g. 0.90 to require the model's agreement
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.005"      # for the EV shown (not a gate)
+
 [strategies.split_unwind]
 enabled = false                   # research only; risk rejects outside backtests
 max_confirmation_minutes = 30
@@ -355,7 +381,8 @@ style = "best_bid"
 [model]
 # Trained EmpiricalPeakModel JSON. Unset: <auto_train.data_dir>/models/<station>.json
 # (e.g. /data/models/eham.json). Until a model exists the engine uses the
-# no-edge model: no weather-dependent trades (fail closed).
+# no-edge model and strategies A, B and E cannot trade (fail closed); only D,
+# which trades outcomes the observations have already decided, needs none.
 # path = "/data/models/eham.json"
 
 # When the model file is missing, `run` downloads the station's METAR history

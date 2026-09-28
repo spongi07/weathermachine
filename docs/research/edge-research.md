@@ -113,7 +113,98 @@ money was in the first half hour after 21 °C was reached. A pre-registered
 candidate structure, selected walk-forward at training, and the replay of
 strategies at traded prices above were built from it.
 
-## 6. Next levers (not built)
+## 6. Strategy E — a late favourite, confirmed by the book
+
+The operator's rule: *between a set local time window, once the temperature
+has reached its high and the book is shrinking, buy YES on the high's
+bucket at 90–99 ¢.* Strategy E implements it
+([§27c](../blueprint/06-strategy.md#27c-book-confirmed-high--strategy-e));
+it runs in paper mode like A, B and D.
+
+**What each condition means in the code** (defaults in
+`[strategies.book_confirmed]`):
+
+* *a specific time*: local time in 12:00–18:00;
+* *the temperature reached its highest*: the high was first reported
+  ≥ 60 min before the latest report, and that report is ≥ 1.0 °C lower. A
+  flat top does not restart the clock (the lesson of 28 September, when
+  21 °C was reported twice);
+* *the book is shrinking*: the YES shares offered at or below 0.99 fell by
+  ≥ 30 % within 30 min, from ≥ 50 shares, and the best ask did not fall.
+  Offers taken or withdrawn count; sellers undercutting each other do not;
+* *buy at 90–99 ¢*: a fill-and-kill order at the ask, $10, if the ask is in
+  [0.90, 0.99]; a probability model must be loaded, but no model edge is
+  needed.
+
+**What the evidence says — read before trusting it.**
+
+* Favourites tend to win a little more often than their price says. The
+  margin is thin, and it varies by market and by how contracts are grouped:
+  * On Polymarket, purchases at ≥ 90 ¢ earned +0.83 ¢ per dollar, while
+    purchases under 10 ¢ lost 19.3 ¢. The pattern holds in crypto and
+    politics but is absent in sports
+    ([Cardozo & Rivero-Wildemauwe 2026](https://arxiv.org/abs/2609.12878)).
+  * On Kalshi, high-priced contracts win more often than their price and
+    earn a small positive return. Takers, which E is, do much worse than
+    makers
+    ([Bürgi, Deng & Whelan, "Makers and Takers"](https://www.karlwhelan.com/Papers/Kalshi.pdf)).
+* Temperature markets are well calibrated at the top. Where Kalshi's
+  temperature market said 0.99, the bucket settled YES (60,906 settled
+  contracts). "Well calibrated" also means little is left over: that
+  study's model-based strategy lost 8.75 ¢ per contract
+  ([anaborne/kalshi-temperature-calibration](https://github.com/anaborne/kalshi-temperature-calibration)).
+* Other work points the other way:
+  * Weather prices are *too extreme* at short horizons
+    ([Decomposing Crowd Wisdom](https://arxiv.org/abs/2602.19520)).
+  * On Kalshi, backing sports favourites lost 0.42 ¢ per contract at the
+    midpoint and 2.38 ¢ after spread and taker fees
+    ([nalimmm/kalshi-calibration](https://github.com/nalimmm/kalshi-calibration)).
+* EHAM's own report (1 June – 28 September 2026, market price bins, every
+  decision and bucket) says:
+
+  | market price | mean price | won |
+  |---|---:|---:|
+  | 0.90–0.98 | 0.949 | 96.8 % |
+  | 0.70–0.90 | 0.799 | 83.9 % |
+  | 0.98–1.00 | 0.997 | 100 % |
+
+  These points are correlated within a day, so they are not independent
+  trades.
+* A shrinking book is order-flow information. Order-flow imbalance explains
+  price changes over short intervals
+  ([Cont, Kukanov & Stoikov](https://arxiv.org/abs/1011.6402)), not whether
+  a bucket settles YES. Whether it also picks better days is exactly what
+  the replay has to show.
+* Arithmetic sets a high bar. After the taker fee (0.05 × p × (1 − p)) and
+  0.005 slippage, the bucket must win 91.0 % at 0.90, 95.7 % at 0.95 and
+  99.55 % at 0.99. One loss at 0.95 (−$10.08 at $10) wipes out about 22 wins
+  (+$0.45 each).
+
+**How to check it.** `research market` replays E at the prices the market
+actually traded. The order book itself is not archived, so the replay
+stands in for "the book is shrinking" with the trades. In the 30 min before
+the decision, takers must have bought ≥ 15 YES shares at or below 0.99
+(the live rule's 50 × 30 %), more than they sold, without the ask falling.
+Read the E line of the verdict and the E rows:
+
+* *E* against *E w/o book*: does the book condition pick better trades, or
+  only fewer?
+* *E* against *E + model*: does the model's agreement (≥ 0.90) help?
+* The 95 % interval: with a few dozen trades one loss decides the total. A
+  positive total whose interval includes zero is not evidence.
+
+Live, every evaluation line names E's blocker, e.g.
+`E 21°C YES · ask 0.95 … — book not shrinking: 300 → 290 shares offered ≤ 0.96 in 30m (−3%, need −30%)`.
+Every paper trade records the time, the drop and the book numbers in its
+rationale.
+
+Protocol sources: Polymarket's market channel sends a `book` snapshot on
+subscribe and when a trade changes the book. `price_change` gives a level's
+new size (0 removes it), and the tick size changes above 0.96 and below
+0.04
+([Polymarket websocket reference](https://github.com/Polymarket/agent-skills/blob/main/websocket.md)).
+
+## 7. Next levers (not built)
 
 * **Faster observations.** KNMI publishes
   [10-minute station observations](https://english.knmidata.nl/open-data/10-minute-in-situ-meteorological-observations)

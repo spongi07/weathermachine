@@ -63,7 +63,7 @@ isolation, not layers for their own sake.
 | `wm-net` | HTTP client, per-provider `ProviderGate`, cache, User-Agent | wm-core, reqwest, tokio |
 | `wm-weather` | METAR parser, AWC/TGFTP/api.weather.gov sources, dedup ledger, health, polling policy, `StationCollector`, forecast port + Open-Meteo day-1 client, IEM archive client | wm-core, wm-net |
 | `wm-polymarket` | Gamma discovery, rules capture/parse, outcome mapping, CLOB books/history, market WebSocket, CTF economics (read-only) | wm-core, wm-net |
-| `wm-strategy` | Temperature state, peak detection, probability models, EV, strategies A/B/C, unwind | wm-core |
+| `wm-strategy` | Temperature state, peak detection, probability models, EV, strategies A–E, unwind | wm-core |
 | `wm-risk` | Risk engine, scenario exposure, `ApprovedIntent` type gate | wm-core |
 | `wm-execution` | Order manager, fill model, simulated exchange, venue port | wm-core, wm-risk |
 | `wm-engine` | Deterministic kernel wiring the above | strategy, risk, execution |

@@ -101,6 +101,9 @@ pub trait Strategy: Send {
     }
     fn enabled(&self) -> bool;
     fn evaluate(&mut self, ctx: &StrategyContext<'_>) -> StrategyOutput;
+    /// Every order-book update the engine receives, also when the strategy
+    /// is not evaluated then (for strategies that keep the book's history).
+    fn observe_book(&mut self, _book: &OrderBook) {}
 }
 
 // ---------------------------------------------------------------------------

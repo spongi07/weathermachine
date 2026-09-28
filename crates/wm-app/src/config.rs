@@ -216,7 +216,56 @@ pub struct StrategiesSection {
     /// Strategy D (outcomes the observations have decided).
     #[serde(default)]
     pub certain: CertainConfigToml,
+    /// Strategy E (the high's bucket, confirmed by clock, temperature and a
+    /// shrinking book).
+    #[serde(default)]
+    pub book_confirmed: BookConfirmedConfigToml,
     pub unwind: UnwindConfig,
+}
+
+/// TOML mirror of [`wm_strategy::BookConfirmedConfig`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BookConfirmedConfigToml {
+    pub enabled: bool,
+    pub start_local_minute: u16,
+    pub end_local_minute: u16,
+    pub min_minutes_at_high: i64,
+    pub min_drop_tenths: i32,
+    pub lookback_minutes: i64,
+    pub min_depth_shrink: f64,
+    pub min_depth_shares: f64,
+    #[serde(with = "decimal_serde::price")]
+    pub min_price: Price,
+    #[serde(with = "decimal_serde::price")]
+    pub max_price: Price,
+    pub min_model_p: f64,
+    pub max_data_age_minutes: i64,
+    pub max_book_age_ms: i64,
+    #[serde(with = "decimal_serde::price")]
+    pub slippage_allowance: Price,
+}
+
+impl Default for BookConfirmedConfigToml {
+    fn default() -> Self {
+        let d = wm_strategy::BookConfirmedConfig::default();
+        Self {
+            enabled: d.enabled,
+            start_local_minute: d.start_local_minute,
+            end_local_minute: d.end_local_minute,
+            min_minutes_at_high: d.min_minutes_at_high,
+            min_drop_tenths: d.min_drop_tenths,
+            lookback_minutes: d.lookback_minutes,
+            min_depth_shrink: d.min_depth_shrink,
+            min_depth_shares: d.min_depth_shares,
+            min_price: d.min_price,
+            max_price: d.max_price,
+            min_model_p: d.min_model_p,
+            max_data_age_minutes: d.max_data_age_minutes,
+            max_book_age_ms: d.max_book_age_ms,
+            slippage_allowance: d.slippage_allowance,
+        }
+    }
 }
 
 /// TOML mirror of [`wm_strategy::CertainConfig`].
@@ -683,6 +732,42 @@ impl AppConfig {
                 bail!("strategies.{name}.max_market_spread must be > 0");
             }
         }
+        let e = &st.book_confirmed;
+        if !(e.start_local_minute < e.end_local_minute && e.end_local_minute <= 24 * 60) {
+            bail!(
+                "strategies.book_confirmed: need start_local_minute < end_local_minute ≤ 1440, got {}..{}",
+                e.start_local_minute,
+                e.end_local_minute
+            );
+        }
+        if !(Price::ZERO < e.min_price && e.min_price <= e.max_price && e.max_price < Price::ONE) {
+            bail!(
+                "strategies.book_confirmed: need 0 < min_price ≤ max_price < 1, got {}..{}",
+                e.min_price,
+                e.max_price
+            );
+        }
+        if e.lookback_minutes < 1 || e.lookback_minutes > 24 * 60 {
+            bail!("strategies.book_confirmed.lookback_minutes must be 1..=1440");
+        }
+        if !(e.min_depth_shrink > 0.0 && e.min_depth_shrink <= 1.0) {
+            bail!(
+                "strategies.book_confirmed.min_depth_shrink must be in (0, 1], got {}",
+                e.min_depth_shrink
+            );
+        }
+        if !(e.min_depth_shares >= 0.0 && e.min_depth_shares.is_finite()) {
+            bail!("strategies.book_confirmed.min_depth_shares must be ≥ 0");
+        }
+        if !(0.0..1.0).contains(&e.min_model_p) {
+            bail!(
+                "strategies.book_confirmed.min_model_p must be in [0, 1) (0 = no model veto), got {}",
+                e.min_model_p
+            );
+        }
+        if e.min_minutes_at_high < 0 || e.min_drop_tenths < 0 {
+            bail!("strategies.book_confirmed: min_minutes_at_high and min_drop_tenths must be ≥ 0");
+        }
         self.file.risk.validate().context("risk")?;
         if self.locations.is_empty() {
             bail!("no enabled locations configured");
@@ -804,6 +889,27 @@ impl AppConfig {
         }
     }
 
+    pub fn book_confirmed(&self) -> wm_strategy::BookConfirmedConfig {
+        let c = &self.file.strategies.book_confirmed;
+        wm_strategy::BookConfirmedConfig {
+            enabled: c.enabled,
+            start_local_minute: c.start_local_minute,
+            end_local_minute: c.end_local_minute,
+            min_minutes_at_high: c.min_minutes_at_high,
+            min_drop_tenths: c.min_drop_tenths,
+            lookback_minutes: c.lookback_minutes,
+            min_depth_shrink: c.min_depth_shrink,
+            min_depth_shares: c.min_depth_shares,
+            min_price: c.min_price,
+            max_price: c.max_price,
+            min_model_p: c.min_model_p,
+            max_data_age_minutes: c.max_data_age_minutes,
+            max_book_age_ms: c.max_book_age_ms,
+            slippage_allowance: c.slippage_allowance,
+            notional: self.file.risk.position_size_usd,
+        }
+    }
+
     pub fn split_unwind(&self) -> SplitUnwindConfig {
         let c = &self.file.strategies.split_unwind;
         SplitUnwindConfig {
@@ -908,7 +1014,11 @@ mod tests {
     #[test]
     fn older_config_files_get_the_new_defaults() {
         let text = shipped_without(
-            &["providers.polymarket_data", "strategies.certain"],
+            &[
+                "providers.polymarket_data",
+                "strategies.certain",
+                "strategies.book_confirmed",
+            ],
             &["market_weight", "max_market_spread"],
         );
         assert!(
@@ -926,11 +1036,48 @@ mod tests {
             assert_eq!(spread, Price::saturating_from_micros(100_000));
         }
         assert!(st.certain.enabled);
+        assert_eq!(st.book_confirmed, BookConfirmedConfigToml::default());
         let data = &file.providers.polymarket_data;
         assert!(data.enabled);
         assert_eq!(data.base_url, "https://data-api.polymarket.com");
         assert!(data.policy.min_interval >= std::time::Duration::from_millis(500));
         assert!(data.policy.validate().is_ok());
+    }
+
+    #[test]
+    fn book_confirmed_settings_map_and_are_validated() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        let e = cfg.book_confirmed();
+        let d = wm_strategy::BookConfirmedConfig::default();
+        assert_eq!(
+            wm_strategy::BookConfirmedConfig {
+                notional: d.notional,
+                ..e.clone()
+            },
+            d,
+            "the shipped file states the defaults"
+        );
+        assert_eq!(e.notional, cfg.file.risk.position_size_usd);
+        let ok = cfg.file.strategies.book_confirmed.clone();
+        let bad: [fn(&mut BookConfirmedConfigToml); 8] = [
+            |e| e.end_local_minute = e.start_local_minute,
+            |e| e.end_local_minute = 24 * 60 + 1,
+            |e| e.min_price = Price::parse("0.995").unwrap(),
+            |e| e.max_price = Price::ONE,
+            |e| e.lookback_minutes = 0,
+            |e| e.min_depth_shrink = 0.0,
+            |e| e.min_model_p = 1.0,
+            |e| e.min_depth_shares = f64::NAN,
+        ];
+        for (i, f) in bad.iter().enumerate() {
+            cfg.file.strategies.book_confirmed = ok.clone();
+            f(&mut cfg.file.strategies.book_confirmed);
+            assert!(cfg.validate().is_err(), "case {i} should be rejected");
+        }
+        cfg.file.strategies.book_confirmed = ok;
+        cfg.file.strategies.book_confirmed.min_model_p = 0.9;
+        assert!(cfg.validate().is_ok(), "a model veto is allowed");
     }
 
     #[test]

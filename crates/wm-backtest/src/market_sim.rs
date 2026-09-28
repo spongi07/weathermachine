@@ -1,4 +1,4 @@
-//! Strategies A and B replayed at the prices the market actually traded
+//! Strategies A, B and E replayed at the prices the market actually traded
 //! (`research market`), and the report-by-report replay of chosen days.
 //!
 //! A decision is taken at every report (plus the knowledge delay) with the
@@ -12,6 +12,11 @@
 //! ask range; each takes at most one trade per day and bucket (the first
 //! decision that passes every gate). The live rule is one of them and is
 //! marked. Many variants are tried, so the best one overstates what to expect.
+//!
+//! Strategy E's book condition is replayed by a stand-in, since only trades
+//! are archived: over the lookback takers bought enough YES at or below the
+//! price cap, more than they sold, and the ask proxy did not fall
+//! ([`BookConfirmedSim`]).
 
 use crate::forecast_eval::ratio_ci;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -46,6 +51,8 @@ pub struct MarketSimConfig {
     pub no_distances: Vec<i32>,
     /// Stake per simulated trade (USD at the ask).
     pub stake_usd: f64,
+    /// Strategy E.
+    pub e: BookConfirmedSim,
 }
 
 impl Default for MarketSimConfig {
@@ -60,7 +67,70 @@ impl Default for MarketSimConfig {
             max_market_spread: 0.10,
             no_distances: vec![1, 2, 3],
             stake_usd: 10.0,
+            e: BookConfirmedSim::default(),
         }
+    }
+}
+
+/// Strategy E replayed (the live `[strategies.book_confirmed]` settings).
+///
+/// The order book is not archived, so "the book is shrinking" is replayed by
+/// a trade-flow stand-in: over the lookback, takers bought at least
+/// `min_bought_shares` of YES at or below `max_price`, more than they sold,
+/// and the ask proxy (latest taker buy) did not fall.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BookConfirmedSim {
+    /// E is enabled live (its rule is marked **live**).
+    pub live: bool,
+    pub start_local_minute: u16,
+    pub end_local_minute: u16,
+    pub min_minutes_at_high: i64,
+    pub min_drop_tenths: i32,
+    pub lookback_minutes: i64,
+    /// Shares that must have left the book live: `min_depth_shares ×
+    /// min_depth_shrink`.
+    pub min_bought_shares: f64,
+    pub min_price: f64,
+    pub max_price: f64,
+    /// The live model veto (0 = none).
+    pub min_model_p: f64,
+    /// The model veto of the third replayed variant.
+    pub veto_model_p: f64,
+}
+
+impl BookConfirmedSim {
+    /// The replay of the live strategy's settings.
+    pub fn from_live(c: &wm_strategy::BookConfirmedConfig) -> Self {
+        Self {
+            live: c.enabled,
+            start_local_minute: c.start_local_minute,
+            end_local_minute: c.end_local_minute,
+            min_minutes_at_high: c.min_minutes_at_high,
+            min_drop_tenths: c.min_drop_tenths,
+            lookback_minutes: c.lookback_minutes,
+            min_bought_shares: c.min_depth_shares * c.min_depth_shrink,
+            min_price: c.min_price.as_f64(),
+            max_price: c.max_price.as_f64(),
+            min_model_p: c.min_model_p,
+            veto_model_p: 0.90,
+        }
+    }
+
+    /// The table's confirmation column: minutes since the first report at
+    /// the high.
+    fn window(&self) -> u32 {
+        u32::try_from(self.min_minutes_at_high.clamp(0, 1_440)).unwrap_or(0)
+    }
+
+    fn range(&self) -> String {
+        range_label((self.min_price, self.max_price))
+    }
+}
+
+impl Default for BookConfirmedSim {
+    fn default() -> Self {
+        Self::from_live(&wm_strategy::BookConfirmedConfig::default())
     }
 }
 
@@ -85,9 +155,31 @@ impl Quote {
     }
 }
 
+/// Taker flow on one bucket's YES over strategy E's lookback before a
+/// decision: the stand-in for a shrinking book.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Flow {
+    /// YES shares takers bought (lifting offers) at or below E's price cap.
+    pub(crate) bought: f64,
+    /// YES shares takers sold (hitting bids).
+    pub(crate) sold: f64,
+    /// The ask proxy when the lookback began (else its first taker buy).
+    pub(crate) ask_then: Option<f64>,
+}
+
+impl Flow {
+    /// Buyers lifted the offers: enough bought, more than sold, and the ask
+    /// not lower than when the lookback began.
+    pub(crate) fn lifting(&self, ask_now: Option<f64>, min_bought: f64) -> bool {
+        self.bought >= min_bought
+            && self.bought > self.sold
+            && matches!((self.ask_then, ask_now), (Some(a), Some(b)) if b >= a - 1e-12)
+    }
+}
+
 /// One decision of a market day: the features at a report and each
 /// structure's distribution (trained on earlier days), with every bucket's
-/// quote at the decision time.
+/// quote and taker flow at the decision time.
 #[derive(Debug, Clone)]
 pub(crate) struct Decision {
     /// Observation time of the report.
@@ -96,6 +188,7 @@ pub(crate) struct Decision {
     /// Current and candidate structure ([`STRUCTURES`]).
     pub(crate) dists: [Option<IncrementDistribution>; 2],
     pub(crate) quotes: Vec<Quote>,
+    pub(crate) flows: Vec<Flow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +204,29 @@ impl Kind {
         match self {
             Kind::A => "A",
             Kind::B => "B",
+        }
+    }
+}
+
+/// Strategy E's replayed variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EVariant {
+    /// As configured, the book by its trade-flow stand-in.
+    Live,
+    /// Without the book condition.
+    NoBook,
+    /// With the model's probability ≥ `veto_model_p` as well.
+    Model,
+}
+
+impl EVariant {
+    const ALL: [EVariant; 3] = [EVariant::Live, EVariant::NoBook, EVariant::Model];
+
+    fn label(self) -> &'static str {
+        match self {
+            EVariant::Live => "E",
+            EVariant::NoBook => "E w/o book",
+            EVariant::Model => "E + model",
         }
     }
 }
@@ -178,6 +294,12 @@ pub struct TimelineRow {
     /// That bucket's market midpoint and YES ask.
     pub market_high: Option<f64>,
     pub yes_ask_high: Option<f64>,
+    /// That bucket's YES shares taker-bought (at or below E's cap) and
+    /// taker-sold over E's lookback: the stand-in for its book.
+    #[serde(default)]
+    pub bought_high: Option<f64>,
+    #[serde(default)]
+    pub sold_high: Option<f64>,
     /// Trades the replayed variants took at this report.
     pub trades: Vec<String>,
 }
@@ -187,11 +309,19 @@ pub struct TimelineRow {
 pub struct DayTimeline {
     pub date: NaiveDate,
     pub winner: String,
+    /// Strategy E's lookback (minutes) of the flow columns.
+    #[serde(default)]
+    pub flow_minutes: i64,
     pub rows: Vec<TimelineRow>,
 }
 
 fn local_hm(t: DateTime<Utc>, tz: Tz) -> String {
     t.with_timezone(&tz).format("%H:%M").to_string()
+}
+
+/// Minutes after local midnight as `HH:MM`.
+fn hm(minute: u16) -> String {
+    format!("{:02}:{:02}", minute / 60, minute % 60)
 }
 
 fn range_label((lo, hi): (f64, f64)) -> String {
@@ -305,6 +435,65 @@ pub(crate) fn simulate_day(
                 }
             }
         }
+        let e = &sim.e;
+        for variant in EVariant::ALL {
+            let mut done: HashSet<usize> = HashSet::new();
+            for d in decisions {
+                // Like live: a model is required, not a model edge.
+                let Some(dist) = &d.dists[s] else { continue };
+                let f = &d.f;
+                if !(e.start_local_minute..e.end_local_minute).contains(&f.local_minute_now)
+                    || f.minutes_since_first_high < e.min_minutes_at_high
+                    || f.drop_tenths < e.min_drop_tenths
+                {
+                    continue;
+                }
+                let high = f.high_whole;
+                let Some(i) = buckets.iter().position(|b| b.contains(high)) else {
+                    continue;
+                };
+                let q = &d.quotes[i];
+                let Some(price) = q.yes_ask else { continue };
+                if done.contains(&i) || price < e.min_price - 1e-12 || price > e.max_price + 1e-12 {
+                    continue;
+                }
+                if variant != EVariant::NoBook
+                    && !d
+                        .flows
+                        .get(i)
+                        .is_some_and(|fl| fl.lifting(q.yes_ask, e.min_bought_shares))
+                {
+                    continue;
+                }
+                let p_model = dist.p_in_bucket_lower(high, &buckets[i]);
+                let veto = match variant {
+                    EVariant::Model => e.min_model_p.max(e.veto_model_p),
+                    EVariant::Live | EVariant::NoBook => e.min_model_p,
+                };
+                if p_model < veto {
+                    continue;
+                }
+                done.insert(i);
+                let won = i == winner;
+                let per_share = f64::from(u8::from(won)) - price - fee(price) - sim.slippage;
+                out.push(SimTrade {
+                    date,
+                    report: local_hm(d.at, tz),
+                    structure: (*structure).to_owned(),
+                    strategy: variant.label().to_owned(),
+                    window: e.window(),
+                    range: e.range(),
+                    bucket: labels[i].clone(),
+                    side: "YES".to_owned(),
+                    price,
+                    p_model,
+                    p_used: log_pool(p_model, q.pool_mid(sim.max_market_spread), market_weight)
+                        .min(p_model),
+                    won,
+                    pnl_usd: sim.stake_usd / price * per_share,
+                });
+            }
+        }
     }
     out
 }
@@ -321,65 +510,84 @@ pub(crate) fn strategy_rows(
         for kind in [Kind::A, Kind::B] {
             for &window in &sim.windows {
                 for &range in &sim.ranges {
-                    let label = range_label(range);
-                    let ts: Vec<&SimTrade> = trades
-                        .iter()
-                        .filter(|t| {
-                            t.structure == structure
-                                && t.strategy == kind.label()
-                                && t.window == window
-                                && t.range == label
-                        })
-                        .collect();
-                    let mut per_day: BTreeMap<NaiveDate, (f64, f64)> = BTreeMap::new();
-                    for t in &ts {
-                        let e = per_day.entry(t.date).or_insert((0.0, 0.0));
-                        e.0 += t.pnl_usd;
-                        e.1 += 1.0;
-                    }
-                    let sums: Vec<(f64, f64)> = per_day.values().copied().collect();
-                    let (ci_low, ci_high) = ratio_ci(&sums, iterations, seed);
-                    let n = ts.len() as f64;
-                    let total: f64 = ts.iter().map(|t| t.pnl_usd).sum();
-                    rows.push(StrategyRow {
-                        structure: structure.to_owned(),
-                        strategy: kind.label().to_owned(),
-                        window,
-                        range: label,
-                        live: window == sim.live_window
-                            && (range.0 - sim.live_range.0).abs() < 1e-9
-                            && (range.1 - sim.live_range.1).abs() < 1e-9,
-                        trades: ts.len() as u64,
-                        wins: ts.iter().filter(|t| t.won).count() as u64,
-                        days: per_day.len() as u64,
-                        mean_price: if n > 0.0 {
-                            ts.iter().map(|t| t.price).sum::<f64>() / n
-                        } else {
-                            0.0
-                        },
-                        pnl_per_trade: if n > 0.0 { total / n } else { 0.0 },
-                        ci_low,
-                        ci_high,
-                        total_usd: total,
-                    });
+                    let live = window == sim.live_window
+                        && (range.0 - sim.live_range.0).abs() < 1e-9
+                        && (range.1 - sim.live_range.1).abs() < 1e-9;
+                    let key = (structure, kind.label(), window, range_label(range));
+                    rows.push(row(trades, key, live, iterations, seed));
                 }
             }
         }
+        for variant in EVariant::ALL {
+            let key = (structure, variant.label(), sim.e.window(), sim.e.range());
+            let live = variant == EVariant::Live && sim.e.live;
+            rows.push(row(trades, key, live, iterations, seed));
+        }
     }
     rows
+}
+
+/// One variant's results: (structure, strategy, window, range).
+fn row(
+    trades: &[SimTrade],
+    (structure, strategy, window, range): (&str, &str, u32, String),
+    live: bool,
+    iterations: usize,
+    seed: u64,
+) -> StrategyRow {
+    let ts: Vec<&SimTrade> = trades
+        .iter()
+        .filter(|t| {
+            t.structure == structure
+                && t.strategy == strategy
+                && t.window == window
+                && t.range == range
+        })
+        .collect();
+    let mut per_day: BTreeMap<NaiveDate, (f64, f64)> = BTreeMap::new();
+    for t in &ts {
+        let e = per_day.entry(t.date).or_insert((0.0, 0.0));
+        e.0 += t.pnl_usd;
+        e.1 += 1.0;
+    }
+    let sums: Vec<(f64, f64)> = per_day.values().copied().collect();
+    let (ci_low, ci_high) = ratio_ci(&sums, iterations, seed);
+    let n = ts.len() as f64;
+    let total: f64 = ts.iter().map(|t| t.pnl_usd).sum();
+    StrategyRow {
+        structure: structure.to_owned(),
+        strategy: strategy.to_owned(),
+        window,
+        range,
+        live,
+        trades: ts.len() as u64,
+        wins: ts.iter().filter(|t| t.won).count() as u64,
+        days: per_day.len() as u64,
+        mean_price: if n > 0.0 {
+            ts.iter().map(|t| t.price).sum::<f64>() / n
+        } else {
+            0.0
+        },
+        pnl_per_trade: if n > 0.0 { total / n } else { 0.0 },
+        ci_low,
+        ci_high,
+        total_usd: total,
+    }
 }
 
 /// Plain-language conclusions of the replay.
 pub(crate) fn verdict(rows: &[StrategyRow], sim: &MarketSimConfig) -> Vec<String> {
     let mut v = Vec::new();
     if rows.iter().all(|r| r.trades == 0) {
-        v.push("Strategies at traded prices: no replayed variant found a trade — the model never saw enough edge at the prices the market traded.".into());
+        v.push("Strategies at traded prices: no replayed variant found a trade — A and B never saw enough edge, and E's conditions never held, at the prices the market traded.".into());
         return v;
     }
     for structure in STRUCTURES {
         let live: Vec<&StrategyRow> = rows
             .iter()
-            .filter(|r| r.structure == structure && r.live)
+            .filter(|r| {
+                r.structure == structure && r.live && (r.strategy == "A" || r.strategy == "B")
+            })
             .collect();
         let n: u64 = live.iter().map(|r| r.trades).sum();
         let wins: u64 = live.iter().map(|r| r.wins).sum();
@@ -391,6 +599,42 @@ pub(crate) fn verdict(rows: &[StrategyRow], sim: &MarketSimConfig) -> Vec<String
             live.iter().find(|r| r.strategy == "A").map_or(0, |r| r.trades),
             live.iter().find(|r| r.strategy == "B").map_or(0, |r| r.trades),
             sim.stake_usd
+        ));
+    }
+    let e = &sim.e;
+    for structure in STRUCTURES {
+        let find = |x: EVariant| {
+            rows.iter()
+                .find(|r| r.structure == structure && r.strategy == x.label())
+        };
+        let (Some(live), Some(no_book), Some(model)) = (
+            find(EVariant::Live),
+            find(EVariant::NoBook),
+            find(EVariant::Model),
+        ) else {
+            continue;
+        };
+        v.push(format!(
+            "Strategy E{} ({}–{} local, high first reached ≥ {}′ before and ≥ {:.1} °C below, asks {}) with the {structure} structure: {} trades, {} won, ${:+.2} (${:+.3} per trade, 95% CI {:+.3} … {:+.3}); without the book condition {} trades, {} won, ${:+.2}; with the model ≥ {:.2} as well {} trades, {} won, ${:+.2}.",
+            if e.live { "" } else { " (disabled live)" },
+            hm(e.start_local_minute),
+            hm(e.end_local_minute),
+            e.min_minutes_at_high,
+            f64::from(e.min_drop_tenths) / 10.0,
+            e.range(),
+            live.trades,
+            live.wins,
+            live.total_usd,
+            live.pnl_per_trade,
+            live.ci_low,
+            live.ci_high,
+            no_book.trades,
+            no_book.wins,
+            no_book.total_usd,
+            e.min_model_p.max(e.veto_model_p),
+            model.trades,
+            model.wins,
+            model.total_usd,
         ));
     }
     let tried = rows.len();
@@ -423,6 +667,7 @@ pub(crate) fn timeline(
     winner: &str,
     decisions: &[Decision],
     trades: &[SimTrade],
+    sim: &MarketSimConfig,
     tz: Tz,
 ) -> DayTimeline {
     let cell = |d: &Option<IncrementDistribution>| {
@@ -461,12 +706,15 @@ pub(crate) fn timeline(
                 cell_candidate: cell(&d.dists[1]),
                 market_high: hb.and_then(|i| d.quotes[i].mid),
                 yes_ask_high: hb.and_then(|i| d.quotes[i].yes_ask),
+                bought_high: hb.and_then(|i| d.flows.get(i)).map(|f| f.bought),
+                sold_high: hb.and_then(|i| d.flows.get(i)).map(|f| f.sold),
             }
         })
         .collect();
     DayTimeline {
         date,
         winner: winner.to_owned(),
+        flow_minutes: sim.e.lookback_minutes,
         rows,
     }
 }
@@ -536,6 +784,20 @@ pub(crate) fn strategies_markdown(
         sim.slippage,
         sim.stake_usd
     );
+    let e = &sim.e;
+    let _ = write!(
+        s,
+        "Strategy E buys YES on the bucket holding the high between {} and {} local once the high was first reached ≥ {}′ before the report and the report is ≥ {:.1} °C below it, at asks {}. Only trades are archived, so its book condition is replayed by a stand-in: in the {}′ before the decision takers bought ≥ {:.0} YES shares at or below {:.2}, more than they sold, and the ask (latest taker buy) did not fall. *E w/o book* drops that condition; *E + model* also needs the model's probability ≥ {:.2}. Like live, E needs a model but no model edge; its confirmation column counts from the first report at the high.\n\n",
+        hm(e.start_local_minute),
+        hm(e.end_local_minute),
+        e.min_minutes_at_high,
+        f64::from(e.min_drop_tenths) / 10.0,
+        e.range(),
+        e.lookback_minutes,
+        e.min_bought_shares,
+        e.max_price,
+        e.min_model_p.max(e.veto_model_p),
+    );
     for line in verdict {
         let _ = writeln!(s, "* {line}");
     }
@@ -566,13 +828,13 @@ pub(crate) fn timeline_markdown(t: &DayTimeline, delay_s: i64) -> String {
     let c = |v: Option<f64>, d: usize| v.map_or_else(|| "—".to_owned(), |x| format!("{x:.d$}"));
     let signed = |v: Option<f64>| v.map_or_else(|| "—".to_owned(), |x| format!("{x:+.1}"));
     let mut s = format!(
-        "\n## Day replay — {} (resolved {})\n\nEvery report from the first decision time; decisions {delay_s} s after the report. P(high) = the model's probability that the final high stays in the bucket holding the current high; market = that bucket's traded midpoint, ask = its latest taker buy.\n\n| report | temp | high | since last / first touch | rise / headroom | P(high) current | P(high) candidate | market | ask | trades |\n|---|---:|---:|---|---|---:|---:|---:|---:|---|\n",
-        t.date, t.winner
+        "\n## Day replay — {} (resolved {})\n\nEvery report from the first decision time; decisions {delay_s} s after the report. P(high) = the model's probability that the final high stays in the bucket holding the current high; market = that bucket's traded midpoint, ask = its latest taker buy; bought / sold = its YES shares taker-bought (at or below E's cap) and taker-sold in the {}′ before the decision, strategy E's stand-in for its book.\n\n| report | temp | high | since last / first touch | rise / headroom | P(high) current | P(high) candidate | market | ask | bought / sold | trades |\n|---|---:|---:|---|---|---:|---:|---:|---:|---|---|\n",
+        t.date, t.winner, t.flow_minutes
     );
     for r in &t.rows {
         let _ = writeln!(
             s,
-            "| {} | {:.1} | {} | {} / {} min | {} / {} | {} | {} | {} | {} | {} |",
+            "| {} | {:.1} | {} | {} / {} min | {} / {} | {} | {} | {} | {} | {} / {} | {} |",
             r.report,
             r.temp_c,
             r.high,
@@ -584,6 +846,8 @@ pub(crate) fn timeline_markdown(t: &DayTimeline, delay_s: i64) -> String {
             c(r.p_high_candidate, 3),
             c(r.market_high, 3),
             c(r.yes_ask_high, 3),
+            c(r.bought_high, 0),
+            c(r.sold_high, 0),
             if r.trades.is_empty() {
                 String::new()
             } else {
@@ -662,6 +926,41 @@ mod tests {
             ]
         );
         assert!(grouped(&[]).is_empty());
+    }
+
+    #[test]
+    fn buyers_lift_the_offers_only_with_enough_net_buying_and_a_held_ask() {
+        let f = Flow {
+            bought: 40.0,
+            sold: 10.0,
+            ask_then: Some(0.93),
+        };
+        assert!(f.lifting(Some(0.95), 15.0));
+        assert!(f.lifting(Some(0.93), 15.0), "an unchanged ask holds");
+        assert!(!f.lifting(Some(0.92), 15.0), "the ask fell");
+        assert!(!f.lifting(None, 15.0));
+        assert!(!f.lifting(Some(0.95), 50.0), "too little bought");
+        let even = Flow { sold: 40.0, ..f };
+        assert!(!even.lifting(Some(0.95), 15.0), "sellers as active");
+        let unknown = Flow {
+            ask_then: None,
+            ..f
+        };
+        assert!(!unknown.lifting(Some(0.95), 15.0));
+        assert_eq!(hm(12 * 60 + 5), "12:05");
+    }
+
+    #[test]
+    fn e_replays_the_live_settings() {
+        let live = wm_strategy::BookConfirmedConfig::default();
+        let e = BookConfirmedSim::from_live(&live);
+        assert!(e.live);
+        assert!(
+            (e.min_bought_shares - 15.0).abs() < 1e-9,
+            "50 shares × 30 %"
+        );
+        assert_eq!((e.window(), e.range()), (60, "0.90–0.99".to_owned()));
+        assert_eq!(MarketSimConfig::default().e, e);
     }
 
     #[test]

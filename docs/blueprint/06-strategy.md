@@ -1,11 +1,11 @@
-# 22–28 · Peak detection, probability, strategies A/B/C/D, market pooling, unwind (+ EV)
+# 22–28 · Peak detection, probability, strategies A/B/C/D/E, market pooling, unwind (+ EV)
 
 > **The core trading belief is a HYPOTHESIS TO BACKTEST, not a fact:** once
 > the day's high has been reached and not retested for N minutes, it becomes
 > increasingly likely to be final. The code never assumes it. The
 > probability of "final" comes only from a model trained on history
 > (`EmpiricalPeakModel`). Without such a model the `NoEdgeModel` returns
-> nothing, and strategies A and B cannot propose any trade.
+> nothing, and strategies A, B and E cannot propose any trade.
 
 ## 22. PeakDetectionEngine
 
@@ -246,6 +246,86 @@ effectively stop trading, because the midpoint never clears its own ask.
 `strategy_a_lets_the_market_veto_but_not_create_a_trade`,
 `strategy_b_pools_each_bucket_with_its_own_book`, plus configuration defaults
 and validation tests.
+
+## 27c. BOOK-CONFIRMED HIGH — strategy E
+
+**PURPOSE.** The operator's rule: between two local times, once the
+temperature has peaked and the order book of the high's bucket is
+shrinking, buy YES on that bucket at 0.90–0.99. `BookConfirmedHigh`
+(`wm-strategy::book_confirmed`), `[strategies.book_confirmed]`.
+
+Conditions, all required:
+
+* the local time is inside `[start_local_minute, end_local_minute)`
+  (12:00–18:00);
+* the high was first reported ≥ `min_minutes_at_high` (60 min) before the
+  latest report, and that report is ≥ `min_drop_tenths` (1.0 °C) below it.
+  The clock runs from the first report at the high, so a flat top or a
+  retest does not restart it; the lowest value across views counts;
+* **the book is shrinking**: the YES shares offered at or below `max_price`
+  fell by ≥ `min_depth_shrink` (30 %) over `lookback_minutes` (30), from at
+  least `min_depth_shares` (50), while the best ask did not fall. Buyers
+  taking the offers or sellers withdrawing them count; sellers undercutting
+  each other do not. The engine keeps the best five levels per side
+  (`ENGINE_BOOK_DEPTH`), so a level entering or leaving those five is not a
+  change of the book: two states are compared only up to the highest price
+  both show (and at most `max_price`);
+* the ask is within `[min_price, max_price]` (0.90–0.99); book fresh
+  (≤ 15 s); weather data ≤ 40 min old;
+* a probability model is loaded (fail closed, as for A and B). With
+  `min_model_p` > 0 its probability for the bucket is also a veto (default
+  0: no veto);
+* not already positioned or pending; market accepting orders; size ≥ the
+  market minimum.
+
+**BOOK HISTORY.** Every book update the engine receives reaches the
+strategy (`Strategy::observe_book`), also while the views are incomplete
+and nothing is evaluated. States are coalesced to one per 10 s (the latest
+book of a slot wins) and kept for the lookback; tokens without an update for
+a day are forgotten. After a restart the history is empty, and E waits one
+lookback ("book history shorter than 30m").
+
+E claims no model edge. The evaluation shows the model pooled with the
+market (as for A) and the EV at that probability, but neither is a gate.
+The risk engine applies all its gates: weather health, correction cooldown,
+spread ≤ 0.05, no one-sided book, depth, exposure and the per-strategy
+capital cap. E is evaluated last, so when A and E signal on the same token
+A's order goes first and E's is rejected as a duplicate.
+
+**HYPOTHESIS TO BACKTEST.** The premise is the favourite–longshot bias:
+late favourites win slightly more often than their price says. The margin
+is about the size of fee plus slippage (break-even 0.957 at an ask of 0.95,
+0.9955 at 0.99), and some studies find the opposite for weather at short
+horizons ([evidence](../research/edge-research.md#6-strategy-e--a-late-favourite-confirmed-by-the-book)).
+`research market` replays E at traded prices (§36a). The book is not
+archived, so there a trade-flow stand-in replaces the book condition. Three
+variants run: as configured, without the book condition, and with the
+model ≥ 0.90 as well.
+
+**RESIDUAL RISK.** A second peak after the drop (warm advection, clearing
+cloud): the window and the drop reduce this risk but do not remove it. An
+offer pulled and re-posted can mimic buying. The resolution source may
+differ from the METAR high. One loss at 0.95 costs as much as about 22 wins.
+**TESTING.** Unit tests in `book_confirmed.rs` cover:
+
+* depth under the cap;
+* coalescing and pruning;
+* the visible-range comparison ignoring a truncation artifact;
+* the held ask.
+
+Four `strategy_e_*` tests in `wm-strategy/tests/strategies.rs` cover:
+
+* the signal;
+* every blocker;
+* the model requirement and veto;
+* the history fed between evaluations.
+
+The kernel test `strategy_e_buys_the_high_when_its_book_shrinks_after_the_peak`
+fails without `observe_book` and checks that the no-edge model does not
+trade. Replay tests `strategy_e_is_replayed_with_its_book_stand_in` and
+`taker_flow_counts_the_lookback_and_the_ask_it_began_with` cover the
+research side, and further tests cover configuration mapping and
+validation.
 
 ## 28. UnwindEngine
 

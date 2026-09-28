@@ -310,13 +310,22 @@ async fn scores_settled_days_and_serves_a_rerun_from_the_cache() {
     assert!(md.contains("| candidate model |"), "{md}");
     assert!(md.contains("## Strategies at traded prices"));
     assert!(md.contains("## Day replay — 2025-04-11 (resolved "), "{md}");
-    assert_eq!(o.report.strategies.len(), 24);
+    // Per structure: A and B × 3 windows × 2 ranges, and E's 3 variants.
+    assert_eq!(o.report.strategies.len(), 30);
+    assert!(
+        o.report
+            .strategies
+            .iter()
+            .any(|r| r.strategy == "E" && r.live)
+    );
+    assert!(md.contains("Strategy E buys YES on the bucket holding the high"));
     assert_eq!(o.report.timelines.len(), 1);
     assert!(!o.report.timelines[0].rows.is_empty());
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&o.json).unwrap()).unwrap();
     assert_eq!(json["market_days"], 3);
     assert_eq!(json["timelines"][0]["date"], "2025-04-11");
-    assert!(json["strategies"].as_array().is_some_and(|a| a.len() == 24));
+    assert!(json["strategies"].as_array().is_some_and(|a| a.len() == 30));
+    assert_eq!(json["sim"]["e"]["lookback_minutes"], 30);
     // Settled days are cached; open or missing ones are not.
     let cache = &plan.cache_dir;
     for day in [d(2025, 4, 10), d(2025, 4, 11), d(2025, 4, 12)] {

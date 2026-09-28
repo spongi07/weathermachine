@@ -24,10 +24,10 @@ use wm_risk::{
     ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus,
 };
 use wm_strategy::{
-    BucketEvaluation, BuyNoAboveHigh, BuyNoConfig, BuyYesConfig, BuyYesFinalHigh, CertainConfig,
-    CertainOutcomes, ForecastDay, PeakConfig, PeakDetectionEngine, ProbabilityModel, Proposal,
-    SplitUnwind, SplitUnwindConfig, Strategy, StrategyContext, TemperatureStateEngine,
-    UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
+    BookConfirmedConfig, BookConfirmedHigh, BucketEvaluation, BuyNoAboveHigh, BuyNoConfig,
+    BuyYesConfig, BuyYesFinalHigh, CertainConfig, CertainOutcomes, ForecastDay, PeakConfig,
+    PeakDetectionEngine, ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig, Strategy,
+    StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
 };
 
 /// A location the engine trades.
@@ -55,6 +55,10 @@ pub struct EngineConfig {
     /// Strategy D: outcomes the observations have decided.
     #[serde(default)]
     pub certain: CertainConfig,
+    /// Strategy E: the high's bucket once the clock, the temperature and a
+    /// shrinking book agree.
+    #[serde(default)]
+    pub book_confirmed: BookConfirmedConfig,
     pub unwind: UnwindConfig,
     pub evaluate_on_book_updates: bool,
     pub decision_log_capacity: usize,
@@ -203,6 +207,7 @@ impl Engine {
             Box::new(BuyYesFinalHigh::new(cfg.buy_yes.clone())),
             Box::new(BuyNoAboveHigh::new(cfg.buy_no.clone())),
             Box::new(SplitUnwind::new(cfg.split_unwind.clone())),
+            Box::new(BookConfirmedHigh::new(cfg.book_confirmed.clone())),
         ];
         let risk = RiskEngine::new(cfg.risk.clone(), &cfg.run_id);
         let unwind = UnwindEngine::new(cfg.unwind.clone());
@@ -394,6 +399,9 @@ impl Engine {
             WeatherMachineEvent::OrderBookUpdate(b) => {
                 let token = b.book.token.clone();
                 self.books.insert(token.clone(), b.book.clone());
+                for s in self.strategies.iter_mut().filter(|s| s.enabled()) {
+                    s.observe_book(&b.book);
+                }
                 if self.cfg.evaluate_on_book_updates
                     && let Some(loc) = self
                         .token_index

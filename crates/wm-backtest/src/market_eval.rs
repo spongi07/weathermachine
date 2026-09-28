@@ -37,7 +37,7 @@
 
 use crate::forecast_eval::{ForecastHistory, ratio_ci};
 use crate::market_sim::{
-    self, DayTimeline, Decision, MarketSimConfig, Quote, SimTrade, StrategyRow,
+    self, DayTimeline, Decision, Flow, MarketSimConfig, Quote, SimTrade, StrategyRow,
 };
 use crate::research::wilson;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -389,6 +389,39 @@ fn quote(trades: &[&MarketTrade], at: DateTime<Utc>, max_age: Duration) -> Quote
     }
 }
 
+/// Taker flow on one bucket's YES in `(at − lookback, at]`: shares bought at
+/// or below `cap` and sold, and the ask proxy when the lookback began (the
+/// latest buy then, at most `max_age` old, else the first buy after it).
+fn flow(
+    trades: &[&MarketTrade],
+    at: DateTime<Utc>,
+    lookback: Duration,
+    max_age: Duration,
+    cap: f64,
+) -> Flow {
+    let start = at - lookback;
+    let lo = trades.partition_point(|t| t.at <= start);
+    let hi = trades.partition_point(|t| t.at <= at).max(lo);
+    let window = &trades[lo..hi];
+    let mut f = Flow {
+        ask_then: quote(trades, start, max_age).yes_ask.or_else(|| {
+            window
+                .iter()
+                .find(|t| t.taker_buys_yes)
+                .map(|t| t.yes_price)
+        }),
+        ..Flow::default()
+    };
+    for t in window {
+        if !t.taker_buys_yes {
+            f.sold += t.shares;
+        } else if t.yes_price <= cap + 1e-12 {
+            f.bought += t.shares;
+        }
+    }
+    f
+}
+
 /// Delay bins of the latency table (seconds after the observation).
 const LATENCY_BINS: [(&str, i64, i64); 6] = [
     (
@@ -556,6 +589,7 @@ pub fn market_study(
                         &md.labels[md.winner],
                         &decisions,
                         &trades,
+                        &cfg.sim,
                         cfg.tz,
                     ));
                 }
@@ -645,6 +679,7 @@ fn decisions(
     cfg: &MarketStudyConfig,
 ) -> Vec<Decision> {
     let per_bucket = trades_by_bucket(md, cfg.min_trade_shares);
+    let lookback = Duration::minutes(cfg.sim.e.lookback_minutes.max(1));
     states
         .iter()
         .filter(|(_, f)| f.local_minute_now >= cfg.first_decision_minute)
@@ -656,6 +691,18 @@ fn decisions(
                 quotes: per_bucket
                     .iter()
                     .map(|tr| quote(tr, knowledge, cfg.max_price_age))
+                    .collect(),
+                flows: per_bucket
+                    .iter()
+                    .map(|tr| {
+                        flow(
+                            tr,
+                            knowledge,
+                            lookback,
+                            cfg.max_price_age,
+                            cfg.sim.e.max_price,
+                        )
+                    })
                     .collect(),
                 f: f.clone(),
             }
@@ -1723,7 +1770,8 @@ mod tests {
         let mut c = cfg();
         c.timeline_days = vec![replay_day, date(2031, 1, 1)];
         let r = market_study(&obs, None, &days, &c);
-        assert_eq!(r.strategies.len(), 2 * 2 * 3 * 2);
+        // Per structure: A and B × 3 windows × 2 ranges, and E's 3 variants.
+        assert_eq!(r.strategies.len(), 2 * (2 * 3 * 2 + 3));
         let row = |structure: &str, strategy: &str, window: u32, range: &str| {
             r.strategies
                 .iter()
@@ -1816,6 +1864,140 @@ mod tests {
         ] {
             assert!(md.contains(section), "missing {section}\n{md}");
         }
+    }
+
+    #[test]
+    fn strategy_e_is_replayed_with_its_book_stand_in() {
+        use chrono::Timelike;
+        let (obs, highs) = history();
+        // The high's bucket trades at 0.95 all day. On even days takers buy
+        // far more than they sell from noon on (buyers lift the offers); on
+        // odd days buying and selling balance (no book signal).
+        let mut days: Vec<MarketDay> = last_days(&highs, 30)
+            .into_iter()
+            .map(|(d, h)| market_day(d, h, &|i, w| if i == w { 0.95 } else { 0.01 }))
+            .collect();
+        let mut lifting = HashSet::new();
+        for (k, md) in days.iter_mut().enumerate() {
+            if k % 2 == 1 {
+                continue;
+            }
+            lifting.insert(md.date);
+            for t in md
+                .trades
+                .iter_mut()
+                .filter(|t| t.bucket == md.winner && t.at.with_timezone(&TZ).hour() >= 12)
+            {
+                t.shares = if t.taker_buys_yes { 60.0 } else { 5.0 };
+            }
+        }
+        let replay_day = days[0].date;
+        let mut c = cfg();
+        // The synthetic afternoon cools 1 °C only late: a wider window.
+        c.sim.e.end_local_minute = 23 * 60;
+        c.timeline_days = vec![replay_day];
+        let r = market_study(&obs, None, &days, &c);
+        let row = |strategy: &str| {
+            r.strategies
+                .iter()
+                .find(|x| x.structure == "current" && x.strategy == strategy)
+                .unwrap()
+        };
+        let (e, no_book, model) = (row("E"), row("E w/o book"), row("E + model"));
+        assert!(e.live && !no_book.live && !model.live);
+        assert_eq!((e.window, e.range.as_str()), (60, "0.90–0.99"));
+        assert!(e.trades >= 5, "{e:?}");
+        assert!(no_book.trades > e.trades, "{no_book:?} vs {e:?}");
+        assert!(model.trades <= e.trades);
+        let trades = |strategy: &str| -> Vec<&SimTrade> {
+            r.sim_trades
+                .iter()
+                .filter(|t| t.structure == "current" && t.strategy == strategy)
+                .collect()
+        };
+        // E trades only where buyers lifted the offers; each at the ask
+        // proxy, on the high's bucket, after the high was 60′ old and 1 °C
+        // lower, inside the window.
+        let fee = |p: f64| 0.05 * p * (1.0 - p);
+        let won = 10.0 / 0.952 * (1.0 - 0.952 - fee(0.952) - 0.005);
+        for t in trades("E") {
+            assert!(lifting.contains(&t.date), "{t:?}");
+            assert_eq!((t.side.as_str(), t.price, t.won), ("YES", 0.952, true));
+            assert!((t.pnl_usd - won).abs() < 1e-9);
+            assert!(t.report.as_str() >= "12:00" && t.report.as_str() < "23:00");
+            assert!(t.p_used <= t.p_model + 1e-12);
+        }
+        assert!(
+            trades("E w/o book")
+                .iter()
+                .any(|t| !lifting.contains(&t.date))
+        );
+        assert!(trades("E + model").iter().all(|t| t.p_model >= 0.90));
+        // One trade per day and bucket per variant.
+        let mut seen = HashSet::new();
+        assert!(
+            trades("E w/o book")
+                .iter()
+                .all(|t| seen.insert((t.date, t.bucket.clone())))
+        );
+        assert!(
+            r.strategy_verdict
+                .iter()
+                .any(|v| v.starts_with("Strategy E (12:00–23:00 local")),
+            "{:?}",
+            r.strategy_verdict
+        );
+        // The replayed day shows the stand-in: bought / sold over 30′.
+        let t = &r.timelines[0];
+        assert_eq!(t.flow_minutes, 30);
+        let afternoon = t
+            .rows
+            .iter()
+            .find(|x| x.report.as_str() >= "13:00")
+            .unwrap();
+        assert!(afternoon.bought_high.unwrap() >= 120.0, "{afternoon:?}");
+        assert!(afternoon.sold_high.unwrap() <= 15.0, "{afternoon:?}");
+        let md = r.to_markdown();
+        for section in [
+            "Strategy E buys YES on the bucket holding the high",
+            "| E **live** | current | 60′ | 0.90–0.99 |",
+            "| E w/o book | current | 60′ | 0.90–0.99 |",
+            "| bought / sold |",
+        ] {
+            assert!(md.contains(section), "missing {section}\n{md}");
+        }
+    }
+
+    #[test]
+    fn taker_flow_counts_the_lookback_and_the_ask_it_began_with() {
+        let t0 = local(date(2026, 7, 1), 15, 0);
+        let m = |mins: i64| t0 + Duration::minutes(mins);
+        let owned = [
+            trade(m(-45), 0, 0.93, true, 50.0, "a"),
+            trade(m(-20), 0, 0.94, true, 30.0, "b"),
+            trade(m(-10), 0, 0.92, false, 10.0, "c"),
+            trade(m(-5), 0, 0.995, true, 99.0, "d"),
+            trade(m(0), 0, 0.95, true, 20.0, "e"),
+            trade(m(1), 0, 0.96, true, 500.0, "f"),
+        ];
+        let v: Vec<&MarketTrade> = owned.iter().collect();
+        let f = flow(&v, t0, Duration::minutes(30), Duration::minutes(60), 0.99);
+        // In (14:30, 15:00]: 30 + 20 bought at ≤ 0.99 (0.995 is above the cap,
+        // 15:01 is after the decision), 10 sold; the ask at 14:30 was 0.93.
+        assert!((f.bought - 50.0).abs() < 1e-9 && (f.sold - 10.0).abs() < 1e-9);
+        assert_eq!(f.ask_then, Some(0.93));
+        // Without a buy before the lookback, its first buy is the ask then.
+        let f = flow(&v, t0, Duration::minutes(30), Duration::minutes(10), 0.99);
+        assert_eq!(f.ask_then, Some(0.94));
+        // Nothing traded: nothing known.
+        let f = flow(
+            &v,
+            m(-60),
+            Duration::minutes(10),
+            Duration::minutes(60),
+            0.99,
+        );
+        assert_eq!(f, Flow::default());
     }
 
     #[test]
