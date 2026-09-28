@@ -33,6 +33,20 @@ pub struct DtoInputs<'a> {
     pub no_pooling: Pooling,
 }
 
+/// The per-bucket lines of a routine evaluation (`outputs.evaluations`).
+fn evaluation_lines(outputs: &serde_json::Value) -> Vec<String> {
+    outputs
+        .get("evaluations")
+        .and_then(serde_json::Value::as_array)
+        .map(|lines| {
+            lines
+                .iter()
+                .filter_map(|l| l.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn ms(t: DateTime<Utc>) -> i64 {
     t.timestamp_millis()
 }
@@ -494,6 +508,7 @@ pub fn build(
             summary: d.summary.clone(),
             approved: d.approved,
             reasons: d.reasons.clone(),
+            details: evaluation_lines(&d.outputs),
         })
         .collect();
 
@@ -675,6 +690,25 @@ pub fn build(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn evaluation_lines_reach_the_dashboard() {
+        let out = serde_json::json!({ "evaluations": [
+            "A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge",
+            7,
+            "D 20°C NO · no ask — no ask"
+        ]});
+        assert_eq!(
+            super::evaluation_lines(&out),
+            vec![
+                "A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge"
+                    .to_owned(),
+                "D 20°C NO · no ask — no ask".to_owned()
+            ]
+        );
+        assert!(super::evaluation_lines(&serde_json::json!({ "risk": [] })).is_empty());
+        assert!(super::evaluation_lines(&serde_json::json!(null)).is_empty());
+    }
+
     #[test]
     fn dashboard_windows_match_the_kernel() {
         assert_eq!(

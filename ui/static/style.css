@@ -192,6 +192,10 @@ td.ask { color: var(--ask); }
 .pbar .implied { position: absolute; left: 0; top: 0; height: 3px; background: #6a778c; }
 .pbar .model { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--info); }
 .reason { color: var(--muted); font-size: 11px; }
+.eval-lines { margin-top: 2px; font-size: 11px; color: var(--muted); }
+.eval-lines summary { cursor: pointer; }
+.eval-lines ul { margin: 4px 0 2px 16px; padding: 0; }
+.eval-lines li { margin: 1px 0; font-family: var(--mono, ui-monospace, monospace); white-space: normal; }
 dl.kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 10px; margin: 0 0 8px; font-size: 12px; }
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; min-width: 0; }

@@ -817,12 +817,21 @@ fn DecisionLog(snap: Snap) -> impl IntoView {
                         .iter()
                         .map(|r| view! { <div class="reason">{r.clone()}</div> })
                         .collect::<Vec<_>>();
+                    let details = (!d.details.is_empty()).then(|| {
+                        let lines = d.details.iter().map(|l| view! { <li>{l.clone()}</li> }).collect::<Vec<_>>();
+                        view! {
+                            <details class="eval-lines">
+                                <summary>{format!("why — {} line(s): price, probability used, EV, blocker", d.details.len())}</summary>
+                                <ul>{lines}</ul>
+                            </details>
+                        }
+                    });
                     view! {
                         <tr>
                             <td class="mono small muted">{format!("#{}", d.id)}</td>
                             <td class="small muted">{fmt::utc_time(d.at_ms)}</td>
                             <td class=class>{label}</td>
-                            <td><div>{d.summary.clone()}</div>{reasons}</td>
+                            <td><div>{d.summary.clone()}</div>{reasons}{details}</td>
                         </tr>
                     }
                 })

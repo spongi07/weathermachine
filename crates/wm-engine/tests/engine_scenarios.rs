@@ -682,6 +682,33 @@ fn a_new_high_is_traded_on_the_observation_event_itself() {
         .collect();
     assert_eq!(pos.len(), 1);
     assert_eq!(pos[0].instrument.token, no16);
+    // The audit log says why, with the numbers: each line carries the price,
+    // the probability used and the EV, and the summary names the closest call.
+    let eval = decided
+        .decisions
+        .iter()
+        .find(|d| d.strategy.as_str() == "evaluation")
+        .expect("routine evaluation recorded");
+    // 1 − 0.75 − fee 0.05·0.75·0.25 − slippage 0.002 = 0.2386
+    let d_line = "D 16°C NO · ask 0.75 · p 1.000 (market 0.725) · EV +0.2386 — SIGNAL";
+    assert!(
+        eval.summary.ends_with(&format!("closest: {d_line}")),
+        "{}",
+        eval.summary
+    );
+    let lines: Vec<&str> = eval.outputs["evaluations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l.as_str())
+        .collect();
+    assert!(lines.contains(&d_line), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("D 15°C NO · no ask") && l.ends_with("— no order book")),
+        "{lines:?}"
+    );
 
     // The same book from an earlier connection (reconnected at 10:57:40) is
     // not confirmed: 30 s old, stale, no trade.

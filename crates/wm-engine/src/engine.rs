@@ -722,32 +722,30 @@ impl Engine {
 
         if from_weather {
             let id = self.alloc_decision();
-            let blockers: Vec<String> = evaluations
+            let blockers: Vec<String> = evaluations.iter().map(evaluation_line).collect();
+            // The bucket that came closest to a trade: the highest EV.
+            let closest = evaluations
                 .iter()
-                .map(|e| {
-                    format!(
-                        "{} {} {}: {}",
-                        e.strategy,
-                        e.bucket_label,
-                        e.outcome_side.as_str(),
-                        if e.signal {
-                            "SIGNAL".to_owned()
-                        } else {
-                            e.blockers.join("; ")
-                        }
-                    )
-                })
-                .collect();
+                .filter_map(|e| e.ev_per_share.map(|ev| (ev, e)))
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, e)| e);
             let rec = DecisionRecord {
                 decision_id: id,
                 strategy: StrategyId::from_static("evaluation"),
                 at: self.now,
                 location: loc.location.clone(),
                 event_slug: Some(market.event_slug.clone()),
-                summary: if complete {
-                    format!("evaluated {} bucket(s)", evaluations.len())
-                } else {
-                    "resolution views incomplete — no trading".to_owned()
+                summary: match (complete, closest) {
+                    (false, _) => "resolution views incomplete — no trading".to_owned(),
+                    (true, Some(e)) => format!(
+                        "evaluated {} bucket(s); closest: {}",
+                        evaluations.len(),
+                        evaluation_line(e)
+                    ),
+                    (true, None) => format!(
+                        "evaluated {} bucket(s); none had both a price and a probability",
+                        evaluations.len()
+                    ),
                 },
                 inputs: serde_json::json!({ "views": views.iter().map(|v| serde_json::json!({
                     "view": v.view.label(),
@@ -1035,4 +1033,39 @@ impl Engine {
             decisions: self.decisions.iter().rev().take(100).cloned().collect(),
         }
     }
+}
+
+/// Strategy tag for audit lines: the id up to its first `_` ("A", "B", "D").
+fn strategy_tag(s: &StrategyId) -> &str {
+    s.as_str().split('_').next().unwrap_or(s.as_str())
+}
+
+/// One audit line per bucket evaluation, with the numbers behind the verdict:
+/// `A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge …`.
+fn evaluation_line(e: &BucketEvaluation) -> String {
+    let price = e
+        .ask
+        .map_or_else(|| "no ask".to_owned(), |a| format!("ask {a}"));
+    let p = match (e.p_win, e.model_p, e.market_p) {
+        (Some(pw), Some(m), Some(k)) if (pw - m).abs() > 1e-9 => {
+            format!(" · p {pw:.3} (model {m:.3}, market {k:.3})")
+        }
+        (Some(pw), _, Some(k)) => format!(" · p {pw:.3} (market {k:.3})"),
+        (Some(pw), _, None) => format!(" · p {pw:.3}"),
+        (None, ..) => String::new(),
+    };
+    let ev = e
+        .ev_per_share
+        .map_or_else(String::new, |v| format!(" · EV {v:+.4}"));
+    let verdict = if e.signal {
+        "SIGNAL".to_owned()
+    } else {
+        e.blockers.join("; ")
+    };
+    format!(
+        "{} {} {} · {price}{p}{ev} — {verdict}",
+        strategy_tag(&e.strategy),
+        e.bucket_label,
+        e.outcome_side.as_str()
+    )
 }

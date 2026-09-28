@@ -345,6 +345,10 @@ pub struct DecisionDto {
     pub summary: String,
     pub approved: bool,
     pub reasons: Vec<String>,
+    /// Routine evaluations: one line per strategy and bucket with the price,
+    /// the probability used, the EV and what blocked it.
+    #[serde(default)]
+    pub details: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
