@@ -159,6 +159,13 @@ Settled days are cached under `research/polymarket/<STATION>/` and never
 downloaded again. Wallets are stored as short hashes, used only to count
 distinct traders.
 
+A throttled or transiently failing request (429, 5xx, timeout) is tried up
+to five times. The provider gate spaces the attempts by the server's
+Retry-After and its own backoff, and slows down afterwards. A day that still
+fails is listed as skipped and nothing of it is cached, so the next run asks
+again. After three failed days in a row no further days are requested, and
+the days downloaded so far are studied.
+
 **METHOD (`wm-backtest::market_eval`).**
 
 * **Prequential replay.** The history is replayed with the live state, peak

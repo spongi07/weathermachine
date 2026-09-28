@@ -26,6 +26,9 @@ pub const MAX_OFFSET: u32 = 10_000;
 /// Upper bound on requests for one query (guards against an API that
 /// ignores the window and would make splitting endless).
 const MAX_REQUESTS: u32 = 100;
+/// Attempts per page when the API throttles or fails transiently (the gate
+/// spaces them by the server's Retry-After and the policy's backoff).
+pub const PAGE_ATTEMPTS: u32 = 5;
 
 /// One executed trade as reported (taker side).
 #[derive(Debug, Clone, PartialEq)]
@@ -154,7 +157,8 @@ impl DataApiClient {
         }
     }
 
-    /// One page of taker trades of `markets` within `[start, end]` (seconds).
+    /// One page of taker trades of `markets` within `[start, end]` (seconds),
+    /// retried while the failure is transient (throttling, 5xx, timeouts).
     pub async fn trades_page(
         &self,
         markets: &[ConditionId],
@@ -175,7 +179,7 @@ impl DataApiClient {
             .accept("application/json")
             .unconditional()
             .max_gate_wait(max_gate_wait);
-        let resp = self.fetcher.get(&req).await?;
+        let resp = self.fetcher.get_retrying(&req, PAGE_ATTEMPTS).await?;
         parse_trades(&resp.body).map_err(DataApiError::Malformed)
     }
 

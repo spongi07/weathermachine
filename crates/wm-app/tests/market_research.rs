@@ -384,3 +384,129 @@ async fn no_settled_market_is_an_error() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_day_whose_trades_keep_failing_is_skipped_and_the_rest_studied() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    // 11 April's trades fail on every attempt.
+    let bad = d(2025, 4, 11);
+    let conds: Vec<String> = buckets(bad, highs[&bad]).into_iter().map(|b| b.2).collect();
+    Mock::given(method("GET"))
+        .and(path("/trades"))
+        .and(query_param("market", conds.join(",").as_str()))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .expect(u64::from(wm_polymarket::data::PAGE_ATTEMPTS))
+        .mount(&s.data)
+        .await;
+    let dir = tempdir("flaky");
+    let plan = plan(&dir);
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let data = DataApiClient::new(fetcher(ProviderId::polymarket_data(), 2), s.data.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let now = at(d(2025, 4, 19), 12, 0);
+    let o = market_research::run(&clients, &plan, now, &|_| {}, &mut stop_rx)
+        .await
+        .unwrap();
+    // The other settled days (10 and 12 April) are still studied.
+    assert_eq!(o.report.market_days, 2);
+    assert_eq!(o.report.scored_days, 2, "{:?}", o.report.skipped_days);
+    let (_, why) = o.unavailable.iter().find(|(day, _)| *day == bad).unwrap();
+    assert!(
+        why.starts_with("download failed (rerun to retry)") && why.contains("503"),
+        "{why}"
+    );
+    // Nothing of the failed day is cached, so a rerun asks for it again.
+    let slug = event_slug(TEMPLATE, bad);
+    assert!(!plan.cache_dir.join(format!("{slug}.trades.json")).exists());
+    assert!(!plan.cache_dir.join(format!("{slug}.event.json")).exists());
+    let md = std::fs::read_to_string(&o.markdown).unwrap();
+    assert!(
+        md.contains("2025-04-11: download failed (rerun to retry)"),
+        "{md}"
+    );
+}
+
+#[tokio::test]
+async fn downloads_stop_after_three_failed_days_in_a_row() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    Mock::given(method("GET"))
+        .and(path("/trades"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&s.data)
+        .await;
+    let dir = tempdir("down");
+    let plan = plan(&dir);
+    // Backoff only (no circuit), kept short so the retries run fast.
+    let mut policy = RateLimitPolicy::local_test();
+    policy.min_interval = Duration::milliseconds(1).to_std().unwrap();
+    policy.max_body_bytes = 16 * 1024 * 1024;
+    policy.circuit_failure_threshold = 1_000;
+    policy.backoff_max = Duration::milliseconds(100).to_std().unwrap();
+    let gate = ProviderGate::new(
+        ProviderId::polymarket_data(),
+        policy,
+        Arc::new(SystemClock::new()),
+        2,
+    );
+    let data = DataApiClient::new(
+        Arc::new(HttpFetcher::new(gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap()),
+        s.data.uri(),
+    );
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let err = market_research::run(
+        &clients,
+        &plan,
+        at(d(2025, 4, 19), 12, 0),
+        &|_| {},
+        &mut stop_rx,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("could be downloaded: 3 failed even after retries"),
+        "{err}"
+    );
+    // 10, 11 and 12 April failed; 13 and 14 April were not asked for.
+    let asked: Vec<String> = s
+        .gamma
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "slug")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        [10, 11, 12]
+            .map(|day| event_slug(TEMPLATE, d(2025, 4, day)))
+            .to_vec()
+    );
+    let trade_calls = s.data.received_requests().await.unwrap().len();
+    assert_eq!(trade_calls, 3 * wm_polymarket::data::PAGE_ATTEMPTS as usize);
+    assert!(s.iem.received_requests().await.unwrap().is_empty());
+}

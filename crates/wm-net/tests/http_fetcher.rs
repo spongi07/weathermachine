@@ -398,3 +398,72 @@ async fn client_errors_carry_the_reason_but_never_the_url() {
     let text = format!("{err} {err:?}");
     assert!(!text.contains("SECRET-KEY-123"), "{text}");
 }
+
+#[tokio::test]
+async fn retrying_waits_out_a_throttle_then_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/t"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/t"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let started = std::time::Instant::now();
+    let r = f
+        .get_retrying(&req(&server, "/t").max_gate_wait(Duration::from_secs(5)), 3)
+        .await
+        .unwrap();
+    assert_eq!(&r.body[..], b"ok");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "the gate held the retry for Retry-After: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(f.gate().stats().throttled_total, 1);
+}
+
+#[tokio::test]
+async fn retrying_stops_after_its_attempts_and_never_repeats_client_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/down"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut policy = RateLimitPolicy::local_test();
+    policy.circuit_failure_threshold = 100;
+    let f = fetcher(policy);
+    let wait = Duration::from_secs(10);
+    let err = f
+        .get_retrying(&req(&server, "/down").max_gate_wait(wait), 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FetchError::Status { status: 503, .. }));
+    assert!(err.is_transient());
+    let err = f
+        .get_retrying(&req(&server, "/missing").max_gate_wait(wait), 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FetchError::Status { status: 404, .. }));
+    assert!(!err.is_transient());
+    // A gate that stays closed longer than the caller waits is not retried.
+    let err = f
+        .get_retrying(&req(&server, "/down").max_gate_wait(Duration::ZERO), 3)
+        .await;
+    assert!(err.is_err());
+}

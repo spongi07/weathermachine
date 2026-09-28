@@ -40,6 +40,14 @@ const MAX_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 6
 /// Trades are read from this long before the local day starts.
 const TRADES_BEFORE_DAY: Duration = Duration::hours(6);
 
+/// Attempts per Gamma lookup while the failure is transient (the gate spaces
+/// them by the server's Retry-After and its own backoff).
+const GAMMA_ATTEMPTS: u32 = 5;
+
+/// Downloads stop after this many market days in a row failed even after
+/// retries: the source is down, and the days so far are studied.
+const MAX_FAILED_DAYS_IN_A_ROW: u32 = 3;
+
 /// Everything one study needs.
 #[derive(Debug, Clone)]
 pub struct MarketResearchPlan {
@@ -199,7 +207,7 @@ async fn market_day(
         Some(e) if from_cache => e,
         _ => {
             let (events, body) = gamma
-                .events_by_slug(&slug, MAX_GATE_WAIT)
+                .events_by_slug_attempts(&slug, MAX_GATE_WAIT, GAMMA_ATTEMPTS)
                 .await
                 .with_context(|| format!("Gamma event {slug}"))?;
             (events, body.to_vec())
@@ -283,6 +291,7 @@ pub async fn run(
     let mut days = Vec::new();
     let mut unavailable = Vec::new();
     let (mut cached, mut downloaded) = (0u32, 0u32);
+    let mut failed_in_a_row = 0u32;
     for (i, &date) in dates.iter().enumerate() {
         if *shutdown.borrow() {
             bail!("shutting down");
@@ -292,9 +301,37 @@ pub async fn run(
             done: u32::try_from(i).unwrap_or(u32::MAX),
             total,
         });
-        let (day, from_cache) = tokio::select! {
-            r = market_day(clients.gamma, clients.data, plan, date, now) => r?,
+        let fetched = tokio::select! {
+            r = market_day(clients.gamma, clients.data, plan, date, now) => r,
             _ = shutdown.changed() => bail!("shutting down"),
+        };
+        // A day that still fails after the retries is skipped, not fatal:
+        // nothing of it is cached, so the next run asks for it again.
+        let (day, from_cache) = match fetched {
+            Ok(r) => {
+                failed_in_a_row = 0;
+                r
+            }
+            Err(e) => {
+                let why = format!("{e:#}");
+                tracing::warn!(%date, error = %why, "market day skipped: download failed after retries");
+                unavailable.push((date, format!("download failed (rerun to retry): {why}")));
+                failed_in_a_row += 1;
+                if failed_in_a_row >= MAX_FAILED_DAYS_IN_A_ROW {
+                    tracing::warn!(
+                        failed_in_a_row,
+                        "Polymarket keeps failing: no further days are requested"
+                    );
+                    for &rest in &dates[i + 1..] {
+                        unavailable.push((
+                            rest,
+                            "not requested: the previous days' downloads kept failing".into(),
+                        ));
+                    }
+                    break;
+                }
+                continue;
+            }
         };
         match day {
             Ok(d) => {
@@ -309,6 +346,17 @@ pub async fn run(
         }
     }
     if days.is_empty() {
+        let failed = unavailable
+            .iter()
+            .filter(|(_, why)| why.starts_with("download failed"))
+            .count();
+        if failed > 0 {
+            bail!(
+                "no market day between {} and {} could be downloaded: {failed} failed even after retries (the reasons are logged above); rerun later",
+                plan.from,
+                plan.to
+            );
+        }
         bail!(
             "no settled market between {} and {} (check the slug template '{}')",
             plan.from,

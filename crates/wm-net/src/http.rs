@@ -136,6 +136,21 @@ impl FetchError {
     pub fn is_throttled(&self) -> bool {
         matches!(self, FetchError::Throttled { .. })
     }
+
+    /// Worth another attempt once the gate reopens: throttling, a server
+    /// error, a timeout, a failed connection or a broken transfer. A closed
+    /// gate (a wait longer than the caller allows), a client error or an
+    /// oversized body is not.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            FetchError::Throttled { .. }
+            | FetchError::Timeout { .. }
+            | FetchError::Connect { .. }
+            | FetchError::Transport { .. } => true,
+            FetchError::Status { status, .. } => *status >= 500,
+            FetchError::GateClosed(_) | FetchError::BodyTooLarge { .. } => false,
+        }
+    }
 }
 
 /// HTTP client bound to exactly one provider gate.
@@ -200,6 +215,29 @@ impl HttpFetcher {
 
     fn count(&self, name: &str) {
         metrics::counter!(self.metric(name), "provider" => self.provider.to_string()).increment(1);
+    }
+
+    /// [`get`](Self::get), attempted up to `attempts` times in total while
+    /// the failure [is transient](FetchError::is_transient). Every attempt
+    /// passes the gate, which first waits out the server's Retry-After and
+    /// the policy's backoff (within the request's `max_gate_wait`), so
+    /// retries never outpace the provider. For batch research downloads;
+    /// live polling does not retry, it polls again on its own schedule.
+    pub async fn get_retrying(
+        &self,
+        req: &FetchRequest,
+        attempts: u32,
+    ) -> Result<FetchResponse, FetchError> {
+        let mut attempt = 1;
+        loop {
+            match self.get(req).await {
+                Err(e) if e.is_transient() && attempt < attempts => {
+                    tracing::info!(provider = %self.provider, endpoint = %req.endpoint, attempt, attempts, error = %e, "transient failure: retrying once the gate reopens");
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Perform a GET through the gate.

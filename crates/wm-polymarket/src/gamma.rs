@@ -297,11 +297,23 @@ impl GammaClient {
         slug: &str,
         max_gate_wait: Duration,
     ) -> Result<(Vec<GammaEvent>, bytes::Bytes), GammaError> {
+        self.events_by_slug_attempts(slug, max_gate_wait, 1).await
+    }
+
+    /// [`events_by_slug`](Self::events_by_slug) with up to `attempts`
+    /// attempts while the failure is transient (batch research; live
+    /// discovery asks again on its own schedule instead).
+    pub async fn events_by_slug_attempts(
+        &self,
+        slug: &str,
+        max_gate_wait: Duration,
+        attempts: u32,
+    ) -> Result<(Vec<GammaEvent>, bytes::Bytes), GammaError> {
         let endpoint = format!("/events?slug={slug}");
         let req = FetchRequest::get(format!("{}{}", self.base_url, endpoint), endpoint)
             .accept("application/json")
             .max_gate_wait(max_gate_wait);
-        let resp = self.fetcher.get(&req).await?;
+        let resp = self.fetcher.get_retrying(&req, attempts).await?;
         let events = parse_events(&resp.body).map_err(GammaError::Malformed)?;
         Ok((events, resp.body))
     }

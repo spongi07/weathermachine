@@ -191,3 +191,54 @@ async fn nothing_to_ask_for_makes_no_request() {
         .unwrap();
     assert_eq!(h.requests, 0);
 }
+
+#[tokio::test]
+async fn a_throttled_page_is_waited_out_and_read_again() {
+    // 8 June 2026: a single 429 with Retry-After 1 s ended a whole study.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/trades"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let row = record(3, S0 + 60);
+    Mock::given(method("GET"))
+        .and(path("/trades"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!("[{row}]")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let started = std::time::Instant::now();
+    let h = client(&server)
+        .trades(&markets(), at(S0), at(E0), Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        (h.trades.len(), h.requests),
+        (1, 1),
+        "one page, two attempts"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "Retry-After honoured: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_page_that_keeps_failing_gives_up_after_its_attempts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/trades"))
+        .respond_with(ResponseTemplate::new(502))
+        .expect(u64::from(wm_polymarket::data::PAGE_ATTEMPTS))
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .trades(&markets(), at(S0), at(E0), Duration::from_secs(30))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("502"), "{err}");
+}
