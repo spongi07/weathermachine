@@ -106,18 +106,47 @@ pub struct StructureComparison {
     pub verdict: String,
 }
 
+/// Log loss of the observed class and P(high is final) of one prediction.
+#[derive(Debug, Clone, Copy)]
+struct Pred {
+    ll: f64,
+    p_final: f64,
+}
+
+impl Pred {
+    fn of(probs: &[f64], k: usize) -> Self {
+        Self {
+            ll: logloss(probs, k),
+            p_final: p_final(probs),
+        }
+    }
+}
+
 /// One scored report: each structure's prediction without and with its
 /// forecast input (the latter only when the model has a refinement level).
-#[derive(Debug, Clone)]
+/// Only the scores are kept, not the distributions: a long history has
+/// over a hundred thousand of these.
+#[derive(Debug, Clone, Copy)]
 struct Point {
     date: NaiveDate,
-    k: usize,
+    is_final: bool,
     hour: &'static str,
     retested: bool,
-    current: Vec<f64>,
-    current_fc: Option<Vec<f64>>,
-    candidate: Vec<f64>,
-    candidate_fc: Option<Vec<f64>>,
+    current: Pred,
+    current_fc: Option<Pred>,
+    candidate: Pred,
+    candidate_fc: Option<Pred>,
+}
+
+/// A report as compared: the predictions the service would have used.
+#[derive(Debug, Clone, Copy)]
+struct Scored {
+    date: NaiveDate,
+    is_final: bool,
+    hour: &'static str,
+    retested: bool,
+    cur: Pred,
+    cand: Pred,
 }
 
 /// Collects reports during the prequential pass.
@@ -158,21 +187,22 @@ impl Comparer {
         else {
             return;
         };
+        let k = (increment.max(0) as usize).min(c.probs.len().min(d.probs.len()).saturating_sub(1));
         let refined = |m: &EmpiricalPeakModel| {
             m.uses_forecast()
-                .then(|| m.distribution(f).map(|x| x.probs))
+                .then(|| m.distribution(f))
                 .flatten()
+                .map(|x| Pred::of(&x.probs, k))
         };
-        let k = (increment.max(0) as usize).min(c.probs.len().min(d.probs.len()).saturating_sub(1));
         self.points.push(Point {
             date,
-            k,
+            is_final: k == 0,
             hour: hour_bucket_fine(f.local_minute_now),
             retested: f.retests > 0,
+            current: Pred::of(&c.probs, k),
             current_fc: refined(current),
+            candidate: Pred::of(&d.probs, k),
             candidate_fc: refined(candidate),
-            current: c.probs,
-            candidate: d.probs,
         });
     }
 
@@ -184,37 +214,32 @@ impl Comparer {
         candidate_forecast: bool,
     ) -> StructureComparison {
         let cfg = &self.cfg;
-        let pick = |base: &[f64], fc: &Option<Vec<f64>>, use_fc: bool| -> Vec<f64> {
-            match fc {
-                Some(v) if use_fc => v.clone(),
-                _ => base.to_vec(),
-            }
+        let pick = |base: Pred, fc: Option<Pred>, use_fc: bool| match fc {
+            Some(v) if use_fc => v,
+            _ => base,
         };
-        struct Scored<'a> {
-            p: &'a Point,
-            cur: Vec<f64>,
-            cand: Vec<f64>,
-        }
-        let scored: Vec<Scored<'_>> = self
+        let scored: Vec<Scored> = self
             .points
             .iter()
             .map(|p| Scored {
-                p,
-                cur: pick(&p.current, &p.current_fc, current_forecast),
-                cand: pick(&p.candidate, &p.candidate_fc, candidate_forecast),
+                date: p.date,
+                is_final: p.is_final,
+                hour: p.hour,
+                retested: p.retested,
+                cur: pick(p.current, p.current_fc, current_forecast),
+                cand: pick(p.candidate, p.candidate_fc, candidate_forecast),
             })
             .collect();
         let mut per_day: BTreeMap<NaiveDate, (f64, f64)> = BTreeMap::new();
         let (mut ll_c, mut ll_d, mut br_c, mut br_d) = (0.0, 0.0, 0.0, 0.0);
         for s in &scored {
-            let (a, b) = (logloss(&s.cur, s.p.k), logloss(&s.cand, s.p.k));
-            ll_c += a;
-            ll_d += b;
-            let y = if s.p.k == 0 { 1.0 } else { 0.0 };
-            br_c += (p_final(&s.cur) - y).powi(2);
-            br_d += (p_final(&s.cand) - y).powi(2);
-            let e = per_day.entry(s.p.date).or_insert((0.0, 0.0));
-            e.0 += b - a;
+            ll_c += s.cur.ll;
+            ll_d += s.cand.ll;
+            let y = if s.is_final { 1.0 } else { 0.0 };
+            br_c += (s.cur.p_final - y).powi(2);
+            br_d += (s.cand.p_final - y).powi(2);
+            let e = per_day.entry(s.date).or_insert((0.0, 0.0));
+            e.0 += s.cand.ll - s.cur.ll;
             e.1 += 1.0;
         }
         let n = scored.len() as f64;
@@ -242,21 +267,20 @@ impl Comparer {
         };
 
         let mut rows = Vec::new();
-        let mut group = |name: String, members: Vec<&Scored<'_>>| {
+        let mut group = |name: String, members: Vec<&Scored>| {
             if members.is_empty() {
                 return;
             }
             let m = members.len() as f64;
-            let avg =
-                |f: &dyn Fn(&Scored<'_>) -> f64| members.iter().map(|s| f(s)).sum::<f64>() / m;
+            let avg = |f: &dyn Fn(&Scored) -> f64| members.iter().map(|s| f(s)).sum::<f64>() / m;
             rows.push(StructureRow {
                 group: name,
                 points: members.len() as u64,
-                logloss_current: avg(&|s| logloss(&s.cur, s.p.k)),
-                logloss_candidate: avg(&|s| logloss(&s.cand, s.p.k)),
-                mean_p_current: avg(&|s| p_final(&s.cur)),
-                mean_p_candidate: avg(&|s| p_final(&s.cand)),
-                final_rate: avg(&|s| if s.p.k == 0 { 1.0 } else { 0.0 }),
+                logloss_current: avg(&|s| s.cur.ll),
+                logloss_candidate: avg(&|s| s.cand.ll),
+                mean_p_current: avg(&|s| s.cur.p_final),
+                mean_p_candidate: avg(&|s| s.cand.p_final),
+                final_rate: avg(&|s| if s.is_final { 1.0 } else { 0.0 }),
             });
         };
         for h in [
@@ -264,16 +288,16 @@ impl Comparer {
         ] {
             group(
                 format!("hour {h}"),
-                scored.iter().filter(|s| s.p.hour == h).collect(),
+                scored.iter().filter(|s| s.hour == h).collect(),
             );
         }
         group(
             "high not repeated".to_owned(),
-            scored.iter().filter(|s| !s.p.retested).collect(),
+            scored.iter().filter(|s| !s.retested).collect(),
         );
         group(
             "high repeated (plateau)".to_owned(),
-            scored.iter().filter(|s| s.p.retested).collect(),
+            scored.iter().filter(|s| s.retested).collect(),
         );
 
         StructureComparison {
