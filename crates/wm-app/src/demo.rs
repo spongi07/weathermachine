@@ -399,6 +399,7 @@ pub async fn run(
         detail: format!("synthetic demo model ({days} synthetic days)"),
         progress: None,
         forecast: None,
+        structure: None,
         retraining: None,
     };
 

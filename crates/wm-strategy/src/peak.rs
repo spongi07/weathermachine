@@ -76,6 +76,11 @@ pub struct PeakFeatures {
     /// uses only observation features).
     #[serde(default)]
     pub forecast_rise_tenths: Option<i32>,
+    /// Forecast headroom (tenths °C): the day's fixed-lead forecast maximum
+    /// over the rest of the day minus the observed high. Same knowledge rule
+    /// as the rise; `None` without a usable forecast.
+    #[serde(default)]
+    pub forecast_headroom_tenths: Option<i32>,
     /// How far the high rose above the report just before it first reached
     /// the high (tenths °C). `None` when the high is the day's first report.
     /// A large jump from a single report is treated as unconfirmed.
@@ -84,6 +89,16 @@ pub struct PeakFeatures {
 }
 
 impl PeakFeatures {
+    /// The same features without any forecast input: what the model sees
+    /// when no forecast is usable.
+    pub fn without_forecast(&self) -> Self {
+        Self {
+            forecast_rise_tenths: None,
+            forecast_headroom_tenths: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether a confirmation window of `minutes` has been met by observed data.
     pub fn window_met(&self, minutes: u32) -> bool {
         self.minutes_since_high >= i64::from(minutes)
@@ -219,6 +234,10 @@ impl PeakDetectionEngine {
             forecast_rise_tenths: forecast
                 .filter(|f| f.date == state.date)
                 .and_then(|f| f.rise_tenths(now)),
+            forecast_headroom_tenths: forecast
+                .filter(|f| f.date == state.date)
+                .and_then(|f| f.remaining_max_tenths(now))
+                .map(|m| m - high.value.tenths()),
             high_jump_tenths: state
                 .points
                 .iter()
@@ -414,6 +433,22 @@ mod tests {
         let engine = PeakDetectionEngine::default();
         let a = engine.assess_with(&s, Amsterdam, now, Some(&fc)).unwrap();
         assert_eq!(a.features.forecast_rise_tenths, Some(15));
+        // Headroom: 21.5 °C still to come above the observed 18 °C high.
+        assert_eq!(a.features.forecast_headroom_tenths, Some(35));
+        assert_eq!(a.features.minutes_since_first_high, 60);
+        // Neither input exists before the forecast's knowledge time.
+        let late = ForecastDay {
+            known_at: utc("2026-07-01T14:00:00Z"),
+            ..fc.clone()
+        };
+        let l = engine.assess_with(&s, Amsterdam, now, Some(&late)).unwrap();
+        assert_eq!(
+            (
+                l.features.forecast_rise_tenths,
+                l.features.forecast_headroom_tenths
+            ),
+            (None, None)
+        );
         let mut other = fc.clone();
         other.date = date.succ_opt().unwrap();
         let b = engine
@@ -423,6 +458,7 @@ mod tests {
             b.features.forecast_rise_tenths, None,
             "another day's forecast"
         );
+        assert_eq!(b.features.forecast_headroom_tenths, None);
         // Everything else is identical with or without the forecast.
         let c = engine.assess(&s, Amsterdam, now).unwrap();
         assert_eq!(b, c);

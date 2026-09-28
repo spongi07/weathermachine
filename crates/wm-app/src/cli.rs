@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
-    BacktestConfig, BacktestReport, Fidelity, MarketStudyConfig, StudyConfig, import_iem_csv,
-    run_backtest, study,
+    BacktestConfig, BacktestReport, Fidelity, MarketSimConfig, MarketStudyConfig, StudyConfig,
+    import_iem_csv, run_backtest, study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{RunId, StationId};
@@ -175,6 +175,11 @@ pub enum ResearchCommand {
         /// Also print the whole Markdown report (for container logs).
         #[arg(long)]
         print: bool,
+        /// Replay this day report by report: both models' cells and
+        /// probabilities, the market and every simulated trade (repeatable;
+        /// the date range is extended to include it).
+        #[arg(long = "day")]
+        days: Vec<NaiveDate>,
     },
 }
 
@@ -383,8 +388,9 @@ pub async fn execute(cli: Cli) -> Result<()> {
                     delay_secs,
                     out,
                     print,
+                    days,
                 },
-        } => research_market(cli.config, from, to, delay_secs, out, print).await,
+        } => research_market(cli.config, from, to, delay_secs, out, print, days).await,
         Command::Backtest {
             synthetic_days,
             journal,
@@ -506,6 +512,9 @@ async fn model_train(
         o.years_downloaded,
         o.years_cached
     );
+    if let Some(v) = &o.structure_verdict {
+        println!("model structure: {v}");
+    }
     if let Some(v) = &o.forecast_verdict {
         println!("day-1 forecast: {v}");
     }
@@ -522,6 +531,7 @@ async fn research_market(
     delay_secs: i64,
     out: Option<PathBuf>,
     print: bool,
+    days: Vec<NaiveDate>,
 ) -> Result<()> {
     let cfg = AppConfig::load(config.as_deref())?;
     telemetry::init_tracing(&cfg.file.app.log_format);
@@ -533,11 +543,15 @@ async fn research_market(
     let loc = cfg.locations.first().context("no location configured")?;
     let spec = setup::market_spec(loc)?;
     let today = wm_core::time::local_date(clock.now(), spec.timezone);
-    let to = to.unwrap_or(today - Duration::days(1));
+    let to = to
+        .unwrap_or(today - Duration::days(1))
+        .max(days.iter().copied().max().unwrap_or(NaiveDate::MIN));
     if to >= today {
-        bail!("--to must be before today ({today}): only settled days can be scored");
+        bail!("--to and --day must be before today ({today}): only settled days can be scored");
     }
-    let from = from.unwrap_or(to - Duration::days(59));
+    let from = from
+        .unwrap_or(to - Duration::days(59))
+        .min(days.iter().copied().min().unwrap_or(NaiveDate::MAX));
     let fetcher = |name: &str| {
         providers
             .fetcher(name)
@@ -573,11 +587,36 @@ async fn research_market(
     };
     let forecast = setup::forecast_client(&cfg, &providers);
     let yes = cfg.buy_yes();
+    let no = cfg.buy_no();
+    // Replay the live rule of strategy A (and B's distances) plus shorter
+    // confirmations and a wider ask range.
+    let live_window = u32::try_from(yes.min_confirmation_minutes.clamp(0, 1_440)).unwrap_or(60);
+    let live_range = (yes.min_price.as_f64(), yes.max_price.as_f64());
+    let mut windows = vec![0, 30, live_window];
+    windows.sort_unstable();
+    windows.dedup();
+    let wide = (0.70_f64.min(live_range.0), live_range.1);
     let study = MarketStudyConfig {
         knowledge_delay: Duration::seconds(delay_secs.clamp(0, 3_600)),
         configured_weight: yes.market_weight,
         min_model_support: yes.min_model_support,
         taker_fee_rate: loc.market.taker_fee_rate.as_f64(),
+        sim: MarketSimConfig {
+            windows,
+            ranges: if wide == live_range {
+                vec![live_range]
+            } else {
+                vec![live_range, wide]
+            },
+            live_window,
+            live_range,
+            min_edge: yes.min_edge,
+            slippage: yes.slippage_allowance.as_f64(),
+            max_market_spread: yes.max_market_spread.as_f64(),
+            no_distances: no.distances.clone(),
+            stake_usd: yes.notional.as_f64(),
+        },
+        timeline_days: days,
         ..MarketStudyConfig::new(train.station.clone(), train.tz, train.peak.clone())
     };
     let data_dir = PathBuf::from(&cfg.file.model.auto_train.data_dir);
@@ -638,7 +677,7 @@ async fn research_market(
         o.days_downloaded,
         o.unavailable.len()
     );
-    for line in &o.report.verdict {
+    for line in o.report.verdict.iter().chain(&o.report.strategy_verdict) {
         println!("• {line}");
     }
     println!("report: {}", o.markdown.display());
@@ -1151,4 +1190,53 @@ async fn discover(config: Option<PathBuf>, date: Option<NaiveDate>) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn research_market_takes_repeated_days() {
+        let cli = Cli::try_parse_from([
+            "weather-machine",
+            "research",
+            "market",
+            "--from",
+            "2026-09-01",
+            "--day",
+            "2026-09-28",
+            "--day",
+            "2026-09-27",
+            "--print",
+        ])
+        .unwrap();
+        let Some(Command::Research {
+            command: ResearchCommand::Market {
+                from, days, print, ..
+            },
+        }) = cli.command
+        else {
+            panic!("not research market");
+        };
+        assert_eq!(from, NaiveDate::from_ymd_opt(2026, 9, 1));
+        assert_eq!(
+            days,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 9, 28).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 9, 27).unwrap()
+            ]
+        );
+        assert!(print);
+        assert!(
+            Cli::try_parse_from([
+                "weather-machine",
+                "research",
+                "market",
+                "--day",
+                "28-09-2026"
+            ])
+            .is_err()
+        );
+    }
 }

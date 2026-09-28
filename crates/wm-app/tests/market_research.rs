@@ -234,6 +234,7 @@ fn plan(dir: &Path) -> MarketResearchPlan {
             report_out: dir.join("research/eham-survival.md"),
             min_days: 1,
             forecast: None,
+            selection: None,
         },
         spec: LocationMarketSpec {
             location: LocationId::new("amsterdam").unwrap(),
@@ -248,6 +249,7 @@ fn plan(dir: &Path) -> MarketResearchPlan {
         study: MarketStudyConfig {
             min_model_support: 10,
             bootstrap_iterations: 200,
+            timeline_days: vec![d(2025, 4, 11)],
             ..MarketStudyConfig::new(eham(), TZ, PeakConfig::default())
         },
         use_forecast: false,
@@ -304,8 +306,17 @@ async fn scores_settled_days_and_serves_a_rerun_from_the_cache() {
     let md = std::fs::read_to_string(&o.markdown).unwrap();
     assert!(md.contains("# Model versus market — EHAM"));
     assert!(md.contains("2025-04-14: not settled yet"));
+    // Both structures, the strategies at traded prices and the replayed day.
+    assert!(md.contains("| candidate model |"), "{md}");
+    assert!(md.contains("## Strategies at traded prices"));
+    assert!(md.contains("## Day replay — 2025-04-11 (resolved "), "{md}");
+    assert_eq!(o.report.strategies.len(), 24);
+    assert_eq!(o.report.timelines.len(), 1);
+    assert!(!o.report.timelines[0].rows.is_empty());
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&o.json).unwrap()).unwrap();
     assert_eq!(json["market_days"], 3);
+    assert_eq!(json["timelines"][0]["date"], "2025-04-11");
+    assert!(json["strategies"].as_array().is_some_and(|a| a.len() == 24));
     // Settled days are cached; open or missing ones are not.
     let cache = &plan.cache_dir;
     for day in [d(2025, 4, 10), d(2025, 4, 11), d(2025, 4, 12)] {

@@ -74,7 +74,7 @@ For every settled market in the date range, the command:
    the model's probability for each still-possible bucket with the market's
    (the midpoint of the latest taker buy and sell).
 
-It answers five questions:
+It answers these questions:
 
 | Section | Question | How to act on it |
 |---|---|---|
@@ -83,6 +83,9 @@ It answers five questions:
 | Who is sure first | When the winning bucket reached 90 / 95 / 99 % in the market vs in the model. | Shows how much the confirmation rule costs (on 27 September the book was at 99.5 % while the bot still waited). |
 | How fast dead buckets reprice | After each new high: stale quotes on the killed buckets that were taken, by delay after the observation, and before or after our decision time. | Profit taken before our decision time → D needs faster data. Profit still taken after it → D would have found fills. |
 | Resolution check | Did the METAR high fall in the resolved bucket? | D assumes it does; any mismatch must be understood before trusting D. |
+| Both structures | Does the candidate model structure ([replay of 28 September](replay-2026-09-28.md)) predict better than the current one, and than the market? | Training decides the structure; this shows it against the market. |
+| Strategies at traded prices | What would A and B have earned at the prices the market actually traded, per structure, confirmation window (0′/30′/live) and ask range? | Change a live rule only if its variant stays profitable on days after it was chosen (24 variants are tried). |
+| Day replay (`--day`) | Report by report: both models' cells and probabilities, the market, the ask and every simulated trade. | Explains a single day, such as 28 September. |
 
 The image has no shell, so run it as a one-off container on the stack's
 data volume. In Portainer: *Containers → Add container*, same image, the
@@ -92,14 +95,25 @@ below. The container's log shows the report.
 ```sh
 docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
   ghcr.io/spongi07/weathermachine:latest \
-  research market --from 2026-06-01 --to 2026-09-26 --print
+  research market --from 2026-06-01 --to 2026-09-28 --day 2026-09-28 --print
 # also written to /data/research/eham-market.md (+ eham-market.json)
 ```
 
 It uses about 1–3 Data API requests and one Gamma request per day, two per
 second at most. METAR history comes from the training cache.
 
-## 5. Next levers (not built)
+## 5. Follow-up: the replay of 28 September
+
+On 28 September nothing traded either. The step-by-step
+[replay](replay-2026-09-28.md) shows why: the model, not a rule, was the
+bottleneck. It lumped the whole morning into one cell, restarted its clock
+when 21 °C was reported twice, and its forecast input could not see that the
+observed 21 °C had already reached the forecast's 21.4 °C maximum. The only
+money was in the first half hour after 21 °C was reached. A pre-registered
+candidate structure, selected walk-forward at training, and the replay of
+strategies at traded prices above were built from it.
+
+## 6. Next levers (not built)
 
 * **Faster observations.** KNMI publishes
   [10-minute station observations](https://english.knmidata.nl/open-data/10-minute-in-situ-meteorological-observations)

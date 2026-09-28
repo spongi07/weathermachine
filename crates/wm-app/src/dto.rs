@@ -400,6 +400,15 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
             day_max_c: f.day_max_tenths.map(|t| f64::from(t) / 10.0),
             remaining_max_c: f.remaining_max_tenths.map(|t| f64::from(t) / 10.0),
             rise_c: f.rise_tenths.map(|t| f64::from(t) / 10.0),
+            headroom_c: f
+                .remaining_max_tenths
+                .zip(l.views.iter().find_map(|v| {
+                    v.state
+                        .as_ref()
+                        .and_then(|s| s.high.as_ref())
+                        .map(|h| h.value.tenths())
+                }))
+                .map(|(m, h)| f64::from(m - h) / 10.0),
             hourly: {
                 let day_start = wm_core::time::local_day_start(l.local_date, tz);
                 f.hourly

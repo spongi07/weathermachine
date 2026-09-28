@@ -131,6 +131,17 @@ pub enum FeatureDim {
     Trajectory,
     /// Forecast rise bucket ([`rise_bucket`]); unavailable without a forecast.
     ForecastRise,
+    /// Minutes since the high was *first* reached ([`minutes_bucket`]): a
+    /// plateau at the high keeps counting, where [`FeatureDim::MinutesSinceHigh`]
+    /// restarts at every report equal to the high.
+    MinutesSinceFirstHigh,
+    /// Local hour with the morning split per hour ([`hour_bucket_fine`]): a
+    /// high set at 11:55 behaves unlike one set at 07:25.
+    LocalHourFine,
+    /// Forecast headroom bucket ([`headroom_bucket`]): the forecast maximum
+    /// over the rest of the day minus the observed high. Unavailable without
+    /// a forecast.
+    ForecastHeadroom,
 }
 
 impl FeatureDim {
@@ -139,8 +150,110 @@ impl FeatureDim {
     /// the one of the level above), and model support is counted on the
     /// levels without refinement dimensions.
     pub fn is_refinement(self) -> bool {
-        matches!(self, FeatureDim::ForecastRise)
+        matches!(
+            self,
+            FeatureDim::ForecastRise | FeatureDim::ForecastHeadroom
+        )
     }
+
+    /// The forecast input a refinement dimension reads (tenths °C). `None`
+    /// for observation dimensions and when no forecast is usable.
+    pub fn forecast_value(self, f: &PeakFeatures) -> Option<i32> {
+        match self {
+            FeatureDim::ForecastRise => f.forecast_rise_tenths,
+            FeatureDim::ForecastHeadroom => f.forecast_headroom_tenths,
+            _ => None,
+        }
+    }
+
+    /// Bucket of a forecast input value, for refinement dimensions.
+    pub fn forecast_bucket(self, tenths: i32) -> Option<&'static str> {
+        match self {
+            FeatureDim::ForecastRise => Some(rise_bucket(tenths)),
+            FeatureDim::ForecastHeadroom => Some(headroom_bucket(tenths)),
+            _ => None,
+        }
+    }
+
+    /// The buckets of a refinement dimension in report order.
+    pub fn forecast_buckets(self) -> &'static [&'static str] {
+        match self {
+            FeatureDim::ForecastRise => &["cool2", "cool", "flat", "warm"],
+            FeatureDim::ForecastHeadroom => &["below", "level", "above1", "above2"],
+            _ => &[],
+        }
+    }
+
+    /// Name of a refinement's forecast input in reports.
+    pub fn forecast_name(self) -> &'static str {
+        match self {
+            FeatureDim::ForecastRise => "rise",
+            FeatureDim::ForecastHeadroom => "headroom",
+            _ => "none",
+        }
+    }
+}
+
+/// The two pre-registered model structures. The walk-forward evaluation at
+/// training decides which one the service uses; nothing else switches them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStructure {
+    /// Clock from the last report at the high, hours before noon pooled,
+    /// forecast as "rise" (the forecast's own warming still to come).
+    Current,
+    /// Clock from the first time the high was reached, morning split per
+    /// hour, forecast as "headroom" (room left above the observed high).
+    Candidate,
+}
+
+impl ModelStructure {
+    pub fn levels(self) -> Vec<Vec<FeatureDim>> {
+        match self {
+            ModelStructure::Current => EmpiricalPeakModel::default_levels(),
+            ModelStructure::Candidate => EmpiricalPeakModel::candidate_levels(),
+        }
+    }
+
+    /// The forecast refinement dimension this structure is evaluated with.
+    pub fn refinement(self) -> FeatureDim {
+        match self {
+            ModelStructure::Current => FeatureDim::ForecastRise,
+            ModelStructure::Candidate => FeatureDim::ForecastHeadroom,
+        }
+    }
+
+    /// What distinguishes the structure, in words (reports).
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelStructure::Current => {
+                "clock from the last report at the high, hours before noon pooled, forecast as rise"
+            }
+            ModelStructure::Candidate => {
+                "clock from the first report at the high, morning split per hour, forecast as headroom"
+            }
+        }
+    }
+
+    /// Short name (model ids, logs).
+    pub fn short(self) -> &'static str {
+        match self {
+            ModelStructure::Current => "current",
+            ModelStructure::Candidate => "candidate",
+        }
+    }
+}
+
+/// Which structure training selected and why; written by training.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructureSelection {
+    /// The structure of the model this is recorded in.
+    pub structure: ModelStructure,
+    /// `true` when the walk-forward comparison adopted the candidate.
+    pub candidate_adopted: bool,
+    /// One-line result of the comparison (dashboard, logs).
+    pub verdict: String,
+    pub evaluated_at: DateTime<Utc>,
 }
 
 /// Bucket boundaries for each dimension.
@@ -175,6 +288,29 @@ pub fn rise_bucket(tenths: i32) -> &'static str {
     }
 }
 
+/// Forecast headroom buckets (tenths °C): the forecast's remaining maximum
+/// at least 1 °C below the observed high, level with it (−0.9 … +0.4 °C),
+/// up to 1.4 °C above it, or more.
+pub fn headroom_bucket(tenths: i32) -> &'static str {
+    match tenths {
+        i32::MIN..=-10 => "below",
+        -9..=4 => "level",
+        5..=14 => "above1",
+        _ => "above2",
+    }
+}
+
+/// [`hour_bucket`] with the morning split per hour.
+pub fn hour_bucket_fine(local_minute: u16) -> &'static str {
+    match local_minute / 60 {
+        0..=8 => "h<09",
+        9 => "h09",
+        10 => "h10",
+        11 => "h11",
+        _ => hour_bucket(local_minute),
+    }
+}
+
 pub fn hour_bucket(local_minute: u16) -> &'static str {
     match local_minute / 60 {
         0..=11 => "h<12",
@@ -198,6 +334,9 @@ fn dim_value(dim: FeatureDim, f: &PeakFeatures) -> Option<&'static str> {
             TrajectoryClass::Insufficient => "insuf",
         },
         FeatureDim::ForecastRise => rise_bucket(f.forecast_rise_tenths?),
+        FeatureDim::MinutesSinceFirstHigh => minutes_bucket(f.minutes_since_first_high),
+        FeatureDim::LocalHourFine => hour_bucket_fine(f.local_minute_now),
+        FeatureDim::ForecastHeadroom => headroom_bucket(f.forecast_headroom_tenths?),
     })
 }
 
@@ -255,6 +394,9 @@ pub struct EmpiricalPeakModel {
     /// Forecast product and evaluation result (models trained with forecasts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forecast: Option<ForecastModelInfo>,
+    /// Structure comparison result (models trained with a comparison).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<StructureSelection>,
 }
 
 impl EmpiricalPeakModel {
@@ -278,6 +420,7 @@ impl EmpiricalPeakModel {
             levels,
             cells: HashMap::new(),
             forecast: None,
+            selection: None,
         }
     }
 
@@ -293,14 +436,49 @@ impl EmpiricalPeakModel {
         ]
     }
 
-    /// `levels` plus a forecast refinement of their most specific level.
-    pub fn with_forecast_refinement(mut levels: Vec<Vec<FeatureDim>>) -> Vec<Vec<FeatureDim>> {
+    /// Candidate hierarchy ([`ModelStructure::Candidate`]): the same
+    /// levels, with the clock counted from the first time the high was
+    /// reached and the morning split per hour.
+    pub fn candidate_levels() -> Vec<Vec<FeatureDim>> {
+        use FeatureDim::*;
+        vec![
+            vec![],
+            vec![MinutesSinceFirstHigh],
+            vec![MinutesSinceFirstHigh, Drop],
+            vec![MinutesSinceFirstHigh, Drop, Season],
+            vec![MinutesSinceFirstHigh, Drop, Season, LocalHourFine],
+        ]
+    }
+
+    /// `levels` plus a forecast refinement (rise) of their most specific level.
+    pub fn with_forecast_refinement(levels: Vec<Vec<FeatureDim>>) -> Vec<Vec<FeatureDim>> {
+        Self::with_refinement(levels, FeatureDim::ForecastRise)
+    }
+
+    /// `levels` plus a refinement by `dim` of their most specific level.
+    pub fn with_refinement(
+        mut levels: Vec<Vec<FeatureDim>>,
+        dim: FeatureDim,
+    ) -> Vec<Vec<FeatureDim>> {
         let mut last = levels.last().cloned().unwrap_or_default();
-        if !last.contains(&FeatureDim::ForecastRise) {
-            last.push(FeatureDim::ForecastRise);
+        if !last.contains(&dim) {
+            last.push(dim);
             levels.push(last);
         }
         levels
+    }
+
+    /// Which pre-registered structure this model's hierarchy follows.
+    pub fn structure(&self) -> ModelStructure {
+        if self
+            .levels
+            .iter()
+            .any(|l| l.contains(&FeatureDim::MinutesSinceFirstHigh))
+        {
+            ModelStructure::Candidate
+        } else {
+            ModelStructure::Current
+        }
     }
 
     /// Whether any level conditions on the forecast.
@@ -315,9 +493,14 @@ impl EmpiricalPeakModel {
     pub fn without_refinements(&self) -> Self {
         let mut m = self.clone();
         m.levels.retain(|l| !l.iter().any(|d| d.is_refinement()));
-        let tag = format!("{:?}=", FeatureDim::ForecastRise);
-        m.cells
-            .retain(|key, _| !key.split('|').any(|part| part.starts_with(&tag)));
+        let tags: Vec<String> = [FeatureDim::ForecastRise, FeatureDim::ForecastHeadroom]
+            .iter()
+            .map(|d| format!("{d:?}="))
+            .collect();
+        m.cells.retain(|key, _| {
+            !key.split('|')
+                .any(|part| tags.iter().any(|t| part.starts_with(t.as_str())))
+        });
         m
     }
 
@@ -440,6 +623,7 @@ mod tests {
             observation_count: 30,
             data_age_minutes: 3,
             forecast_rise_tenths: None,
+            forecast_headroom_tenths: None,
             high_jump_tenths: Some(5),
         }
     }
@@ -644,6 +828,104 @@ mod tests {
         old.as_object_mut().unwrap().remove("forecast");
         let back: EmpiricalPeakModel = serde_json::from_value(old).unwrap();
         assert!(back.forecast.is_none());
+    }
+
+    #[test]
+    fn fine_hours_split_the_morning_only() {
+        assert_eq!(hour_bucket_fine(0), "h<09");
+        assert_eq!(hour_bucket_fine(8 * 60 + 59), "h<09");
+        assert_eq!(hour_bucket_fine(9 * 60), "h09");
+        assert_eq!(hour_bucket_fine(10 * 60 + 30), "h10");
+        assert_eq!(hour_bucket_fine(11 * 60 + 58), "h11");
+        for m in [12 * 60, 13 * 60 + 59, 15 * 60, 17 * 60, 23 * 60] {
+            assert_eq!(hour_bucket_fine(m), hour_bucket(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn headroom_buckets_have_exact_edges() {
+        assert_eq!(headroom_bucket(-35), "below");
+        assert_eq!(headroom_bucket(-10), "below");
+        assert_eq!(headroom_bucket(-9), "level");
+        assert_eq!(headroom_bucket(4), "level");
+        assert_eq!(headroom_bucket(5), "above1");
+        assert_eq!(headroom_bucket(14), "above1");
+        assert_eq!(headroom_bucket(15), "above2");
+    }
+
+    #[test]
+    fn candidate_cells_use_the_first_reached_clock_and_fine_hours() {
+        // 28 Sep 2026, 12:28: 21 °C first reached at 11:55, repeated at 12:25.
+        let f = PeakFeatures {
+            minutes_since_high: 0,
+            minutes_since_first_high: 30,
+            local_minute_now: 12 * 60 + 28,
+            forecast_headroom_tenths: Some(4),
+            ..features(0, 0)
+        };
+        let cand = EmpiricalPeakModel::candidate_levels();
+        assert_eq!(
+            cell_key(cand.last().unwrap(), &f).unwrap(),
+            "MinutesSinceFirstHigh=m030-059|Drop=d0|Season=summer|LocalHourFine=h12-13"
+        );
+        let cur = EmpiricalPeakModel::default_levels();
+        assert_eq!(
+            cell_key(cur.last().unwrap(), &f).unwrap(),
+            "MinutesSinceHigh=m000-029|Drop=d0|Season=summer|LocalHour=h12-13"
+        );
+        let refined = EmpiricalPeakModel::with_refinement(cand, FeatureDim::ForecastHeadroom);
+        assert!(
+            cell_key(refined.last().unwrap(), &f)
+                .unwrap()
+                .ends_with("|ForecastHeadroom=level")
+        );
+        // Without a forecast the headroom level is unavailable, not guessed.
+        let none = PeakFeatures {
+            forecast_headroom_tenths: None,
+            ..f
+        };
+        assert!(cell_key(refined.last().unwrap(), &none).is_none());
+    }
+
+    #[test]
+    fn structures_are_recognised_and_headroom_counts_as_a_forecast() {
+        let cur = EmpiricalPeakModel::new("t", "EHAM", "all", 4, ModelStructure::Current.levels());
+        assert_eq!(cur.structure(), ModelStructure::Current);
+        assert!(!cur.uses_forecast());
+        let levels = EmpiricalPeakModel::with_refinement(
+            ModelStructure::Candidate.levels(),
+            ModelStructure::Candidate.refinement(),
+        );
+        let mut m = EmpiricalPeakModel::new("t", "EHAM", "all", 4, levels);
+        assert_eq!(m.structure(), ModelStructure::Candidate);
+        assert!(m.uses_forecast());
+        let f = PeakFeatures {
+            forecast_headroom_tenths: Some(-20),
+            ..features(90, 10)
+        };
+        for _ in 0..50 {
+            m.observe(&f, 0);
+        }
+        assert!(m.cells.keys().any(|k| k.contains("ForecastHeadroom=below")));
+        let plain = m.without_refinements();
+        assert!(!plain.uses_forecast());
+        assert!(plain.cells.keys().all(|k| !k.contains("ForecastHeadroom")));
+        assert_eq!(plain.structure(), ModelStructure::Candidate);
+        // Serialization of the new dimensions is stable.
+        let json = serde_json::to_string(&m.levels).unwrap();
+        assert!(json.contains("minutes_since_first_high") && json.contains("local_hour_fine"));
+        assert!(json.contains("forecast_headroom"));
+    }
+
+    #[test]
+    fn old_model_files_keep_their_meaning() {
+        // A model written before the candidate dimensions existed.
+        let json = r#"{"id":"old","station":"EHAM","view":"all","trained_from":"2025-01-01","trained_to":"2025-12-31","created_at":"2026-01-01T00:00:00Z","k_classes":4,"prior_strength":20.0,"levels":[[],["minutes_since_high"]],"cells":{"global":[8,1,1,0],"MinutesSinceHigh=m060-089":[9,1,0,0]}}"#;
+        let m: EmpiricalPeakModel = serde_json::from_str(json).unwrap();
+        assert_eq!(m.structure(), ModelStructure::Current);
+        let d = m.distribution(&features(70, 0)).unwrap();
+        assert_eq!(d.support, 10);
+        assert!(d.source.ends_with("MinutesSinceHigh=m060-089"));
     }
 }
 

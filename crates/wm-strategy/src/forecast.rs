@@ -1,16 +1,23 @@
 //! Forecast-derived features, shared by live trading and model training
 //! (train/serve consistency).
 //!
-//! The decision core uses exactly one forecast input, the **forecast rise**:
-//! the maximum of the day's hourly forecast over the rest of the local day
-//! minus its maximum over the part already elapsed. Level errors of the
-//! forecast (grid cell vs. runway sensor, seasonal bias) cancel in the
-//! difference; what remains is whether the forecast expects the day to get
-//! warmer later — the situation in which an observed high is least likely
-//! to be final.
+//! A model uses at most one forecast input, fixed by its structure:
 //!
-//! HYPOTHESIS TO BACKTEST — not a fact: the rise adds information beyond the
-//! observed trajectory. A model only uses it after an out-of-sample
+//! * the **forecast rise** (current structure): the maximum of the day's
+//!   hourly forecast over the rest of the local day minus its maximum over
+//!   the part already elapsed. Level errors of the forecast (grid cell vs.
+//!   runway sensor, seasonal bias) cancel in the difference; what remains is
+//!   whether the forecast expects the day to get warmer later — the
+//!   situation in which an observed high is least likely to be final.
+//! * the **forecast headroom** (candidate structure): the forecast maximum
+//!   over the rest of the day minus the *observed* high. It keeps the level
+//!   the rise discards: on 28 September 2026 the observed 21 °C (11:55)
+//!   had already reached the forecast's 21.4 °C day maximum, which the rise
+//!   (the forecast compared only with itself) cannot see. Level errors do
+//!   not cancel here; the empirical cells learn them per season.
+//!
+//! HYPOTHESIS TO BACKTEST — not a fact: either input adds information beyond
+//! the observed trajectory. A model only uses one after an out-of-sample
 //! evaluation adopted it (see `wm_backtest::research`).
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -74,7 +81,8 @@ impl ForecastDay {
         Some(remaining - elapsed)
     }
 
-    /// Forecast maximum over the rest of the day (display only).
+    /// Forecast maximum over the rest of the day, `(now, 24:00]`. `None`
+    /// before `known_at` or when no value remains (the headroom input).
     pub fn remaining_max_tenths(&self, now: DateTime<Utc>) -> Option<i32> {
         if now < self.known_at {
             return None;

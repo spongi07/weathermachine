@@ -20,7 +20,8 @@ pub use peak::{
     TrajectoryClass,
 };
 pub use probability::{
-    EmpiricalPeakModel, ForecastModelInfo, IncrementDistribution, NoEdgeModel, ProbabilityModel,
+    EmpiricalPeakModel, FeatureDim, ForecastModelInfo, IncrementDistribution, ModelStructure,
+    NoEdgeModel, ProbabilityModel, StructureSelection,
 };
 pub use state::{DayState, HighInfo, ObsPoint, TemperatureStateEngine, ViewKind};
 pub use strategy::{

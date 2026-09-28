@@ -55,6 +55,7 @@ of three labels:
 | 35 | Execution simulator | [08-research.md](08-research.md#35-execution-simulator) |
 | 36 | Parameter research | [08-research.md](08-research.md#36-parameter-research) |
 | 36a | Model versus market (`research market`) | [08-research.md](08-research.md#36a-model-versus-market-research-market) |
+| 36b | Model structure selection | [08-research.md](08-research.md#36b-model-structure-selection) |
 | 37 | Overfitting safeguards | [08-research.md](08-research.md#37-overfitting-safeguards) |
 | 38 | Testing | [09-operations.md](09-operations.md#38-testing) |
 | 39 | Observability | [09-operations.md](09-operations.md#39-observability) |

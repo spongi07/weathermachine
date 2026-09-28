@@ -201,6 +201,9 @@ fn StatusBar(
                         _ => ("pill warn", "NO MODEL".to_owned()),
                     };
                     let mut title = if m.detail.is_empty() { s.model_id.clone() } else { m.detail.clone() };
+                    if let Some(v) = &m.structure {
+                        title.push_str(&format!(" — structure: {v}"));
+                    }
                     if let Some(r) = &m.retraining {
                         title.push_str(&format!(" — {r} (the current model keeps trading)"));
                     }
@@ -439,6 +442,7 @@ fn PeakPanel(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                             <div><label>"Day max"</label><b>{c(f.day_max_c)}</b><small>"forecast"</small></div>
                             <div><label>"Rest of day"</label><b>{c(f.remaining_max_c)}</b><small>"max from now"</small></div>
                             <div><label>"Rise"</label><b>{fmt::signed(f.rise_c, 1)}</b><small>"°C later vs so far"</small></div>
+                            <div><label>"Headroom"</label><b>{fmt::signed(f.headroom_c, 1)}</b><small>"°C above the high"</small></div>
                         </div>
                         <div class="muted fc-status">{fmt::sentence(&f.status)}</div>
                     </div>

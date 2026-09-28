@@ -13,7 +13,11 @@
 //!    decides whether the model may use the forecast (see
 //!    `wm_backtest::forecast_eval`). Without forecast history the model is
 //!    trained exactly as before.
-//! 4. Run the peak-survival study, which also builds the empirical model.
+//! 4. Run the peak-survival study, which also builds the empirical model —
+//!    both pre-registered structures in the same pass. A walk-forward
+//!    comparison decides whether the candidate structure replaces the
+//!    current one (see `wm_backtest::selection`); each structure's forecast
+//!    input is evaluated separately.
 //! 5. Refuse too little data, then write the model and the report atomically
 //!    (write + rename), so a reader never sees a partial file.
 //!
@@ -31,8 +35,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::watch;
 use wm_backtest::{
-    EvaluationConfig, ForecastEvaluation, ForecastHistory, StudyConfig, import_iem_csv, study,
-    study_with_forecasts,
+    EvaluationConfig, ForecastEvaluation, ForecastHistory, SelectionConfig, StructureComparison,
+    StudyConfig, StudyOutput, import_iem_csv, study, study_and_select, study_with_forecasts,
 };
 use wm_core::forecast::ForecastProduct;
 use wm_core::ids::StationId;
@@ -40,7 +44,9 @@ use wm_core::ingest::{IngestBatch, IngestSink, ProviderRequestRecord};
 use wm_core::market::FeeSchedule;
 use wm_core::resolution::ObservationFilter;
 use wm_core::weather::Observation;
-use wm_strategy::{EmpiricalPeakModel, ForecastModelInfo, PeakConfig};
+use wm_strategy::{
+    EmpiricalPeakModel, ForecastModelInfo, ModelStructure, PeakConfig, StructureSelection,
+};
 use wm_weather::open_meteo::{known, parse_series};
 use wm_weather::{IemArchive, OpenMeteoError, OpenMeteoPreviousRuns};
 
@@ -74,6 +80,9 @@ pub struct TrainPlan {
     pub min_days: u64,
     /// Forecast history and its evaluation; `None` = forecasts disabled.
     pub forecast: Option<ForecastPlan>,
+    /// Walk-forward comparison of the two model structures; `None` = train
+    /// the current structure only.
+    pub selection: Option<SelectionConfig>,
 }
 
 /// The forecast part of a training run.
@@ -132,6 +141,7 @@ impl TrainPlan {
             report_out: data.join("research").join(format!("{lower}-survival.md")),
             min_days: at.min_days,
             forecast,
+            selection: Some(SelectionConfig::default()),
         })
     }
 
@@ -172,6 +182,10 @@ pub struct TrainOutcome {
     /// The forecast evaluation's verdict (or why there was none).
     pub forecast_verdict: Option<String>,
     pub forecast_adopted: bool,
+    /// The structure comparison's verdict (`None`: no comparison ran).
+    pub structure_verdict: Option<String>,
+    /// The model uses the candidate structure.
+    pub candidate_adopted: bool,
 }
 
 /// One year's history file on disk and its provenance.
@@ -344,7 +358,7 @@ async fn train_on(
     });
     let plan2 = plan.clone();
     let hourly = fc.as_ref().map(|f| f.hourly.clone()).unwrap_or_default();
-    let (report, model, evaluation) = tokio::task::spawn_blocking(move || {
+    let out = tokio::task::spawn_blocking(move || {
         let cfg = StudyConfig {
             station: plan2.station.clone(),
             tz: plan2.tz,
@@ -353,20 +367,35 @@ async fn train_on(
             k_classes: 4,
             min_high_local_minute: 9 * 60,
         };
-        match &plan2.forecast {
-            Some(fp) if !hourly.is_empty() => {
-                let history = ForecastHistory::from_hourly(fp.product.clone(), plan2.tz, &hourly);
-                let out = study_with_forecasts(&observations, &cfg, &history, fp.eval.clone());
-                (out.report, out.model, out.evaluation)
-            }
-            _ => {
-                let (r, m) = study(&observations, &cfg);
-                (r, m, None)
+        let history = match &plan2.forecast {
+            Some(fp) if !hourly.is_empty() => Some((
+                ForecastHistory::from_hourly(fp.product.clone(), plan2.tz, &hourly),
+                fp.eval.clone(),
+            )),
+            _ => None,
+        };
+        match (plan2.selection.clone(), history) {
+            (Some(sel), h) => study_and_select(
+                &observations,
+                &cfg,
+                h.as_ref().map(|(h, e)| (h, e.clone())),
+                sel,
+            ),
+            (None, Some((h, e))) => study_with_forecasts(&observations, &cfg, &h, e),
+            (None, None) => {
+                let (report, model) = study(&observations, &cfg);
+                StudyOutput {
+                    report,
+                    model,
+                    evaluation: None,
+                    candidate: None,
+                }
             }
         }
     })
     .await
     .context("training task")?;
+    let (report, model, evaluation, comparison, other) = select(out);
 
     if report.days < plan.min_days || model.total_samples() == 0 {
         bail!(
@@ -377,6 +406,13 @@ async fn train_on(
         );
     }
     let (mut model, verdict, adopted) = finalize(model, plan, fc.as_ref(), evaluation.as_ref());
+    model.selection = comparison.as_ref().map(|c| StructureSelection {
+        structure: model.structure(),
+        candidate_adopted: c.adopted,
+        verdict: c.verdict.clone(),
+        evaluated_at: Utc::now(),
+    });
+    let candidate_adopted = model.structure() == ModelStructure::Candidate;
     model.id = format!(
         "{}-{}{}",
         model.id,
@@ -385,8 +421,21 @@ async fn train_on(
     );
     let n_obs = files.iter().map(|f| f.rows).sum::<usize>();
     let mut md = report.to_markdown();
+    if let Some(c) = &comparison {
+        md.push_str(&c.to_markdown());
+    }
     match (&evaluation, &fc) {
-        (Some(e), _) => md.push_str(&e.to_markdown()),
+        (Some(e), _) => {
+            md.push_str(&e.to_markdown());
+            // The structure not selected: its forecast evaluation, for reference.
+            if let Some(o) = &other {
+                let _ = write!(
+                    md,
+                    "\n*Structure not selected — for reference only:*\n{}",
+                    o.to_markdown()
+                );
+            }
+        }
         (None, Some(f)) => {
             let _ = write!(
                 md,
@@ -421,7 +470,40 @@ async fn train_on(
         years_cached: cached,
         forecast_verdict: verdict,
         forecast_adopted: adopted,
+        structure_verdict: comparison.map(|c| c.verdict),
+        candidate_adopted,
     })
+}
+
+/// The structure the comparison selected (the candidate only when adopted),
+/// its forecast evaluation, the comparison, and the forecast evaluation of
+/// the structure not selected.
+fn select(
+    out: StudyOutput,
+) -> (
+    wm_backtest::SurvivalReport,
+    EmpiricalPeakModel,
+    Option<ForecastEvaluation>,
+    Option<StructureComparison>,
+    Option<ForecastEvaluation>,
+) {
+    match out.candidate {
+        Some(c) if c.comparison.adopted => (
+            out.report,
+            c.model,
+            c.evaluation,
+            Some(c.comparison),
+            out.evaluation,
+        ),
+        Some(c) => (
+            out.report,
+            out.model,
+            out.evaluation,
+            Some(c.comparison),
+            c.evaluation,
+        ),
+        None => (out.report, out.model, out.evaluation, None, None),
+    }
 }
 
 /// Keep the forecast refinement only if the evaluation adopted it, and record

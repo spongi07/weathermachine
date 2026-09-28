@@ -39,6 +39,12 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   walk-forward test with a placebo control, and the forecast changes trading
   probabilities only if it clearly improves them. The verdict is in the
   training report and on the dashboard.
+* **Tests its own structure.** Training also compares the model with a
+  pre-registered candidate. The candidate's clock runs from the first report
+  at the high, its morning is split per hour, and it reads the forecast as
+  headroom above the observed high. The candidate is used only if it clearly
+  predicts better in a walk-forward test. See the
+  [replay of 28 September 2026](docs/research/replay-2026-09-28.md) for why.
 * **Fails closed.** A throttled or unhealthy provider, stale data, gaps in the
   day's series, recent corrections, stale books, unverified resolution rules,
   no model, storage down, or the kill switch each block new weather-dependent
@@ -76,9 +82,9 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine run` | Paper-trading service (default) |
 | `weather-machine demo [--speed 60]` | Synthetic accelerated demo |
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
-| `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train the model and evaluate the forecast; `run` does this automatically |
+| `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train both model structures, evaluate the forecast and pick the structure; `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
-| `weather-machine research market [--from --to --delay-secs --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better, the best `market_weight`, who is sure first, how fast dead buckets reprice, resolution check |
+| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B at traded prices, a report-by-report replay of each `--day`, resolution check |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules (read-only) |
 | `weather-machine rules approve --sha256 … --reviewer …` | Human approval of a rules text |

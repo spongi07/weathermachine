@@ -105,6 +105,18 @@ model without forecasts. `support` stays the count of the most specific
 level without the forecast, so the strategies' support gate means the same
 thing with and without it.
 
+**Candidate structure (§36b).** A second, pre-registered structure reads the
+forecast as **headroom**: the rest-of-day forecast maximum minus the
+*observed* high (`forecast_headroom_tenths`; buckets ≤ −1.0 °C, −0.9…+0.4,
++0.5…+1.4, more). Unlike the rise it keeps the forecast's level, which is
+what the market used on 28 September 2026: the observed 21 °C had reached the
+forecast's 21.4 °C day maximum at 11:55
+([replay](../research/replay-2026-09-28.md)). Its levels are
+`[MinutesSinceFirstHigh] → [+Drop] → [+Season] → [+LocalHourFine]`, refined by
+`ForecastHeadroom`. Each structure's forecast input is evaluated with its own
+placebo; which structure the service uses is decided by the walk-forward
+comparison of §36b.
+
 **Evaluation and adoption (`wm-backtest::forecast_eval`).** Training joins
 the forecast history with the METAR history and runs a **prequential**
 (walk-forward, day by day) test: every decision point of day D — the first
@@ -127,8 +139,10 @@ keeps the latest series per (location, product) and derives the feature only
 for the model's own product, under the knowledge rule; the dashboard shows
 the series (dashed line), the rise and why it is or is not in use. The model
 maintenance task retrains when the forecast was never evaluated, the product
-changed, history was unavailable (after 6 h), or the model is 30 days old —
-in the background, swapping the new model into the running engine.
+changed, history was unavailable (after 6 h), the model was trained without
+the structure comparison (§36b), or it is 30 days old — in the background,
+swapping the new model into the running engine. The dashboard's forecast box
+also shows the headroom.
 
 * **KNOWN FACT (tests).** A forecast never changes the observed high, the
   views or settlement (`a_used_forecast_changes_probabilities_only_under_the_knowledge_rule`,

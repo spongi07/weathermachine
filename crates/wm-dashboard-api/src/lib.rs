@@ -58,6 +58,10 @@ pub struct ModelDto {
     /// The loaded model's forecast evaluation verdict (`None`: forecasts off).
     #[serde(default)]
     pub forecast: Option<String>,
+    /// The loaded model's structure comparison verdict (`None`: no
+    /// comparison ran for it).
+    #[serde(default)]
+    pub structure: Option<String>,
     /// Background retraining in progress; the loaded model keeps trading.
     #[serde(default)]
     pub retraining: Option<String>,
@@ -214,6 +218,9 @@ pub struct ForecastDto {
     pub remaining_max_c: Option<f64>,
     /// Remaining-day maximum minus the maximum so far, per the forecast.
     pub rise_c: Option<f64>,
+    /// Remaining-day forecast maximum minus the observed high.
+    #[serde(default)]
+    pub headroom_c: Option<f64>,
     /// Today's hourly values for the chart.
     pub hourly: Vec<ForecastPointDto>,
 }

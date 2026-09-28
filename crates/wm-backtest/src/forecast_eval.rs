@@ -39,8 +39,7 @@ use wm_core::market::FeeSchedule;
 use wm_core::rng::SplitMix64;
 use wm_core::units::Price;
 use wm_strategy::ev::ev_per_share;
-use wm_strategy::probability::rise_bucket;
-use wm_strategy::{EmpiricalPeakModel, ForecastDay, PeakFeatures, ProbabilityModel};
+use wm_strategy::{EmpiricalPeakModel, FeatureDim, ForecastDay, PeakFeatures, ProbabilityModel};
 
 /// A station's fixed-lead forecast history: one complete series per local
 /// day, each known from the product's ready time on.
@@ -136,7 +135,8 @@ impl Default for EvaluationConfig {
     }
 }
 
-/// P(final) by forecast rise bucket at the scored decision points.
+/// P(final) by forecast input bucket (rise or headroom) at the scored
+/// decision points.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RiseRow {
     pub bucket: String,
@@ -183,6 +183,9 @@ pub struct ProxyRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForecastEvaluation {
     pub product: String,
+    /// The forecast input evaluated: `rise` or `headroom`.
+    #[serde(default = "rise_name")]
+    pub feature: String,
     /// History days with a complete forecast series.
     pub days_with_forecast: u64,
     /// Days with at least one scored decision point.
@@ -217,13 +220,18 @@ pub struct ForecastEvaluation {
     pub verdict: String,
 }
 
+fn rise_name() -> String {
+    FeatureDim::ForecastRise.forecast_name().to_owned()
+}
+
 /// One scored decision point.
 #[derive(Debug, Clone)]
 struct Point {
     date: NaiveDate,
     /// Observed increment class.
     k: usize,
-    rise: i32,
+    /// The forecast input (tenths °C) the refinement read.
+    value: i32,
     base: Vec<f64>,
     forecast: Vec<f64>,
     placebo: Option<Vec<f64>>,
@@ -235,11 +243,11 @@ impl Point {
     }
 }
 
-fn logloss(probs: &[f64], k: usize) -> f64 {
+pub(crate) fn logloss(probs: &[f64], k: usize) -> f64 {
     -probs.get(k).copied().unwrap_or(0.0).max(1e-9).ln()
 }
 
-fn p_final(probs: &[f64]) -> f64 {
+pub(crate) fn p_final(probs: &[f64]) -> f64 {
     probs.first().copied().unwrap_or(0.0)
 }
 
@@ -247,13 +255,16 @@ fn p_final(probs: &[f64]) -> f64 {
 #[derive(Debug)]
 pub(crate) struct Scorer {
     cfg: EvaluationConfig,
+    /// The model's forecast refinement dimension (rise or headroom).
+    refinement: FeatureDim,
     points: Vec<Point>,
 }
 
 impl Scorer {
-    pub(crate) fn new(cfg: EvaluationConfig) -> Self {
+    pub(crate) fn new(cfg: EvaluationConfig, refinement: FeatureDim) -> Self {
         Self {
             cfg,
+            refinement,
             points: Vec::new(),
         }
     }
@@ -263,40 +274,36 @@ impl Scorer {
     }
 
     /// Score one decision point with the models as trained on earlier days
-    /// only. Points without a usable forecast are not scored (both
-    /// predictions would be identical).
+    /// only. `placebo_f` is `f` with the placebo forecast's inputs. Points
+    /// without a usable forecast are not scored (both predictions would be
+    /// identical).
     pub(crate) fn score(
         &mut self,
         date: NaiveDate,
         model: &EmpiricalPeakModel,
         placebo_model: &EmpiricalPeakModel,
         f: &PeakFeatures,
-        placebo_rise: Option<i32>,
+        placebo_f: &PeakFeatures,
         increment: i32,
     ) {
-        let Some(rise) = f.forecast_rise_tenths else {
+        let Some(value) = self.refinement.forecast_value(f) else {
             return;
         };
-        let without = PeakFeatures {
-            forecast_rise_tenths: None,
-            ..f.clone()
-        };
-        let (Some(base), Some(forecast)) = (model.distribution(&without), model.distribution(f))
-        else {
+        let (Some(base), Some(forecast)) = (
+            model.distribution(&f.without_forecast()),
+            model.distribution(f),
+        ) else {
             return;
         };
-        let placebo = placebo_rise.and_then(|r| {
-            let pf = PeakFeatures {
-                forecast_rise_tenths: Some(r),
-                ..f.clone()
-            };
-            placebo_model.distribution(&pf).map(|d| d.probs)
-        });
+        let placebo = self
+            .refinement
+            .forecast_value(placebo_f)
+            .and_then(|_| placebo_model.distribution(placebo_f).map(|d| d.probs));
         let k = (increment.max(0) as usize).min(base.probs.len().saturating_sub(1));
         self.points.push(Point {
             date,
             k,
-            rise,
+            value,
             base: base.probs,
             forecast: forecast.probs,
             placebo,
@@ -375,6 +382,7 @@ impl Scorer {
         };
         ForecastEvaluation {
             product: product.label(),
+            feature: self.refinement.forecast_name().to_owned(),
             days_with_forecast,
             scored_days,
             points: pts.len() as u64,
@@ -394,7 +402,7 @@ impl Scorer {
             placebo_diff: pl_diff,
             placebo_diff_ci_low: pl_low,
             placebo_diff_ci_high: pl_high,
-            rise: rise_rows(pts),
+            rise: feature_rows(pts, self.refinement),
             calibration: calibration_rows(pts),
             proxy: proxy_rows(pts, cfg),
             min_days: cfg.min_days,
@@ -427,13 +435,15 @@ pub(crate) fn ratio_ci(days: &[(f64, f64)], iterations: usize, seed: u64) -> (f6
     (at(0.025), at(0.975))
 }
 
-fn rise_rows(pts: &[Point]) -> Vec<RiseRow> {
+fn feature_rows(pts: &[Point], refinement: FeatureDim) -> Vec<RiseRow> {
     let mut groups: BTreeMap<&'static str, Vec<&Point>> = BTreeMap::new();
     for p in pts {
-        groups.entry(rise_bucket(p.rise)).or_default().push(p);
+        if let Some(b) = refinement.forecast_bucket(p.value) {
+            groups.entry(b).or_default().push(p);
+        }
     }
-    let order = ["cool2", "cool", "flat", "warm"];
-    order
+    refinement
+        .forecast_buckets()
         .iter()
         .filter_map(|b| groups.get(b).map(|g| (*b, g)))
         .map(|(bucket, g)| {
@@ -536,8 +546,8 @@ fn proxy_rows(pts: &[Point], cfg: &EvaluationConfig) -> Vec<ProxyRow> {
 impl ForecastEvaluation {
     pub fn to_markdown(&self) -> String {
         let mut s = format!(
-            "\n## Forecast evaluation — {}\n\n**Verdict: {}**\n\nPrequential (walk-forward) test: each decision point is scored with the model trained on earlier days only; a day's forecast is used only from its ready time, as in live trading. Decision point = first report with the daytime high confirmed for {} minutes.\n\n",
-            self.product, self.verdict, self.window_minutes
+            "\n## Forecast evaluation — {} ({})\n\n**Verdict: {}**\n\nPrequential (walk-forward) test: each decision point is scored with the model trained on earlier days only; a day's forecast is used only from its ready time, as in live trading. Decision point = first report with the daytime high confirmed for {} minutes.\n\n",
+            self.product, self.feature, self.verdict, self.window_minutes
         );
         let _ = writeln!(
             s,
@@ -571,7 +581,11 @@ impl ForecastEvaluation {
             self.placebo_diff_ci_low,
             self.placebo_diff_ci_high
         );
-        s.push_str("### P(high is final) by forecast rise\n\n| rise | decisions | final | P(final) | 95 % CI | mean P without | mean P with |\n|---|---:|---:|---:|---|---:|---:|\n");
+        let _ = write!(
+            s,
+            "### P(high is final) by forecast {0}\n\n| {0} | decisions | final | P(final) | 95 % CI | mean P without | mean P with |\n|---|---:|---:|---:|---|---:|---:|\n",
+            self.feature
+        );
         for r in &self.rise {
             let _ = writeln!(
                 s,

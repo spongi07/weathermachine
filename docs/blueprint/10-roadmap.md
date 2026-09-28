@@ -13,10 +13,10 @@ live run · ⏳ not started · ⛔ deliberately blocked.
 | 5 | Historical market database | 🟡 recorder running from deployment; price/trade history importers | ≥ 60 days of recorded books; price history imported with fidelity label |
 | 6 | ReplayEngine | ✅ knowledge-time session, prefix stability, journal replay | — |
 | 7 | Peak-detection research | 🟡 automatic: the service trains from IEM history on first start and writes the survival report; review pending | Survival table with Wilson CIs on EHAM history, per view (all and hourly), reviewed |
-| 8 | YES backtest | 🟡 engine ready | Walk-forward EV per threshold 0.90…0.99 with CIs, stable neighbourhood |
-| 9 | NO backtest | 🟡 engine ready | Same, per distance +1/+2/+3 |
+| 8 | YES backtest | 🟡 engine ready; `research market` replays A at traded prices on settled days (both structures, 0′/30′/60′, two ask ranges) | Walk-forward EV per threshold 0.90…0.99 with CIs, stable neighbourhood |
+| 9 | NO backtest | 🟡 engine ready; replayed at traded prices like A | Same, per distance +1/+2/+3 |
 | 10 | Split/unwind backtest | 🟡 strategy C (research-only) and unwind styles ready | C vs wait-and-confirm on identical data, net of all costs |
-| 11 | Forecast integration | ✅ Open-Meteo day-1 series live + history, forecast-rise feature, prequential evaluation with placebo control and automatic adoption; 🟡 verdict on real EHAM data comes from the first training on the host | A forecast feature improves walk-forward calibration (decided by the evaluation, §19) |
+| 11 | Forecast integration | ✅ Open-Meteo day-1 series live + history, forecast rise and headroom, prequential evaluation with placebo control and automatic adoption, walk-forward model-structure selection (§36b); 🟡 verdicts on real EHAM data come from the trainings on the host | A forecast feature improves walk-forward calibration (decided by the evaluation, §19) |
 | 12 | Portfolio research | 🟡 scenario exposure and limits built | Correlation across days/cities measured; limits reviewed |
 | 13 | Paper trading | 🟡 runtime, dashboard and Portainer stack ready | Trained model deployed; ≥ 4 weeks of paper results consistent with backtests; open paper positions carried across restarts |
 | 14 | Live trading | ⛔ | See [09-operations.md §42](09-operations.md#42-live-trading) |
@@ -42,9 +42,10 @@ health, conservative polling, back off, zero trades.
    `weather-machine model train`, or `research peak-survival --csv …`
    (repeat with `--filter hourly-nws-faa` for the hourly view).
 2. Review P(final | N minutes) per season, hour, drop and trajectory, with
-   CIs, and the forecast evaluation in the same report (Phase 11: verdict,
-   log loss with and without the forecast and against a placebo, P(final)
-   by forecast rise). Then prices (Phases 8–10).
+   CIs, the forecast evaluation (Phase 11: verdict, log loss with and
+   without the forecast and against a placebo, P(final) by forecast rise or
+   headroom) and the structure comparison (§36b) in the same report. Then
+   prices (Phases 8–10): `research market`, with `--day` for single days.
 
 ## Immediate next steps
 

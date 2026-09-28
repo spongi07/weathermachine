@@ -83,6 +83,7 @@ fn set_loaded(status: &SharedModel, m: &EmpiricalPeakModel) {
         );
         g.progress = None;
         g.forecast = m.forecast.as_ref().map(|f| f.verdict.clone());
+        g.structure = m.selection.as_ref().map(|s| s.verdict.clone());
         g.retraining = None;
     });
 }
@@ -675,6 +676,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                     }),
                     product: plan.forecast.as_ref().map(|f| f.product.clone()),
                     retrain_existing: cfg.file.model.path.is_none(),
+                    compare_structures: plan.selection.is_some(),
                 };
                 let audit: Option<Arc<dyn wm_core::ingest::IngestSink>> = store
                     .as_ref()
@@ -1118,6 +1120,10 @@ struct MaintenancePolicy {
     /// `false` when the operator supplied the model file: train it only when
     /// it is missing, never replace it.
     retrain_existing: bool,
+    /// Training compares the model structures: a model trained without the
+    /// comparison is retrained once, so the comparison does not wait for
+    /// the next periodic retraining.
+    compare_structures: bool,
 }
 
 /// Why the model should be (re)trained now, if at all.
@@ -1144,6 +1150,9 @@ fn training_due(
             }
             _ => {}
         }
+    }
+    if p.compare_structures && m.selection.is_none() {
+        return Some("compare the candidate model structure".into());
     }
     match p.retrain_after {
         Some(age) if now - m.created_at >= age => Some(format!(
@@ -1226,12 +1235,16 @@ async fn model_maintenance_loop(
                 match result {
                     Ok((o, m)) => {
                         let msg = format!(
-                            "model {} trained on {} days ({} → {}), {} samples{}",
+                            "model {} trained on {} days ({} → {}), {} samples{}{}",
                             o.model_id,
                             o.days,
                             o.from.map(|d| d.to_string()).unwrap_or_default(),
                             o.to.map(|d| d.to_string()).unwrap_or_default(),
                             o.samples,
+                            o.structure_verdict
+                                .as_deref()
+                                .map(|v| format!("; {v}"))
+                                .unwrap_or_default(),
                             o.forecast_verdict
                                 .as_deref()
                                 .map(|v| format!("; forecast {v}"))
@@ -1643,6 +1656,7 @@ mod tests {
             retrain_after: Some(Duration::days(30)),
             product: Some(product("gfs_global")),
             retrain_existing: true,
+            compare_structures: false,
         }
     }
 
@@ -1715,6 +1729,35 @@ mod tests {
             training_due(None, &operator, now).is_some(),
             "but trained when missing"
         );
+    }
+
+    #[test]
+    fn a_model_without_the_structure_comparison_is_retrained_once() {
+        let p = MaintenancePolicy {
+            compare_structures: true,
+            ..policy()
+        };
+        let now = t("2026-09-28T12:00:00Z");
+        let mut m = model_at("2026-09-27T12:00:00Z", Some((true, "gfs_global")));
+        assert!(
+            training_due(Some(&m), &p, now)
+                .unwrap()
+                .contains("model structure")
+        );
+        m.selection = Some(wm_strategy::StructureSelection {
+            structure: wm_strategy::ModelStructure::Current,
+            candidate_adopted: false,
+            verdict: "current structure kept: …".into(),
+            evaluated_at: t("2026-09-28T11:00:00Z"),
+        });
+        assert_eq!(training_due(Some(&m), &p, now), None, "compared: fresh");
+        // Never for an operator-supplied model file.
+        let operator = MaintenancePolicy {
+            retrain_existing: false,
+            ..p
+        };
+        m.selection = None;
+        assert_eq!(training_due(Some(&m), &operator, now), None);
     }
 
     fn t(s: &str) -> DateTime<Utc> {

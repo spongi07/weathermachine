@@ -11,6 +11,7 @@
 use crate::forecast_eval::{
     EvaluationConfig, ForecastEvaluation, ForecastHistory, PLACEBO_OFFSET_DAYS, Scorer,
 };
+use crate::selection::{Comparer, SelectionConfig, StructureComparison};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -19,10 +20,10 @@ use wm_core::ids::StationId;
 use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::weather::Observation;
-use wm_strategy::probability::{drop_bucket, hour_bucket, rise_bucket};
+use wm_strategy::probability::{drop_bucket, headroom_bucket, hour_bucket, rise_bucket};
 use wm_strategy::{
-    CONFIRMATION_WINDOWS, EmpiricalPeakModel, PeakConfig, PeakDetectionEngine, PeakFeatures,
-    TemperatureStateEngine, ViewKind,
+    CONFIRMATION_WINDOWS, EmpiricalPeakModel, ModelStructure, PeakConfig, PeakDetectionEngine,
+    PeakFeatures, TemperatureStateEngine, ViewKind,
 };
 
 /// Wilson score interval (95 %).
@@ -126,19 +127,42 @@ pub fn study(
     (out.report, out.model)
 }
 
-/// Result of [`study_with_forecasts`].
+/// Result of [`study_with_forecasts`] and [`study_and_select`].
 #[derive(Debug, Clone)]
 pub struct StudyOutput {
     pub report: SurvivalReport,
-    /// Trained on every day, with a forecast refinement level. Whether it
-    /// may be used with forecasts is the evaluation's decision
+    /// The current structure, trained on every day (with a forecast
+    /// refinement level when forecasts were given). Whether it may be used
+    /// with forecasts is the evaluation's decision
     /// ([`EmpiricalPeakModel::without_refinements`] otherwise).
     pub model: EmpiricalPeakModel,
     pub evaluation: Option<ForecastEvaluation>,
+    /// The candidate structure trained in the same pass ([`study_and_select`]).
+    pub candidate: Option<CandidateStudy>,
+}
+
+/// The candidate structure: its model, its own forecast evaluation (with
+/// its forecast input) and the walk-forward comparison with the current one.
+#[derive(Debug, Clone)]
+pub struct CandidateStudy {
+    pub model: EmpiricalPeakModel,
+    pub evaluation: Option<ForecastEvaluation>,
+    pub comparison: StructureComparison,
+}
+
+impl StudyOutput {
+    /// The structure the comparison selected — the candidate only when it
+    /// was adopted — with that structure's forecast evaluation.
+    pub fn selected(&self) -> (&EmpiricalPeakModel, Option<&ForecastEvaluation>) {
+        match &self.candidate {
+            Some(c) if c.comparison.adopted => (&c.model, c.evaluation.as_ref()),
+            _ => (&self.model, self.evaluation.as_ref()),
+        }
+    }
 }
 
 /// [`study`] joined with a fixed-lead forecast history: the survival table
-/// gains forecast-rise strata, the model a forecast refinement level, and a
+/// gains forecast strata, the model a forecast refinement level, and a
 /// prequential evaluation measures whether the forecast improves decisions.
 pub fn study_with_forecasts(
     observations: &[Observation],
@@ -146,34 +170,83 @@ pub fn study_with_forecasts(
     forecasts: &ForecastHistory,
     eval: EvaluationConfig,
 ) -> StudyOutput {
-    run_study(observations, cfg, Some(forecasts), Some(Scorer::new(eval)))
+    run_study(observations, cfg, Some((forecasts, eval)), None)
+}
+
+/// [`study`] (with forecasts when given) plus the candidate structure,
+/// trained in the same pass and compared walk-forward
+/// ([`crate::selection`]). Each structure's forecast input is evaluated
+/// separately, with its own placebo.
+pub fn study_and_select(
+    observations: &[Observation],
+    cfg: &StudyConfig,
+    forecasts: Option<(&ForecastHistory, EvaluationConfig)>,
+    selection: SelectionConfig,
+) -> StudyOutput {
+    run_study(observations, cfg, forecasts, Some(selection))
+}
+
+/// One structure being trained: its model, and with forecasts a placebo
+/// model (same levels, trained with the placebo's forecast inputs) and the
+/// forecast scorer.
+struct Arm {
+    model: EmpiricalPeakModel,
+    placebo: Option<EmpiricalPeakModel>,
+    scorer: Option<Scorer>,
+}
+
+impl Arm {
+    fn new(
+        structure: ModelStructure,
+        cfg: &StudyConfig,
+        view: ViewKind,
+        eval: Option<&EvaluationConfig>,
+        with_forecast: bool,
+    ) -> Self {
+        let levels = if with_forecast {
+            EmpiricalPeakModel::with_refinement(structure.levels(), structure.refinement())
+        } else {
+            structure.levels()
+        };
+        let suffix = match structure {
+            ModelStructure::Current => "",
+            ModelStructure::Candidate => "-first-reach",
+        };
+        let model = EmpiricalPeakModel::new(
+            format!("empirical-{}-{}{suffix}", cfg.station, view.label()),
+            cfg.station.to_string(),
+            view.label(),
+            cfg.k_classes,
+            levels,
+        );
+        let scorer = eval.map(|e| Scorer::new(e.clone(), structure.refinement()));
+        Self {
+            placebo: scorer.as_ref().map(|_| model.clone()),
+            model,
+            scorer,
+        }
+    }
 }
 
 fn run_study(
     observations: &[Observation],
     cfg: &StudyConfig,
-    forecasts: Option<&ForecastHistory>,
-    mut scorer: Option<Scorer>,
+    forecasts: Option<(&ForecastHistory, EvaluationConfig)>,
+    selection: Option<SelectionConfig>,
 ) -> StudyOutput {
     let view = view_of(cfg.filter);
     let mut engine = TemperatureStateEngine::new(3);
     engine.register_station(cfg.station.clone(), cfg.tz);
     let peak = PeakDetectionEngine::new(cfg.peak.clone());
-    let levels = if forecasts.is_some() {
-        EmpiricalPeakModel::with_forecast_refinement(EmpiricalPeakModel::default_levels())
-    } else {
-        EmpiricalPeakModel::default_levels()
+    let (forecasts, eval) = match forecasts {
+        Some((h, e)) => (Some(h), Some(e)),
+        None => (None, None),
     };
-    let mut model = EmpiricalPeakModel::new(
-        format!("empirical-{}-{}", cfg.station, view.label()),
-        cfg.station.to_string(),
-        view.label(),
-        cfg.k_classes,
-        levels,
-    );
+    let arm = |s| Arm::new(s, cfg, view, eval.as_ref(), forecasts.is_some());
+    let mut current = arm(ModelStructure::Current);
+    let mut candidate = selection.as_ref().map(|_| arm(ModelStructure::Candidate));
+    let mut comparer = selection.map(Comparer::new);
     let mut days_with_forecast = 0u64;
-    // Same levels, trained with placebo forecasts (evaluation only).
-    let mut placebo_model = scorer.as_ref().map(|_| model.clone());
 
     let mut by_day: BTreeMap<NaiveDate, Vec<&Observation>> = BTreeMap::new();
     for o in observations.iter().filter(|o| o.key.station == cfg.station) {
@@ -199,10 +272,11 @@ fn run_study(
         days += 1;
         let forecast = forecasts.and_then(|h| h.days.get(date));
         days_with_forecast += u64::from(forecast.is_some());
-        let placebo = match (&placebo_model, forecasts) {
-            (Some(_), Some(h)) => h.placebo_day(*date, cfg.tz, PLACEBO_OFFSET_DAYS),
+        let placebo = match (eval.is_some(), forecasts) {
+            (true, Some(h)) => h.placebo_day(*date, cfg.tz, PLACEBO_OFFSET_DAYS),
             _ => None,
         };
+        let compare_today = comparer.as_ref().is_some_and(|c| c.scores_day(days));
         // Evaluate as of each eligible observation time (knowledge-consistent).
         // The day is scored before it is learned: no day informs itself.
         let times: Vec<DateTime<Utc>> = final_state.points.iter().map(|p| p.observed_at).collect();
@@ -217,7 +291,15 @@ fn run_study(
             };
             let f = a.features;
             let increment = final_high - f.high_whole;
-            let placebo_rise = placebo.as_ref().and_then(|p| p.rise_tenths(t));
+            // The same moment with the placebo forecast's inputs.
+            let placebo_f = PeakFeatures {
+                forecast_rise_tenths: placebo.as_ref().and_then(|p| p.rise_tenths(t)),
+                forecast_headroom_tenths: placebo
+                    .as_ref()
+                    .and_then(|p| p.remaining_max_tenths(t))
+                    .map(|m| m - f.high_tenths),
+                ..f.clone()
+            };
             for w in CONFIRMATION_WINDOWS {
                 // One sample per (window, high-touch): the first observation whose
                 // observed coverage since the high reaches the window.
@@ -236,28 +318,37 @@ fn run_study(
                     if let Some(r) = f.forecast_rise_tenths {
                         strata.push(format!("forecast_rise={}", rise_bucket(r)));
                     }
+                    if let Some(h) = f.forecast_headroom_tenths {
+                        strata.push(format!("forecast_headroom={}", headroom_bucket(h)));
+                    }
                     for st in strata {
                         let e = table.entry((w, st)).or_insert((0, 0));
                         e.0 += 1;
                         e.1 += u64::from(is_final);
                     }
-                    if let (Some(sc), Some(pm)) = (scorer.as_mut(), placebo_model.as_ref())
-                        && w == sc.window()
-                    {
-                        sc.score(*date, &model, pm, &f, placebo_rise, increment);
+                    for arm in std::iter::once(&mut current).chain(candidate.as_mut()) {
+                        if let (Some(sc), Some(pm)) = (arm.scorer.as_mut(), arm.placebo.as_ref())
+                            && w == sc.window()
+                        {
+                            sc.score(*date, &arm.model, pm, &f, &placebo_f, increment);
+                        }
                     }
                 }
             }
-            samples.push((f, placebo_rise, increment));
+            if compare_today
+                && let (Some(c), Some(cand)) = (comparer.as_mut(), candidate.as_ref())
+                && c.in_window(&f)
+            {
+                c.score(*date, &current.model, &cand.model, &f, increment);
+            }
+            samples.push((f, placebo_f, increment));
         }
-        for (f, placebo_rise, increment) in &samples {
-            model.observe(f, *increment);
-            if let Some(pm) = placebo_model.as_mut() {
-                let pf = PeakFeatures {
-                    forecast_rise_tenths: *placebo_rise,
-                    ..f.clone()
-                };
-                pm.observe(&pf, *increment);
+        for (f, placebo_f, increment) in &samples {
+            for arm in std::iter::once(&mut current).chain(candidate.as_mut()) {
+                arm.model.observe(f, *increment);
+                if let Some(pm) = arm.placebo.as_mut() {
+                    pm.observe(placebo_f, *increment);
+                }
             }
         }
         engine.prune(*date);
@@ -279,12 +370,25 @@ fn run_study(
         .collect();
     let from = by_day.keys().next().copied();
     let to = by_day.keys().next_back().copied();
-    if let (Some(f), Some(t)) = (from, to) {
-        model.trained_from = f;
-        model.trained_to = t;
-    }
-    let evaluation = match (scorer, forecasts) {
-        (Some(sc), Some(h)) => Some(sc.finish(&h.product, days_with_forecast)),
+    let finish = |mut arm: Arm| {
+        if let (Some(f), Some(t)) = (from, to) {
+            arm.model.trained_from = f;
+            arm.model.trained_to = t;
+        }
+        let evaluation = match (arm.scorer, forecasts) {
+            (Some(sc), Some(h)) => Some(sc.finish(&h.product, days_with_forecast)),
+            _ => None,
+        };
+        (arm.model, evaluation)
+    };
+    let (model, evaluation) = finish(current);
+    let adopted = |e: &Option<ForecastEvaluation>| e.as_ref().is_some_and(|e| e.adopted);
+    let candidate = match (candidate.map(finish), comparer) {
+        (Some((cand, cand_eval)), Some(c)) => Some(CandidateStudy {
+            comparison: c.finish(adopted(&evaluation), adopted(&cand_eval)),
+            model: cand,
+            evaluation: cand_eval,
+        }),
         _ => None,
     };
     StudyOutput {
@@ -298,6 +402,7 @@ fn run_study(
         },
         model,
         evaluation,
+        candidate,
     }
 }
 

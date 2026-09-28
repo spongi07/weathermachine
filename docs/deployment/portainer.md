@@ -139,6 +139,14 @@ clearly beats both is it adopted. Read the verdict:
   (log loss with and without the forecast and vs. the placebo, P(final) by
   forecast rise, calibration, a constant-price trading proxy).
 
+Training also compares the model's structure with a candidate (clock from the
+first report at the high, morning split per hour, forecast as headroom above
+the observed high) in the same walk-forward way, and switches only if the
+candidate clearly predicts better. The verdict is in the section *Model
+structure — walk-forward comparison* of the same report and in the MODEL
+pill's tooltip. After updating to a version with this comparison, the model
+retrains once in the background; the running model keeps trading meanwhile.
+
 If Open-Meteo is unreachable the model simply runs without the forecast.
 
 Retrain by hand (for example once a year) with a one-off container on the
@@ -168,8 +176,15 @@ settled markets (read-only: it trades nothing and changes nothing):
 ```sh
 docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
   ghcr.io/spongi07/weathermachine:latest \
-  research market --from 2026-06-01 --to 2026-09-26 --print
+  research market --from 2026-06-01 --to 2026-09-28 --day 2026-09-28 --print
 ```
+
+Besides model versus market, the report replays strategies A and B at the
+prices the market actually traded. The replay runs with both model
+structures, confirmation 0′/30′/live and the live and a wider ask range. It
+shows trades, wins and P&L per variant. Each `--day` (repeatable) adds that
+day report by report: both models' cells and probabilities, the market and
+every simulated trade.
 
 It reads each day's event from Gamma and its trades from the Polymarket Data
 API. That is one or two requests per day, two per second at most, and

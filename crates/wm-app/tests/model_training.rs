@@ -81,6 +81,13 @@ fn plan(dir: &Path, min_days: u64) -> TrainPlan {
         report_out: dir.join("research/eham-survival.md"),
         min_days,
         forecast: None,
+        // Short synthetic history: a short burn-in so the comparison scores days.
+        selection: Some(wm_backtest::SelectionConfig {
+            burn_in_days: 30,
+            min_days: 30,
+            bootstrap_iterations: 200,
+            ..wm_backtest::SelectionConfig::default()
+        }),
     }
 }
 
@@ -357,6 +364,7 @@ async fn an_unreachable_forecast_source_leaves_the_model_without_it() {
         .await;
     let dir = tempdir("forecast-down");
     let mut plan = plan(&dir, 30);
+    plan.selection = None;
     plan.forecast = Some(ForecastPlan {
         product: wm_core::forecast::ForecastProduct {
             provider: ProviderId::open_meteo(),
@@ -378,8 +386,10 @@ async fn an_unreachable_forecast_source_leaves_the_model_without_it() {
     .await;
     let o = r.unwrap();
     assert!(!o.forecast_adopted);
+    assert!(o.structure_verdict.is_none() && !o.candidate_adopted);
     let model = wm_app::setup::read_model(&plan.model_out).unwrap();
     assert!(!model.uses_forecast());
+    assert!(model.selection.is_none(), "no comparison ran");
     let info = model.forecast.unwrap();
     assert!(!info.evaluated, "retry later");
     assert!(
@@ -413,7 +423,9 @@ async fn trains_from_history_and_downloads_each_finished_year_once() {
     assert!(o.samples > 0);
     assert_eq!((o.years_downloaded, o.years_cached), (2, 0));
     assert!(
-        o.model_id.starts_with("empirical-EHAM-all-20250419"),
+        o.model_id.starts_with("empirical-EHAM-all-")
+            && o.model_id.ends_with("-20250419")
+            && o.model_id.contains("-first-reach-") == o.candidate_adopted,
         "{}",
         o.model_id
     );
@@ -439,6 +451,25 @@ async fn trains_from_history_and_downloads_each_finished_year_once() {
         report.contains("## Provenance")
             && report.contains("| 2024 |")
             && report.contains("| 2025 |")
+    );
+    // Both structures were compared; the verdict travels with the model.
+    let sel = model.selection.clone().unwrap();
+    assert_eq!(Some(sel.verdict.clone()), o.structure_verdict);
+    assert_eq!(sel.candidate_adopted, o.candidate_adopted);
+    assert_eq!(model.structure(), sel.structure);
+    assert_eq!(
+        sel.structure == wm_strategy::ModelStructure::Candidate,
+        o.candidate_adopted
+    );
+    assert!(
+        sel.verdict.starts_with("candidate structure adopted")
+            || sel.verdict.starts_with("current structure kept"),
+        "{}",
+        sel.verdict
+    );
+    assert!(
+        report.contains("## Model structure — walk-forward comparison"),
+        "{report}"
     );
     assert!(plan.cache_dir.join("2024.csv").is_file());
     assert!(plan.cache_dir.join("2025-partial.csv").is_file());

@@ -108,7 +108,9 @@ with `SimConfig { latency_ms: 250, adverse_ticks: 0 }`.
 
 **Dimensions.** Season, month, local time, confirmation window, slope, drop
 from high, retest count, trajectory class, forecast rise (day-1 forecast:
-rest of day vs. so far, §19), YES price threshold (0.90…0.99), NO price,
+rest of day vs. so far, §19), forecast headroom (rest-of-day forecast maximum
+minus the observed high), clock from the last or the first report at the
+high (§36b), YES price threshold (0.90…0.99), NO price,
 outcome distance (+1/+2/+3), split timing, unwind style/timing, exit price.
 
 **First strategy experiment (brief §38).** Runs automatically when the
@@ -171,6 +173,16 @@ distinct traders.
 * **What is scored.** Every bucket that can still win, where the model's
   tail probability is unambiguous and its cell has enough support.
   Probabilities are clamped to [0.001, 0.999].
+* **Both structures.** The candidate structure (§36b) is trained alongside,
+  prequentially, and scored on the same decisions.
+* **Strategies at traded prices (`wm-backtest::market_sim`).** A and B are
+  replayed at every decision with each structure, for every confirmation
+  window (0′, 30′ and the live one, counted from the last report at the
+  high) and ask range (the live one and 0.70 to its maximum). YES ask = the
+  latest taker buy of YES, NO ask = one minus the latest taker sell of YES;
+  the order fills at that price plus the slippage allowance, the taker fee
+  is paid, and the model is pooled with the traded midpoint and capped at
+  the model, as live. At most one trade per day, bucket and variant.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 
@@ -187,12 +199,21 @@ distinct traders.
   the observation. Profit is split into before and after the bot's
   decision time, with the number of distinct takers;
 * agreement of the METAR high with the resolved bucket;
+* the candidate structure against the market and against the current one;
+* per variant: trades, wins, P&L per trade with a 95 % day-block interval,
+  and the total at the live stake, with the live rule marked. Twenty-four
+  variants are replayed, so the best one overstates what to expect: a
+  variant only counts if it stays profitable on days after it was chosen;
+* with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
+  both clocks, the forecast rise and headroom, both structures' cells and
+  P(high stays), the market and ask of the high's bucket, and every
+  simulated trade;
 * a plain-language verdict.
 
 **LIMITS.** Trades show only liquidity someone took, which is a lower
 bound on what was offered. The midpoint of the last taker buy and sell
-approximates the book's midpoint. The study is read-only and changes
-nothing.
+approximates the book's midpoint. Simulated fills ignore depth, so they are
+optimistic in thin markets. The study is read-only and changes nothing.
 **TESTING.** Unit tests on synthetic history:
 
 * an oracle market beats the model;
@@ -200,12 +221,72 @@ nothing.
 * no day is scored with a model that has learned it;
 * stale-quote timing and profit accounting;
 * the price proxy;
-* skipped days.
+* skipped days;
+* strategies at traded prices: live-range gating, P&L arithmetic, one trade
+  per day, bucket and variant, a mis-resolved day as a loss, and the day
+  replay (`strategies_are_replayed_at_traded_prices`, plus `market_sim`
+  unit tests).
 
 Data API paging, the offset cap, window splitting, dedup and the request
 budget are tested against a mock server. An end-to-end run against mock
 Gamma, Data API and IEM servers checks the cache and a rerun that makes no
 new requests.
+
+## 36b. Model structure selection
+
+**PURPOSE.** The replay of 28 September 2026
+([docs/research/replay-2026-09-28.md](../research/replay-2026-09-28.md))
+showed structural faults of the model's cells:
+
+* the clock restarts at every report that repeats the high;
+* hours before noon share one cell;
+* the rise cannot see the observed level.
+
+A candidate structure fixes all three. Whether it predicts better is
+measured, not assumed.
+
+**THE TWO STRUCTURES (fixed before any result was seen).**
+
+| | current | candidate |
+|---|---|---|
+| clock | minutes since the *last* report at the high | minutes since the *first* report at the high |
+| hour | < 12, 12–13, 14–15, 16–17, ≥ 18 | < 09, 09, 10, 11, then as current |
+| forecast refinement | rise | headroom |
+
+Both use the same drop and season cells, the same Dirichlet smoothing and
+K = 4. The strategies' confirmation gate is unchanged: it still counts from
+the last report at the high.
+
+**METHOD (`wm-backtest::selection`).**
+
+* Training (`study_and_select`) trains both structures in one prequential
+  pass.
+* Every report between 10:00 and 18:00 local, after a 365-day burn-in, is
+  predicted by each structure as trained on earlier days only. Each
+  predicts with its forecast input only when its own placebo-controlled
+  forecast evaluation adopted it, i.e. as the service would use it.
+* **Rule:** the candidate replaces the current structure only with
+  ≥ 365 scored days and a 95 % day-block bootstrap interval of the change
+  in multi-class log loss per report (candidate − current) entirely below
+  zero.
+* The report adds log loss by hour and for repeated highs.
+* The verdict is stored in the model (`selection`). It is shown in the
+  training report, the log and the MODEL tooltip.
+* A model trained without the comparison is retrained once in the
+  background.
+
+**TESTING.** `crates/wm-backtest/tests/structure_selection.rs`:
+
+* a plateau world, where only the first-reached clock sees how long a high
+  has held, adopts the candidate;
+* a world without repeated highs gives identical predictions and changes
+  nothing;
+* a short history keeps the current structure;
+* each structure evaluates its own forecast input against its own placebo.
+
+Plus bucket, cell-key and backward-compatibility unit tests in
+`wm-strategy`, training tests (verdict in the model and report) and the
+runtime's retrain-once test.
 
 ## 37. Overfitting safeguards
 

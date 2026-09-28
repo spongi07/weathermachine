@@ -23,6 +23,12 @@
 //!   how much of it faster traders took before our knowledge time.
 //! * **Whether the METAR high is the resolution** — the observed high against
 //!   the resolved bucket.
+//! * **Both model structures** — the candidate structure
+//!   ([`wm_strategy::ModelStructure::Candidate`]) is trained alongside and
+//!   scored on the same decisions.
+//! * **Strategies at traded prices** — A and B replayed with either
+//!   structure, several confirmation windows and ask ranges
+//!   ([`crate::market_sim`]), and chosen days report by report.
 //!
 //! Market prices come from executed trades, not quotes: the midpoint of the
 //! latest taker buy and taker sell of YES (ask and bid proxies), each at most
@@ -30,6 +36,9 @@
 //! lower bound on what was offered.
 
 use crate::forecast_eval::{ForecastHistory, ratio_ci};
+use crate::market_sim::{
+    self, DayTimeline, Decision, MarketSimConfig, Quote, SimTrade, StrategyRow,
+};
 use crate::research::wilson;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
@@ -41,8 +50,8 @@ use wm_core::market::TemperatureBucket;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::weather::Observation;
 use wm_strategy::{
-    EmpiricalPeakModel, PeakConfig, PeakDetectionEngine, ProbabilityModel, TemperatureStateEngine,
-    ViewKind, log_pool,
+    EmpiricalPeakModel, ModelStructure, PeakConfig, PeakDetectionEngine, ProbabilityModel,
+    TemperatureStateEngine, ViewKind, log_pool,
 };
 
 /// Probabilities are clamped to `[P_FLOOR, 1 − P_FLOOR]` before scoring:
@@ -113,6 +122,10 @@ pub struct MarketStudyConfig {
     pub latency_window: Duration,
     pub bootstrap_iterations: usize,
     pub seed: u64,
+    /// Strategies A and B replayed at traded prices.
+    pub sim: MarketSimConfig,
+    /// Days replayed report by report (`research market --day`).
+    pub timeline_days: Vec<NaiveDate>,
 }
 
 impl MarketStudyConfig {
@@ -134,6 +147,8 @@ impl MarketStudyConfig {
             latency_window: Duration::minutes(30),
             bootstrap_iterations: 2_000,
             seed: 0x4D41_524B_4554,
+            sim: MarketSimConfig::default(),
+            timeline_days: Vec::new(),
         }
     }
 
@@ -174,6 +189,9 @@ pub struct ScoreTable {
     pub rows: Vec<ScoreRow>,
     /// Weight with the lowest log loss.
     pub best_weight: Option<f64>,
+    /// The candidate structure alone and pooled at the live weight.
+    #[serde(default)]
+    pub candidate_rows: Vec<ScoreRow>,
 }
 
 /// Outcomes grouped by market price or by disagreement.
@@ -274,6 +292,28 @@ pub struct MarketStudyReport {
     pub latency_events_total: u64,
     pub latency_bins: Vec<LatencyBin>,
     pub latency_events: Vec<LatencyEvent>,
+    /// Log loss of the candidate structure minus the current one per
+    /// decision, with its 95 % day-block interval (all decisions).
+    #[serde(default)]
+    pub candidate_diff: f64,
+    #[serde(default)]
+    pub candidate_diff_ci_low: f64,
+    #[serde(default)]
+    pub candidate_diff_ci_high: f64,
+    /// The replay settings of the strategy section.
+    #[serde(default)]
+    pub sim: MarketSimConfig,
+    /// Strategies at traded prices, per variant.
+    #[serde(default)]
+    pub strategies: Vec<StrategyRow>,
+    #[serde(default)]
+    pub strategy_verdict: Vec<String>,
+    /// Every simulated trade.
+    #[serde(default)]
+    pub sim_trades: Vec<SimTrade>,
+    /// Replayed days (`--day`).
+    #[serde(default)]
+    pub timelines: Vec<DayTimeline>,
     /// Plain-language conclusions.
     pub verdict: Vec<String>,
 }
@@ -285,6 +325,8 @@ struct Point {
     at: DateTime<Utc>,
     bucket: usize,
     model: f64,
+    /// The candidate structure's probability.
+    candidate: f64,
     market: f64,
     won: bool,
 }
@@ -316,6 +358,12 @@ fn local_hm(t: DateTime<Utc>, tz: Tz) -> String {
 
 /// Market probability of YES at `at` from one bucket's trades (oldest first).
 fn market_price(trades: &[&MarketTrade], at: DateTime<Utc>, max_age: Duration) -> Option<f64> {
+    quote(trades, at, max_age).mid
+}
+
+/// The latest taker buy and sell of YES at `at` (each at most `max_age`
+/// old) and their midpoint — or the one side seen.
+fn quote(trades: &[&MarketTrade], at: DateTime<Utc>, max_age: Duration) -> Quote {
     let end = trades.partition_point(|t| t.at <= at);
     let (mut buy, mut sell) = (None, None);
     for t in trades[..end].iter().rev() {
@@ -331,9 +379,13 @@ fn market_price(trades: &[&MarketTrade], at: DateTime<Utc>, max_age: Duration) -
             break;
         }
     }
-    match (buy, sell) {
-        (Some(a), Some(b)) => Some((a + b) / 2.0),
-        (a, b) => a.or(b),
+    Quote {
+        mid: match (buy, sell) {
+            (Some(a), Some(b)) => Some((a + b) / 2.0),
+            (a, b) => a.or(b),
+        },
+        yes_ask: buy,
+        yes_bid: sell,
     }
 }
 
@@ -363,18 +415,22 @@ pub fn market_study(
     let mut engine = TemperatureStateEngine::new(3);
     engine.register_station(cfg.station.clone(), cfg.tz);
     let peak = PeakDetectionEngine::new(cfg.peak.clone());
-    let levels = if forecasts.is_some() {
-        EmpiricalPeakModel::with_forecast_refinement(EmpiricalPeakModel::default_levels())
-    } else {
-        EmpiricalPeakModel::default_levels()
+    let new_model = |structure: ModelStructure, suffix: &str| {
+        let levels = if forecasts.is_some() {
+            EmpiricalPeakModel::with_refinement(structure.levels(), structure.refinement())
+        } else {
+            structure.levels()
+        };
+        EmpiricalPeakModel::new(
+            format!("prequential-{}{suffix}", cfg.station),
+            cfg.station.to_string(),
+            view.label(),
+            cfg.k_classes,
+            levels,
+        )
     };
-    let mut model = EmpiricalPeakModel::new(
-        format!("prequential-{}", cfg.station),
-        cfg.station.to_string(),
-        view.label(),
-        cfg.k_classes,
-        levels,
-    );
+    let mut model = new_model(ModelStructure::Current, "");
+    let mut candidate = new_model(ModelStructure::Candidate, "-first-reach");
     let markets: HashMap<NaiveDate, &MarketDay> = days.iter().map(|d| (d.date, d)).collect();
     let mut by_day: BTreeMap<NaiveDate, Vec<&Observation>> = BTreeMap::new();
     for o in observations.iter().filter(|o| o.key.station == cfg.station) {
@@ -419,6 +475,14 @@ pub fn market_study(
             })
             .collect(),
         latency_events: Vec::new(),
+        candidate_diff: 0.0,
+        candidate_diff_ci_low: 0.0,
+        candidate_diff_ci_high: 0.0,
+        sim: cfg.sim.clone(),
+        strategies: Vec::new(),
+        strategy_verdict: Vec::new(),
+        sim_trades: Vec::new(),
+        timelines: Vec::new(),
         verdict: Vec::new(),
     };
     let mut points: Vec<Point> = Vec::new();
@@ -471,15 +535,31 @@ pub fn market_study(
                 }
                 let day_index = scored_dates.len();
                 let before = points.len();
-                score_day(
-                    md,
-                    day_index,
-                    &states,
-                    &model,
-                    cfg,
-                    &mut points,
-                    &mut report,
+                let decisions = decisions(md, &states, [&model, &candidate], cfg);
+                score_day(md, day_index, &decisions, cfg, &mut points, &mut report);
+                let trades = market_sim::simulate_day(
+                    md.date,
+                    &md.buckets,
+                    &md.labels,
+                    md.winner,
+                    &decisions,
+                    &cfg.sim,
+                    cfg.taker_fee_rate,
+                    cfg.configured_weight,
+                    cfg.min_model_support,
+                    cfg.tz,
                 );
+                if cfg.timeline_days.contains(date) {
+                    report.timelines.push(market_sim::timeline(
+                        md.date,
+                        &md.buckets,
+                        &md.labels[md.winner],
+                        &decisions,
+                        &trades,
+                        cfg.tz,
+                    ));
+                }
+                report.sim_trades.extend(trades);
                 latency(md, &states, cfg, &mut report);
                 if points.len() > before {
                     scored_dates.push(*date);
@@ -494,6 +574,7 @@ pub fn market_study(
         // Learn the day only after scoring it.
         for (f, increment) in &samples {
             model.observe(f, *increment);
+            candidate.observe(f, *increment);
         }
         engine.prune(*date);
     }
@@ -530,53 +611,98 @@ pub fn market_study(
     report
         .latency_events
         .sort_by(|a, b| (a.date, &a.local_time).cmp(&(b.date, &b.local_time)));
+    // Candidate minus current structure, per decision, day-block interval.
+    let mut per_day = vec![(0.0, 0.0); n_days];
+    for p in &points {
+        let d = &mut per_day[p.day];
+        d.0 += log_loss(p.candidate, p.won) - log_loss(p.model, p.won);
+        d.1 += 1.0;
+    }
+    if !points.is_empty() {
+        report.candidate_diff = per_day.iter().map(|d| d.0).sum::<f64>() / points.len() as f64;
+        let days: Vec<(f64, f64)> = per_day.into_iter().filter(|d| d.1 > 0.0).collect();
+        (report.candidate_diff_ci_low, report.candidate_diff_ci_high) =
+            ratio_ci(&days, cfg.bootstrap_iterations, cfg.seed ^ 0xCA);
+    }
+    report.strategies = market_sim::strategy_rows(
+        &report.sim_trades,
+        &cfg.sim,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x51,
+    );
+    report.strategy_verdict = market_sim::verdict(&report.strategies, &cfg.sim);
     report.verdict = verdict(&report);
     report
 }
 
+/// Every decision of a market day from the first decision time: each
+/// structure's distribution (trained on earlier days) and every bucket's
+/// quote at the decision time (observation + knowledge delay).
+fn decisions(
+    md: &MarketDay,
+    states: &[(DateTime<Utc>, wm_strategy::PeakFeatures)],
+    models: [&EmpiricalPeakModel; 2],
+    cfg: &MarketStudyConfig,
+) -> Vec<Decision> {
+    let per_bucket = trades_by_bucket(md, cfg.min_trade_shares);
+    states
+        .iter()
+        .filter(|(_, f)| f.local_minute_now >= cfg.first_decision_minute)
+        .map(|(t, f)| {
+            let knowledge = *t + cfg.knowledge_delay;
+            Decision {
+                at: *t,
+                dists: models.map(|m| m.distribution(f)),
+                quotes: per_bucket
+                    .iter()
+                    .map(|tr| quote(tr, knowledge, cfg.max_price_age))
+                    .collect(),
+                f: f.clone(),
+            }
+        })
+        .collect()
+}
+
 /// Score every still-possible bucket at each decision of one market day.
-#[allow(clippy::too_many_arguments)]
+/// Which decisions count is the current structure's call (its support and
+/// tail gates, as before); the candidate is scored on the same ones.
 fn score_day(
     md: &MarketDay,
     day_index: usize,
-    states: &[(DateTime<Utc>, wm_strategy::PeakFeatures)],
-    model: &EmpiricalPeakModel,
+    decisions: &[Decision],
     cfg: &MarketStudyConfig,
     points: &mut Vec<Point>,
     report: &mut MarketStudyReport,
 ) {
-    let per_bucket = trades_by_bucket(md, cfg.min_trade_shares);
-    for (t, f) in states {
-        if f.local_minute_now < cfg.first_decision_minute {
-            continue;
-        }
-        let Some(dist) = model.distribution(f) else {
+    for d in decisions {
+        let [Some(dist), Some(cand)] = &d.dists else {
             continue;
         };
-        let knowledge = *t + cfg.knowledge_delay;
+        let high = d.f.high_whole;
         for (i, bucket) in md.buckets.iter().enumerate() {
-            if bucket.upper.is_some_and(|u| u < f.high_whole) {
+            if bucket.upper.is_some_and(|u| u < high) {
                 continue; // already decided by the observations
             }
             if dist.support < cfg.min_model_support {
                 report.skipped_support += 1;
                 continue;
             }
-            let lower = dist.p_in_bucket_lower(f.high_whole, bucket);
-            let upper = dist.p_in_bucket_upper(f.high_whole, bucket);
+            let lower = dist.p_in_bucket_lower(high, bucket);
+            let upper = dist.p_in_bucket_upper(high, bucket);
             if (upper - lower).abs() > 1e-9 {
                 report.skipped_ambiguous += 1;
                 continue;
             }
-            let Some(market) = market_price(&per_bucket[i], knowledge, cfg.max_price_age) else {
+            let Some(market) = d.quotes[i].mid else {
                 report.skipped_no_price += 1;
                 continue;
             };
             points.push(Point {
                 day: day_index,
-                at: *t,
+                at: d.at,
                 bucket: i,
                 model: lower,
+                candidate: cand.p_in_bucket_lower(high, bucket),
                 market,
                 won: i == md.winner,
             });
@@ -691,52 +817,70 @@ fn latency(
     }
 }
 
-fn score_table(subset: &str, pts: &[&Point], n_days: usize, cfg: &MarketStudyConfig) -> ScoreTable {
-    let weights = cfg.weights();
-    let pool = |p: &Point, w: f64| log_pool(p.model, Some(p.market), w);
+/// Log loss, Brier score and the difference to the market (with its
+/// day-block interval unless `ci` is false) of one predictor.
+fn score_row(
+    name: String,
+    weight: f64,
+    pts: &[&Point],
+    n_days: usize,
+    prob: &dyn Fn(&Point) -> f64,
+    ci: bool,
+    cfg: &MarketStudyConfig,
+) -> ScoreRow {
     let n = pts.len() as f64;
+    let (mut ll, mut br) = (0.0, 0.0);
+    // Per day: (Σ log loss − Σ market log loss, points).
+    let mut per_day = vec![(0.0, 0.0); n_days.max(1)];
+    for p in pts {
+        let q = prob(p);
+        let l = log_loss(q, p.won);
+        ll += l;
+        br += brier(q, p.won);
+        let d = &mut per_day[p.day];
+        d.0 += l - log_loss(p.market, p.won);
+        d.1 += 1.0;
+    }
+    let per_day: Vec<(f64, f64)> = per_day.into_iter().filter(|d| d.1 > 0.0).collect();
+    let diff = if n > 0.0 {
+        per_day.iter().map(|d| d.0).sum::<f64>() / n
+    } else {
+        0.0
+    };
+    let (lo, hi) = if ci {
+        ratio_ci(&per_day, cfg.bootstrap_iterations, cfg.seed)
+    } else {
+        (0.0, 0.0)
+    };
+    ScoreRow {
+        name,
+        weight,
+        log_loss: if n > 0.0 { ll / n } else { 0.0 },
+        brier: if n > 0.0 { br / n } else { 0.0 },
+        diff_vs_market: diff,
+        diff_ci_low: lo,
+        diff_ci_high: hi,
+    }
+}
+
+fn score_table(subset: &str, pts: &[&Point], n_days: usize, cfg: &MarketStudyConfig) -> ScoreTable {
     let days_with: HashSet<usize> = pts.iter().map(|p| p.day).collect();
-    let mut rows = Vec::with_capacity(weights.len());
-    for &w in &weights {
-        let (mut ll, mut br) = (0.0, 0.0);
-        // Per day: (Σ log loss − Σ market log loss, points).
-        let mut per_day = vec![(0.0, 0.0); n_days.max(1)];
-        for p in pts {
-            let q = pool(p, w);
-            let l = log_loss(q, p.won);
-            ll += l;
-            br += brier(q, p.won);
-            let d = &mut per_day[p.day];
-            d.0 += l - log_loss(p.market, p.won);
-            d.1 += 1.0;
-        }
-        let per_day: Vec<(f64, f64)> = per_day.into_iter().filter(|d| d.1 > 0.0).collect();
-        let diff = if n > 0.0 {
-            per_day.iter().map(|d| d.0).sum::<f64>() / n
-        } else {
-            0.0
-        };
-        let (lo, hi) = if (w - 1.0).abs() < 1e-9 {
-            (0.0, 0.0)
-        } else {
-            ratio_ci(&per_day, cfg.bootstrap_iterations, cfg.seed)
-        };
-        rows.push(ScoreRow {
-            name: if w == 0.0 {
+    let rows: Vec<ScoreRow> = cfg
+        .weights()
+        .into_iter()
+        .map(|w| {
+            let market = (w - 1.0).abs() < 1e-9;
+            let name = if w == 0.0 {
                 "model".to_owned()
-            } else if (w - 1.0).abs() < 1e-9 {
+            } else if market {
                 "market".to_owned()
             } else {
                 format!("pool w={w:.2}")
-            },
-            weight: w,
-            log_loss: if n > 0.0 { ll / n } else { 0.0 },
-            brier: if n > 0.0 { br / n } else { 0.0 },
-            diff_vs_market: diff,
-            diff_ci_low: lo,
-            diff_ci_high: hi,
-        });
-    }
+            };
+            let pool = move |p: &Point| log_pool(p.model, Some(p.market), w);
+            score_row(name, w, pts, n_days, &pool, !market, cfg)
+        })
+        .collect();
     let best_weight = (!pts.is_empty())
         .then(|| {
             rows.iter()
@@ -744,12 +888,34 @@ fn score_table(subset: &str, pts: &[&Point], n_days: usize, cfg: &MarketStudyCon
                 .map(|r| r.weight)
         })
         .flatten();
+    let cw = cfg.configured_weight.clamp(0.0, 1.0);
+    let mut candidate_rows = vec![score_row(
+        "candidate model".to_owned(),
+        0.0,
+        pts,
+        n_days,
+        &|p| p.candidate,
+        true,
+        cfg,
+    )];
+    if cw > 0.0 && cw < 1.0 {
+        candidate_rows.push(score_row(
+            format!("candidate pool w={cw:.2}"),
+            cw,
+            pts,
+            n_days,
+            &|p| log_pool(p.candidate, Some(p.market), cw),
+            true,
+            cfg,
+        ));
+    }
     ScoreTable {
         subset: subset.to_owned(),
         points: pts.len() as u64,
         days: days_with.len() as u64,
         rows,
         best_weight,
+        candidate_rows,
     }
 }
 
@@ -950,6 +1116,24 @@ fn verdict(r: &MarketStudyReport) -> Vec<String> {
                 r.configured_weight
             ));
         }
+        if let Some(c) = all.candidate_rows.first() {
+            let versus = if r.candidate_diff_ci_high < 0.0 {
+                "better than"
+            } else if r.candidate_diff_ci_low > 0.0 {
+                "worse than"
+            } else {
+                "not clearly different from"
+            };
+            v.push(format!(
+                "Candidate structure: {versus} the current one on these decisions ({:+.4} log loss per decision, 95% CI {:+.4} … {:+.4}); against the market {:+.4} (95% CI {:+.4} … {:+.4}).",
+                r.candidate_diff,
+                r.candidate_diff_ci_low,
+                r.candidate_diff_ci_high,
+                c.diff_vs_market,
+                c.diff_ci_low,
+                c.diff_ci_high
+            ));
+        }
     }
     if let Some(s) = r
         .crossings
@@ -1067,6 +1251,13 @@ impl MarketStudyReport {
                     r.diff_ci_high
                 );
             }
+            for r in &t.candidate_rows {
+                let _ = writeln!(
+                    s,
+                    "| {} | {:.4} | {:.4} | {:+.4} | [{:+.4}, {:+.4}] |",
+                    r.name, r.log_loss, r.brier, r.diff_vs_market, r.diff_ci_low, r.diff_ci_high
+                );
+            }
         }
         s.push_str("\n## Where prices are wrong\n\nWin rate by market price (a well-calibrated market wins as often as its price says).\n\n| market price | points | mean price | mean model | win rate | 95% CI |\n|---|---:|---:|---:|---:|---|\n");
         for r in &self.calibration {
@@ -1137,6 +1328,14 @@ impl MarketStudyReport {
                     e.distinct_takers
                 );
             }
+        }
+        s.push_str(&market_sim::strategies_markdown(
+            &self.strategies,
+            &self.sim,
+            &self.strategy_verdict,
+        ));
+        for t in &self.timelines {
+            s.push_str(&market_sim::timeline_markdown(t, self.knowledge_delay_s));
         }
         let _ = write!(
             s,
@@ -1507,6 +1706,116 @@ mod tests {
         // A trade at the decision instant counts.
         assert!((market_price(&v, m(-5), age).unwrap() - 0.54).abs() < 1e-12);
         assert_eq!(market_price(&v, m(40), age), None);
+    }
+
+    #[test]
+    fn strategies_are_replayed_at_traded_prices() {
+        let (obs, highs) = history();
+        // The METAR high's bucket trades at 0.80 all day, the others at 0.02;
+        // the last day resolves one bucket higher than the METAR high.
+        let mut days: Vec<MarketDay> = last_days(&highs, 30)
+            .into_iter()
+            .map(|(d, h)| market_day(d, h, &|i, w| if i == w { 0.80 } else { 0.02 }))
+            .collect();
+        let lost_day = days.last().unwrap().date;
+        days.last_mut().unwrap().winner += 1;
+        let replay_day = days[5].date;
+        let mut c = cfg();
+        c.timeline_days = vec![replay_day, date(2031, 1, 1)];
+        let r = market_study(&obs, None, &days, &c);
+        assert_eq!(r.strategies.len(), 2 * 2 * 3 * 2);
+        let row = |structure: &str, strategy: &str, window: u32, range: &str| {
+            r.strategies
+                .iter()
+                .find(|x| {
+                    x.structure == structure
+                        && x.strategy == strategy
+                        && x.window == window
+                        && x.range == range
+                })
+                .unwrap()
+        };
+        // Asks of 0.802 are outside the live range: the live rule never buys YES.
+        let live = row("current", "A", 60, "0.90–0.99");
+        assert!(live.live && live.trades == 0, "{live:?}");
+        let wide = row("current", "A", 60, "0.70–0.99");
+        assert!(!wide.live);
+        assert!(wide.trades >= 20, "{wide:?}");
+        assert_eq!(wide.wins + 1, wide.trades, "all but the mis-resolved day");
+        // P&L per trade at the stake: 10 / ask × (payout − ask − fee − slippage).
+        let fee = |p: f64| 0.05 * p * (1.0 - p);
+        let won = 10.0 / 0.802 * (1.0 - 0.802 - fee(0.802) - 0.005);
+        let lost = 10.0 / 0.802 * (-0.802 - fee(0.802) - 0.005);
+        let a_wide: Vec<&SimTrade> = r
+            .sim_trades
+            .iter()
+            .filter(|t| {
+                t.structure == "current"
+                    && t.strategy == "A"
+                    && t.window == 60
+                    && t.range == "0.70–0.99"
+            })
+            .collect();
+        for t in &a_wide {
+            assert_eq!((t.side.as_str(), t.price), ("YES", 0.802));
+            let want = if t.won { won } else { lost };
+            assert!((t.pnl_usd - want).abs() < 1e-9, "{t:?}");
+            assert!(t.p_used <= t.p_model + 1e-12);
+            assert!(t.p_used - 0.802 - fee(0.802) - 0.005 >= 0.01 - 1e-12);
+        }
+        assert!(a_wide.iter().any(|t| t.date == lost_day && !t.won));
+        assert!((wide.total_usd - (won * (wide.trades - 1) as f64 + lost)).abs() < 1e-6);
+        // At most one trade per day and bucket in a variant.
+        let mut seen = HashSet::new();
+        assert!(
+            a_wide
+                .iter()
+                .all(|t| seen.insert((t.date, t.bucket.clone())))
+        );
+        // A shorter confirmation trades no later than a longer one.
+        assert!(row("current", "A", 0, "0.70–0.99").trades >= wide.trades);
+        // Both structures are replayed and scored on the same decisions.
+        assert!(row("candidate", "A", 60, "0.70–0.99").trades > 0);
+        assert_eq!(r.scores[0].candidate_rows[0].name, "candidate model");
+        assert!(
+            r.verdict
+                .iter()
+                .any(|v| v.starts_with("Candidate structure:"))
+        );
+        assert!(
+            r.strategy_verdict[0].starts_with("Live rule (60′ confirmation, asks 0.90–0.99)"),
+            "{:?}",
+            r.strategy_verdict
+        );
+        // The replayed day, report by report (a date without a market is ignored).
+        assert_eq!(r.timelines.len(), 1);
+        let t = &r.timelines[0];
+        assert_eq!(t.date, replay_day);
+        assert!(t.rows.len() >= 20 && t.rows[0].report.as_str() >= "09:00");
+        assert!(t.rows.iter().all(|x| x.p_high_current.is_some()));
+        assert!(t.rows.iter().all(|x| {
+            x.cell_current
+                .as_deref()
+                .unwrap()
+                .starts_with("MinutesSinceHigh=")
+        }));
+        assert!(t.rows.iter().all(|x| {
+            x.cell_candidate
+                .as_deref()
+                .unwrap()
+                .starts_with("MinutesSinceFirstHigh=")
+        }));
+        assert!(t.rows.iter().any(|x| !x.trades.is_empty()));
+        let md = r.to_markdown();
+        for section in [
+            "## Strategies at traded prices",
+            "| A **live** | current | 60′ | 0.90–0.99 | 0 |",
+            &format!("## Day replay — {replay_day} (resolved "),
+            "| report | current cell | candidate cell |",
+            "| candidate model |",
+        ] {
+            assert!(md.contains(section), "missing {section}\n{md}");
+        }
     }
 
     #[test]
