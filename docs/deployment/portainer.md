@@ -180,7 +180,10 @@ docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
 ```
 
 Besides model versus market, the report replays strategies A and B at the
-prices the market actually traded. The replay runs with both model
+prices the market actually traded. It also shows what resting (maker)
+orders earned on the other side of every trade, and replays A, B and E as
+limit orders; that is the part to read first
+([why](../research/edge-research.md#7-what-we-had-not-tried-providing-liquidity)). The replay runs with both model
 structures, confirmation 0′/30′/live and the live and a wider ask range. It
 shows trades, wins and P&L per variant. Strategy E runs three ways: as
 configured, without its book condition, and with the model's agreement. The

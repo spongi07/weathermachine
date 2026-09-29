@@ -222,19 +222,87 @@ new size (0 removes it), and the tick size changes above 0.96 and below
 0.04
 ([Polymarket websocket reference](https://github.com/Polymarket/agent-skills/blob/main/websocket.md)).
 
-## 7. Next levers (not built)
+## 7. What we had not tried: providing liquidity
 
-* **Faster observations.** KNMI publishes
+Every strategy so far (A, B, D, E) *takes* liquidity. It crosses the
+spread with a fill-and-kill order and pays the taker fee. The research on
+who wins on these exchanges points the other way.
+
+* **Polymarket.** The study covers 2.4 million users and $67 billion in
+  volume, November 2022 – March 2026
+  ([Akey, Grégoire, Harvie & Martineau 2026](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6443103)):
+  * The strongest predictor of a profitable account is how much of its
+    volume it provides as a maker: +9.0 percentage points per standard
+    deviation of maker share.
+  * The top 0.1 % of winners earn the spread; losers pay it. Removing just
+    the minimum-tick spread would lift 18.5 % of losers to non-negative P&L.
+  * Weather prices stray from calibration even a day before resolution.
+    Weather also has the largest share of profitable users (52.5 %).
+* **Kalshi.** Over 72.1 million trades, takers averaged −1.12 % and makers
+  +1.12 %. Takers overpay for YES at longshot prices
+  ([Becker](https://www.jbecker.dev/research/prediction-market-microstructure)).
+  Takers also lose far more than makers in
+  [Bürgi, Deng & Whelan](https://www.karlwhelan.com/Papers/Kalshi.pdf).
+* **Polymarket weather fees** (since 30 March 2026). Takers pay
+  0.05 × p × (1 − p) per share. Makers pay nothing and receive 25 % of the
+  taker fees as a rebate. A market can also carry a daily liquidity-reward
+  pool for resting orders near the midpoint: a quadratic score within a
+  maximum spread and above a minimum size, favouring two-sided quotes.
+* **The catch is adverse selection.** In EHAM's own report, stale quotes
+  worth $3,209 were sold into resting bids in the ten minutes before METAR
+  reports, against $138 in the first minute after. Resting orders on a
+  bucket about to die get picked off by takers who know first.
+  * In Polymarket's 5-minute crypto markets the average maker netted
+    +0.275 ¢ per share, the author's own maker lost 0.48 ¢, and a maker
+    replay flipped sign when latency moved by 150 ms
+    ([Yak0vkaSup/polymarket-microstructure](https://github.com/Yak0vkaSup/polymarket-microstructure)).
+  * An open-source Polymarket market maker warns that it "can lose money"
+    ([warproxxx/poly-maker](https://github.com/warproxxx/poly-maker)).
+
+**What `research market` now measures.**
+
+* **Makers and takers: the other side of every trade.** For every recorded
+  trade on the settled days: the taker's P&L at settlement and the
+  maker's (its negative, plus the rebate). It is split by:
+  * the price the taker paid;
+  * the side;
+  * the bucket against the published high;
+  * minutes to the next routine METAR;
+  * the high's bucket before a report;
+  * local time.
+
+  This is not a simulation. It is what the actual makers earned, and it
+  shows where resting orders are paid and where they are picked off.
+* **A maker, B maker, E maker.** The live rules posted as limit orders:
+  * a YES bid at the latest taker sell (A, E), or a NO bid at one minus the
+    latest taker buy (B);
+  * counted as filled only when a later trade goes through the price;
+  * cancelled 10 minutes before the next routine report;
+  * no fee, 25 % rebate.
+* **`weather-machine markets discover`** now lists the liquidity-reward
+  pool of today's markets, if Gamma lists one.
+
+**How to read it.** Suppose the maker side of the high's bucket is positive
+away from reports and negative in the minutes before them. Then the edge is
+to quote passively between reports and step away before each METAR, which
+is what the maker versions test. If even the maker side loses at EHAM,
+being the maker is no edge here either. Fills from the public tape are
+estimates either way. A positive result earns a paper test with live maker
+orders, not money.
+
+## 8. Next levers (not built)
+
+* **Faster observations.** Most stale-quote profit is taken before the
+  report: $3,209 in the ten minutes before, $138 in the minute after
+  (1 June – 28 September 2026). Whoever takes it anticipates the METAR, so
+  only a faster source can compete for it. KNMI publishes
   [10-minute station observations](https://english.knmidata.nl/open-data/10-minute-in-situ-meteorological-observations)
-  through the [EDR API](https://developer.dataplatform.knmi.nl/edr-api)
-  (API key required,
-  [collection](https://english.knmidata.nl/latest/news/2025/07/03/edr-api-new-10-minute-in-situ-meteorological-observations-collection)).
-  It could show a new high before the half-hourly METAR. This is only worth
-  building if §4 shows that stale quotes are taken *after* the METAR, not
-  before it.
-* **Providing liquidity.** Late in the day, quoting NO on buckets far above
-  the high earns the spread plus rebates instead of paying fees. This needs
-  order management, and live execution is Phase 14.
+  a few minutes after each interval, through the
+  [EDR API](https://developer.dataplatform.knmi.nl/edr-api) and the
+  notification service (API key required).
+* **Live maker orders.** If §7 finds a maker edge: resting GTD orders in
+  paper mode, filled by the trade feed and cancelled before each report.
+  This is order management that live execution (Phase 14) needs anyway.
 * **A spread limit for D.** The risk engine's spread ≤ 0.05 and "no
   one-sided book" gates apply to D too. If §4 shows stale quotes mostly in
   wide books, a separate limit for decided outcomes can be justified with

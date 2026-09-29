@@ -206,6 +206,29 @@ the days downloaded so far are studied.
   fallen. Three variants are replayed: *E* (as configured), *E w/o book*
   and *E + model* (model ≥ 0.90 as well). As live, E needs a model but no
   model edge.
+* **Makers and takers (`wm-backtest::market_makers`).** Every trade of the
+  studied days has a taker, who paid the fee, and a maker, who paid none
+  and gets 25 % of it back as a rebate. The taker's P&L at settlement is
+  the maker's before fees with the sign flipped. The study splits it by:
+  * the price the taker paid;
+  * the side;
+  * the bucket against the METAR high published by then;
+  * minutes to the next routine report (`routine_minutes`);
+  * the high's bucket before a report;
+  * local time.
+
+  Each segment has a 95 % day-block interval. This is what the actual
+  makers earned; nothing is simulated.
+* **Maker versions of the live rules.** *A maker*, *B maker* and *E maker*
+  post the live rules' orders as limit orders at the same gates:
+  * a YES bid at the latest taker sell (A, E), or a NO bid at one minus the
+    latest taker buy (B), never crossing the other side;
+  * A's and B's edge is measured at that price, without fee or slippage;
+  * an order counts as filled only when a later trade goes through its
+    price (a trade at a worse price would have met it first);
+  * orders are cancelled `cancel_before_report_min` (10) before the next
+    routine report;
+  * fills earn the rebate.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 
@@ -229,7 +252,11 @@ the days downloaded so far are studied.
   overstates what to expect: a variant only counts if it stays profitable
   on days after it was chosen. E gets its own verdict line comparing the
   three variants, and its losing trades are listed with the bucket that
-  resolved and the variants that took them;
+  resolved and the variants that took them. The maker versions add six
+  rows (36 in all) and a verdict line;
+* makers and takers: per segment, trades, shares, the taker's P&L and fee,
+  and the maker's net with its interval and total, plus the best and worst
+  segment for resting orders (≥ 2 % of the shares, on ≥ 5 days);
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
   both clocks, the forecast rise and headroom, both structures' cells and
   P(high stays), the market and ask of the high's bucket, its taker flow
@@ -243,8 +270,10 @@ approximates the book's midpoint. Simulated fills ignore depth, so they are
 optimistic in thin markets. E's stand-in sees only offers that were taken:
 offers withdrawn or added without a trade are invisible to it, while the
 live rule reads the book itself. The replay decides only at report times,
-whereas live E is evaluated on every book update. The study is read-only
-and changes nothing.
+whereas live E is evaluated on every book update. Maker fills from the
+public tape are estimates: it shows no queue positions, and in fast markets
+maker replays have flipped sign with 150 ms of latency. The study is
+read-only and changes nothing.
 **TESTING.** Unit tests on synthetic history:
 
 * an oracle market beats the model;
@@ -260,7 +289,13 @@ and changes nothing.
 * strategy E: the stand-in trades only where buyers lifted the offers, the
   variants' relations, the flow columns
   (`strategy_e_is_replayed_with_its_book_stand_in`), and the flow window
-  (`taker_flow_counts_the_lookback_and_the_ask_it_began_with`).
+  (`taker_flow_counts_the_lookback_and_the_ask_it_began_with`);
+* makers: fills only through the price, with exact P&L and rebate, and the
+  study adding up to the tape family by family
+  (`makers_fill_only_through_their_price_and_the_other_side_is_accounted`,
+  which fails if at-price fills are allowed). The segmentation, the report
+  schedule across the hour and midnight, cancel times and the fill window
+  have their own unit tests in `market_makers`.
 
 Data API paging, the offset cap, window splitting, dedup and the request
 budget are tested against a mock server. An end-to-end run against mock

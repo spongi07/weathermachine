@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
-    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, MarketSimConfig, MarketStudyConfig,
-    StudyConfig, import_iem_csv, run_backtest, study,
+    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, MakerSim, MarketSimConfig,
+    MarketStudyConfig, StudyConfig, import_iem_csv, run_backtest, study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{RunId, StationId};
@@ -616,7 +616,9 @@ async fn research_market(
             no_distances: no.distances.clone(),
             stake_usd: yes.notional.as_f64(),
             e: BookConfirmedSim::from_live(&cfg.book_confirmed()),
+            maker: MakerSim::default(),
         },
+        routine_minutes: loc.station.routine_minutes.clone(),
         timeline_days: days,
         ..MarketStudyConfig::new(train.station.clone(), train.tz, train.peak.clone())
     };
@@ -1188,6 +1190,29 @@ async fn discover(config: Option<PathBuf>, date: Option<NaiveDate>) -> Result<()
                 }
             }
             Err(e) => println!("   mapping failed (would not be traded): {e}"),
+        }
+        // Liquidity rewards: daily pools for resting orders near the midpoint.
+        let pools: Vec<_> = ev
+            .markets
+            .iter()
+            .filter(|gm| gm.rewards_daily_usd() > 0.0)
+            .collect();
+        if pools.is_empty() {
+            println!("   liquidity rewards: none listed");
+        } else {
+            println!(
+                "   liquidity rewards: ${:.2}/day in all",
+                pools.iter().map(|gm| gm.rewards_daily_usd()).sum::<f64>()
+            );
+            for gm in pools {
+                println!(
+                    "   {:>12}  ${:.2}/day  max spread {}  min size {}",
+                    gm.group_item_title.as_deref().unwrap_or("?"),
+                    gm.rewards_daily_usd(),
+                    gm.rewards_max_spread.as_deref().unwrap_or("?"),
+                    gm.rewards_min_size.as_deref().unwrap_or("?")
+                );
+            }
         }
     }
     Ok(())

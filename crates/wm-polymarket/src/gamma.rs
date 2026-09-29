@@ -53,6 +53,32 @@ fn number_or_string<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D
     }))
 }
 
+/// One liquidity-reward programme of a market: resting orders near the
+/// midpoint share a daily pool.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GammaClobReward {
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub rewards_daily_rate: Option<String>,
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub start_date: Option<String>,
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub end_date: Option<String>,
+}
+
+/// Reward programmes, skipping anything malformed: an unexpected shape
+/// must never cost the market itself.
+fn lenient_rewards<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<GammaClobReward>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match v {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|i| serde_json::from_value(i).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// A Gamma market (one bucket).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +108,25 @@ pub struct GammaMarket {
     pub order_min_size: Option<String>,
     pub neg_risk: Option<bool>,
     pub uma_resolution_status: Option<String>,
+    /// Liquidity rewards (`clobRewards`, `rewardsMaxSpread`,
+    /// `rewardsMinSize`), as Gamma lists them.
+    #[serde(default, deserialize_with = "lenient_rewards")]
+    pub clob_rewards: Vec<GammaClobReward>,
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub rewards_max_spread: Option<String>,
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub rewards_min_size: Option<String>,
+}
+
+impl GammaMarket {
+    /// The market's daily liquidity-reward pool (USD); 0 when none is listed.
+    pub fn rewards_daily_usd(&self) -> f64 {
+        self.clob_rewards
+            .iter()
+            .filter_map(|r| r.rewards_daily_rate.as_deref()?.trim().parse::<f64>().ok())
+            .filter(|x| x.is_finite() && *x > 0.0)
+            .sum()
+    }
 }
 
 /// A Gamma event (daily temperature question with bucket markets).
@@ -363,6 +408,33 @@ pub(crate) mod tests {
             unit: TempUnit::Celsius,
             fees: FeeSchedule::taker(50_000),
         }
+    }
+
+    #[test]
+    fn liquidity_rewards_are_read_leniently() {
+        let body = fixture()
+            .replacen(
+                "\"negRisk\":true}",
+                "\"negRisk\":true,\"clobRewards\":[{\"rewardsDailyRate\":2.5,\"startDate\":\"2026-09-01\"},{\"rewardsDailyRate\":\"1.25\",\"endDate\":null},{\"rewardsDailyRate\":{\"x\":1}},7],\"rewardsMaxSpread\":3.5,\"rewardsMinSize\":\"50\"}",
+                1,
+            )
+            .replacen(
+                "\"negRisk\":true}",
+                "\"negRisk\":true,\"clobRewards\":null,\"rewardsMaxSpread\":null}",
+                1,
+            );
+        let events = parse_events(body.as_bytes()).unwrap();
+        let m = &events[0].markets;
+        assert!((m[0].rewards_daily_usd() - 3.75).abs() < 1e-12);
+        assert_eq!(m[0].rewards_max_spread.as_deref(), Some("3.5"));
+        assert_eq!(m[0].rewards_min_size.as_deref(), Some("50"));
+        assert_eq!(m[0].clob_rewards.len(), 3, "the bare number is skipped");
+        assert_eq!(m[1].rewards_daily_usd(), 0.0);
+        assert_eq!(m[1].rewards_max_spread, None);
+        assert_eq!(m[2].rewards_daily_usd(), 0.0);
+        // The market still maps as before.
+        let date = NaiveDate::from_ymd_opt(2026, 9, 25).unwrap();
+        assert!(build_market(&events[0], &spec(), date, Utc::now()).is_ok());
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub mod ws;
 pub use clob::{ClobClient, ClobError, parse_book};
 pub use data::{DataApiClient, DataApiError, DataTrade, TradeHistory, parse_trades};
 pub use gamma::{
-    GammaClient, GammaError, GammaEvent, LocationMarketSpec, MappingError, build_market,
-    event_slug, parse_events,
+    GammaClient, GammaClobReward, GammaError, GammaEvent, LocationMarketSpec, MappingError,
+    build_market, event_slug, parse_events,
 };
 pub use outcomes::{map_outcome, parse_bucket_label};
 pub use rules::parse_resolution_spec;

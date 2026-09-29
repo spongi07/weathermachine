@@ -86,9 +86,9 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
 | `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train both model structures, evaluate the forecast and pick the structure; `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
-| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices, a report-by-report replay of each `--day`, resolution check |
+| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices and as limit orders, what makers earned on the other side of every trade, a report-by-report replay of each `--day`, resolution check |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
-| `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules (read-only) |
+| `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules, and any liquidity-reward pools (read-only) |
 | `weather-machine rules approve --sha256 … --reviewer …` | Human approval of a rules text |
 | `weather-machine ev-table` | Break-even probabilities (fees included) |
 | `weather-machine migrate` · `check-config` · `healthcheck` | Operations |
@@ -142,5 +142,5 @@ to GHCR.
   why its backtest edge came from look-ahead, and what was (not) ported.
 * [Where the edge is — and where it is not](docs/research/edge-research.md):
   the market versus models, decided outcomes (strategy D), pooling with the
-  book, the evidence behind strategy E, and how to measure it on EHAM's
-  settled markets.
+  book, the evidence behind strategy E, providing liquidity instead of
+  taking it, and how to measure it on EHAM's settled markets.

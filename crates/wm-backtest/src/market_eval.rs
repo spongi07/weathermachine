@@ -36,6 +36,7 @@
 //! lower bound on what was offered.
 
 use crate::forecast_eval::{ForecastHistory, ratio_ci};
+use crate::market_makers::{self, FlowCollector, MakerTakerStudy};
 use crate::market_sim::{
     self, DayTimeline, Decision, Flow, MarketSimConfig, Quote, SimTrade, StrategyRow,
 };
@@ -124,6 +125,10 @@ pub struct MarketStudyConfig {
     pub seed: u64,
     /// Strategies A and B replayed at traded prices.
     pub sim: MarketSimConfig,
+    /// Minutes past each UTC hour of the station's routine reports: the
+    /// maker study times trades against them, and resting orders are
+    /// cancelled before them.
+    pub routine_minutes: Vec<u8>,
     /// Days replayed report by report (`research market --day`).
     pub timeline_days: Vec<NaiveDate>,
 }
@@ -148,6 +153,7 @@ impl MarketStudyConfig {
             bootstrap_iterations: 2_000,
             seed: 0x4D41_524B_4554,
             sim: MarketSimConfig::default(),
+            routine_minutes: vec![25, 55],
             timeline_days: Vec::new(),
         }
     }
@@ -314,6 +320,9 @@ pub struct MarketStudyReport {
     /// Replayed days (`--day`).
     #[serde(default)]
     pub timelines: Vec<DayTimeline>,
+    /// What resting orders earned on the other side of every trade.
+    #[serde(default)]
+    pub maker_taker: MakerTakerStudy,
     /// Plain-language conclusions.
     pub verdict: Vec<String>,
 }
@@ -522,8 +531,10 @@ pub fn market_study(
         strategy_verdict: Vec::new(),
         sim_trades: Vec::new(),
         timelines: Vec::new(),
+        maker_taker: MakerTakerStudy::default(),
         verdict: Vec::new(),
     };
+    let mut flows = FlowCollector::default();
     let mut points: Vec<Point> = Vec::new();
     let mut scored_dates: Vec<NaiveDate> = Vec::new();
     let mut seen_market: HashSet<NaiveDate> = HashSet::new();
@@ -585,9 +596,10 @@ pub fn market_study(
                 }
                 let day_index = scored_dates.len();
                 let before = points.len();
-                let decisions = decisions(md, &states, [&model, &candidate], cfg);
+                let per_bucket = trades_by_bucket(md, cfg.min_trade_shares);
+                let decisions = decisions(&states, [&model, &candidate], &per_bucket, cfg);
                 score_day(md, day_index, &decisions, cfg, &mut points, &mut report);
-                let trades = market_sim::simulate_day(
+                let mut trades = market_sim::simulate_day(
                     md.date,
                     &md.buckets,
                     &md.labels,
@@ -597,6 +609,31 @@ pub fn market_study(
                     cfg.taker_fee_rate,
                     cfg.configured_weight,
                     cfg.min_model_support,
+                    cfg.tz,
+                );
+                trades.extend(market_makers::simulate_makers(
+                    md.date,
+                    &md.buckets,
+                    &md.labels,
+                    md.winner,
+                    &decisions,
+                    &per_bucket,
+                    &cfg.sim,
+                    cfg.taker_fee_rate,
+                    cfg.configured_weight,
+                    cfg.min_model_support,
+                    &cfg.routine_minutes,
+                    cfg.tz,
+                ));
+                flows.add_day(
+                    md.date,
+                    &md.buckets,
+                    md.winner,
+                    &md.trades,
+                    &states,
+                    cfg.knowledge_delay,
+                    &cfg.routine_minutes,
+                    cfg.taker_fee_rate,
                     cfg.tz,
                 );
                 if cfg.timeline_days.contains(date) {
@@ -675,13 +712,26 @@ pub fn market_study(
         (report.candidate_diff_ci_low, report.candidate_diff_ci_high) =
             ratio_ci(&days, cfg.bootstrap_iterations, cfg.seed ^ 0xCA);
     }
-    report.strategies = market_sim::strategy_rows(
+    let mut strategies = market_sim::strategy_rows(
         &report.sim_trades,
         &cfg.sim,
         cfg.bootstrap_iterations,
         cfg.seed ^ 0x51,
     );
+    strategies.extend(market_makers::maker_rows(
+        &report.sim_trades,
+        &cfg.sim,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x52,
+    ));
+    report.strategies = strategies;
     report.strategy_verdict = market_sim::verdict(&report.strategies, &cfg.sim);
+    report.maker_taker = flows.finish(
+        cfg.taker_fee_rate,
+        cfg.sim.maker.rebate_share,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x3A,
+    );
     report.verdict = verdict(&report);
     report
 }
@@ -690,12 +740,11 @@ pub fn market_study(
 /// structure's distribution (trained on earlier days) and every bucket's
 /// quote at the decision time (observation + knowledge delay).
 fn decisions(
-    md: &MarketDay,
     states: &[(DateTime<Utc>, wm_strategy::PeakFeatures)],
     models: [&EmpiricalPeakModel; 2],
+    per_bucket: &[Vec<&MarketTrade>],
     cfg: &MarketStudyConfig,
 ) -> Vec<Decision> {
-    let per_bucket = trades_by_bucket(md, cfg.min_trade_shares);
     let lookback = Duration::minutes(cfg.sim.e.lookback_minutes.max(1));
     states
         .iter()
@@ -704,6 +753,7 @@ fn decisions(
             let knowledge = *t + cfg.knowledge_delay;
             Decision {
                 at: *t,
+                knowledge,
                 dists: models.map(|m| m.distribution(f)),
                 quotes: per_bucket
                     .iter()
@@ -1242,6 +1292,9 @@ fn verdict(r: &MarketStudyReport) -> Vec<String> {
             "No new high killed a bucket the market still priced: no stale quotes to take.".into(),
         );
     }
+    if let Some(line) = r.maker_taker.verdict.first() {
+        v.push(line.clone());
+    }
     if r.resolution_checked > 0 {
         v.push(format!(
             "The METAR high matched the resolved bucket on {} of {} days.",
@@ -1399,6 +1452,7 @@ impl MarketStudyReport {
             &self.sim,
             &self.strategy_verdict,
         ));
+        s.push_str(&market_makers::maker_taker_markdown(&self.maker_taker));
         for t in &self.timelines {
             s.push_str(&market_sim::timeline_markdown(t, self.knowledge_delay_s));
         }
@@ -1822,8 +1876,9 @@ mod tests {
         let mut c = cfg();
         c.timeline_days = vec![replay_day, date(2031, 1, 1)];
         let r = market_study(&obs, None, &days, &c);
-        // Per structure: A and B × 3 windows × 2 ranges, and E's 3 variants.
-        assert_eq!(r.strategies.len(), 2 * (2 * 3 * 2 + 3));
+        // Per structure: A and B × 3 windows × 2 ranges, E's 3 variants and
+        // the 3 maker versions of the live rules.
+        assert_eq!(r.strategies.len(), 2 * (2 * 3 * 2 + 3 + 3));
         let row = |structure: &str, strategy: &str, window: u32, range: &str| {
             r.strategies
                 .iter()
@@ -2062,6 +2117,129 @@ mod tests {
             0.99,
         );
         assert_eq!(f, Flow::default());
+    }
+
+    #[test]
+    fn makers_fill_only_through_their_price_and_the_other_side_is_accounted() {
+        use chrono::Timelike;
+        let (obs, highs) = history();
+        // The high's bucket trades at 0.95 (taker buys 0.952, sells 0.948),
+        // the rest at 0.01. On every third day a taker sells the high's
+        // bucket at 0.93 five minutes after each decision: through a bid at
+        // 0.948, inside the order's life (cancelled 10′ before the report).
+        let mut days: Vec<MarketDay> = last_days(&highs, 30)
+            .into_iter()
+            .map(|(d, h)| market_day(d, h, &|i, w| if i == w { 0.95 } else { 0.01 }))
+            .collect();
+        let mut through_days = HashSet::new();
+        for md in days.iter_mut().step_by(3) {
+            through_days.insert(md.date);
+            let extra: Vec<MarketTrade> = md
+                .trades
+                .iter()
+                .filter(|t| {
+                    let l = t.at.with_timezone(&TZ);
+                    t.bucket == md.winner
+                        && !t.taker_buys_yes
+                        && l.hour() >= 12
+                        && (l.minute() == 0 || l.minute() == 30)
+                })
+                .map(|t| MarketTrade {
+                    at: t.at + Duration::minutes(5),
+                    yes_price: 0.93,
+                    ..t.clone()
+                })
+                .collect();
+            md.trades.extend(extra);
+            md.trades.sort_by_key(|t| t.at);
+        }
+        let r = market_study(&obs, None, &days, &cfg());
+        assert_eq!(r.strategies.len(), 2 * (2 * 3 * 2 + 3 + 3));
+        let makers: Vec<&SimTrade> = r
+            .sim_trades
+            .iter()
+            .filter(|t| t.strategy == "A maker" && t.structure == "current")
+            .collect();
+        assert!(!makers.is_empty(), "{:?}", r.strategy_verdict);
+        let fee = |p: f64| 0.05 * p * (1.0 - p);
+        for t in &makers {
+            assert!(
+                through_days.contains(&t.date),
+                "no trade goes through 0.948 on {t:?}"
+            );
+            assert_eq!((t.side.as_str(), t.price), ("YES", 0.948));
+            let want = 10.0 / 0.948 * (f64::from(u8::from(t.won)) - 0.948 + 0.25 * fee(0.948));
+            assert!((t.pnl_usd - want).abs() < 1e-9, "{t:?}");
+            assert_eq!(t.won, t.bucket == t.resolved);
+        }
+        let row = r
+            .strategies
+            .iter()
+            .find(|x| x.strategy == "A maker" && x.structure == "current")
+            .unwrap();
+        assert!(!row.live && row.trades == makers.len() as u64);
+        assert_eq!((row.window, row.range.as_str()), (60, "0.90–0.99"));
+        assert!(
+            r.strategy_verdict
+                .iter()
+                .any(|v| v.starts_with("Live rules as limit orders with the current structure")),
+            "{:?}",
+            r.strategy_verdict
+        );
+
+        // The other side of every trade: the study adds up to the tape.
+        let (mut shares, mut pnl, mut n) = (0.0, 0.0, 0_u64);
+        for md in &days {
+            for t in md.trades.iter().filter(|t| t.shares > 0.0) {
+                let won = (t.bucket == md.winner) == t.taker_buys_yes;
+                let price = if t.taker_buys_yes {
+                    t.yes_price
+                } else {
+                    1.0 - t.yes_price
+                };
+                shares += t.shares;
+                pnl += t.shares * (f64::from(u8::from(won)) - price);
+                n += 1;
+            }
+        }
+        let study = &r.maker_taker;
+        let all = &study.rows[0];
+        assert_eq!(
+            (all.family.as_str(), all.group.as_str()),
+            ("all trades", "all")
+        );
+        assert_eq!(all.trades, n);
+        assert!((all.shares - shares).abs() < 1e-6);
+        assert!((all.taker_per_share - pnl / shares).abs() < 1e-12);
+        assert!(all.maker_ci_low <= all.maker_net_per_share + 1e-12);
+        assert!(all.maker_net_per_share <= all.maker_ci_high + 1e-12);
+        // Each family splits the same trades.
+        for family in [
+            "the taker bought",
+            "price the taker paid",
+            "bucket against the reported high",
+            "minutes to the next routine report",
+            "local time of the trade",
+        ] {
+            let parts: Vec<&crate::market_makers::FlowRow> =
+                study.rows.iter().filter(|x| x.family == family).collect();
+            assert!(!parts.is_empty(), "{family}");
+            assert_eq!(parts.iter().map(|x| x.trades).sum::<u64>(), n, "{family}");
+        }
+        assert!(
+            r.verdict
+                .iter()
+                .any(|v| v.starts_with("Makers and takers:"))
+        );
+        let md = r.to_markdown();
+        for section in [
+            "## Makers and takers: the other side of every trade",
+            "| **price the taker paid** |",
+            "*A maker*, *B maker* and *E maker* post the live rules' orders",
+            "| A maker | current | 60′ | 0.90–0.99 |",
+        ] {
+            assert!(md.contains(section), "missing {section}\n{md}");
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@
 //! ([`BookConfirmedSim`]).
 
 use crate::forecast_eval::ratio_ci;
+use crate::market_makers::{MakerRule, MakerSim};
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,8 @@ pub struct MarketSimConfig {
     pub stake_usd: f64,
     /// Strategy E.
     pub e: BookConfirmedSim,
+    /// The live rules replayed as limit orders.
+    pub maker: MakerSim,
 }
 
 impl Default for MarketSimConfig {
@@ -68,6 +71,7 @@ impl Default for MarketSimConfig {
             no_distances: vec![1, 2, 3],
             stake_usd: 10.0,
             e: BookConfirmedSim::default(),
+            maker: MakerSim::default(),
         }
     }
 }
@@ -119,12 +123,21 @@ impl BookConfirmedSim {
 
     /// The table's confirmation column: minutes since the first report at
     /// the high.
-    fn window(&self) -> u32 {
+    pub(crate) fn window(&self) -> u32 {
         u32::try_from(self.min_minutes_at_high.clamp(0, 1_440)).unwrap_or(0)
     }
 
-    fn range(&self) -> String {
+    pub(crate) fn range(&self) -> String {
         range_label((self.min_price, self.max_price))
+    }
+
+    /// E's clock and temperature conditions at a report: inside the local
+    /// window, the high first reached long enough ago and the report far
+    /// enough below it.
+    pub(crate) fn conditions_hold(&self, f: &PeakFeatures) -> bool {
+        (self.start_local_minute..self.end_local_minute).contains(&f.local_minute_now)
+            && f.minutes_since_first_high >= self.min_minutes_at_high
+            && f.drop_tenths >= self.min_drop_tenths
     }
 }
 
@@ -147,7 +160,7 @@ pub(crate) struct Quote {
 
 impl Quote {
     /// The midpoint as the strategies pool it: both sides seen and close.
-    fn pool_mid(&self, max_spread: f64) -> Option<f64> {
+    pub(crate) fn pool_mid(&self, max_spread: f64) -> Option<f64> {
         match (self.yes_ask, self.yes_bid) {
             (Some(a), Some(b)) if (a - b).abs() <= max_spread + 1e-12 => Some((a + b) / 2.0),
             _ => None,
@@ -184,6 +197,9 @@ impl Flow {
 pub(crate) struct Decision {
     /// Observation time of the report.
     pub(crate) at: DateTime<Utc>,
+    /// When the bot knows the report (observation + knowledge delay): the
+    /// quotes and flows are taken then.
+    pub(crate) knowledge: DateTime<Utc>,
     pub(crate) f: PeakFeatures,
     /// Current and candidate structure ([`STRUCTURES`]).
     pub(crate) dists: [Option<IncrementDistribution>; 2],
@@ -192,7 +208,7 @@ pub(crate) struct Decision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     /// YES on the bucket that holds the high.
     A,
     /// NO on the buckets above it.
@@ -200,7 +216,7 @@ enum Kind {
 }
 
 impl Kind {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Kind::A => "A",
             Kind::B => "B",
@@ -318,21 +334,21 @@ pub struct DayTimeline {
     pub rows: Vec<TimelineRow>,
 }
 
-fn local_hm(t: DateTime<Utc>, tz: Tz) -> String {
+pub(crate) fn local_hm(t: DateTime<Utc>, tz: Tz) -> String {
     t.with_timezone(&tz).format("%H:%M").to_string()
 }
 
 /// Minutes after local midnight as `HH:MM`.
-fn hm(minute: u16) -> String {
+pub(crate) fn hm(minute: u16) -> String {
     format!("{:02}:{:02}", minute / 60, minute % 60)
 }
 
-fn range_label((lo, hi): (f64, f64)) -> String {
+pub(crate) fn range_label((lo, hi): (f64, f64)) -> String {
     format!("{lo:.2}–{hi:.2}")
 }
 
 /// Buckets a strategy trades at a high.
-fn buckets_for(
+pub(crate) fn buckets_for(
     kind: Kind,
     buckets: &[TemperatureBucket],
     high: i32,
@@ -446,10 +462,7 @@ pub(crate) fn simulate_day(
                 // Like live: a model is required, not a model edge.
                 let Some(dist) = &d.dists[s] else { continue };
                 let f = &d.f;
-                if !(e.start_local_minute..e.end_local_minute).contains(&f.local_minute_now)
-                    || f.minutes_since_first_high < e.min_minutes_at_high
-                    || f.drop_tenths < e.min_drop_tenths
-                {
+                if !e.conditions_hold(f) {
                     continue;
                 }
                 let high = f.high_whole;
@@ -533,7 +546,7 @@ pub(crate) fn strategy_rows(
 }
 
 /// One variant's results: (structure, strategy, window, range).
-fn row(
+pub(crate) fn row(
     trades: &[SimTrade],
     (structure, strategy, window, range): (&str, &str, u32, String),
     live: bool,
@@ -558,7 +571,12 @@ fn row(
     let sums: Vec<(f64, f64)> = per_day.values().copied().collect();
     let (ci_low, ci_high) = ratio_ci(&sums, iterations, seed);
     let n = ts.len() as f64;
-    let total: f64 = ts.iter().map(|t| t.pnl_usd).sum();
+    // An empty float sum is −0.0, which would print as "-0.00".
+    let total: f64 = if ts.is_empty() {
+        0.0
+    } else {
+        ts.iter().map(|t| t.pnl_usd).sum()
+    };
     StrategyRow {
         structure: structure.to_owned(),
         strategy: strategy.to_owned(),
@@ -641,6 +659,38 @@ pub(crate) fn verdict(rows: &[StrategyRow], sim: &MarketSimConfig) -> Vec<String
             model.wins,
             model.total_usd,
         ));
+    }
+    if sim.maker.enabled {
+        for structure in STRUCTURES {
+            let parts: Vec<String> = MakerRule::ALL
+                .iter()
+                .filter_map(|rule| {
+                    rows.iter()
+                        .find(|r| r.structure == structure && r.strategy == rule.label())
+                        .map(|r| {
+                            if r.trades == 0 {
+                                format!("{} no fill", rule.label())
+                            } else {
+                                format!(
+                                    "{} {} trades, {} won, ${:+.2}",
+                                    rule.label(),
+                                    r.trades,
+                                    r.wins,
+                                    r.total_usd
+                                )
+                            }
+                        })
+                })
+                .collect();
+            if !parts.is_empty() {
+                v.push(format!(
+                    "Live rules as limit orders with the {structure} structure (filled only when a later trade goes through the price, cancelled {}′ before each report, {:.0}% fee rebate): {}.",
+                    sim.maker.cancel_before_report_min,
+                    100.0 * sim.maker.rebate_share,
+                    parts.join("; ")
+                ));
+            }
+        }
     }
     let tried = rows.len();
     if let Some(best) = rows
@@ -804,6 +854,14 @@ pub(crate) fn strategies_markdown(
         e.max_price,
         e.min_model_p.max(e.veto_model_p),
     );
+    if sim.maker.enabled {
+        let _ = write!(
+            s,
+            "*A maker*, *B maker* and *E maker* post the live rules' orders as limit orders instead of paying the ask: a YES bid at the latest taker sell of YES (A, E) or a NO bid at one minus the latest taker buy of YES (B), at the same gates, with A's and B's edge measured at that price. An order counts as filled only when a later trade goes through its price, is cancelled {}′ before the next routine report, pays no fee and earns {:.0}% of the taker fee as a rebate. The public tape shows no queue positions, so these fills are estimates.\n\n",
+            sim.maker.cancel_before_report_min,
+            100.0 * sim.maker.rebate_share
+        );
+    }
     for line in verdict {
         let _ = writeln!(s, "* {line}");
     }
