@@ -71,6 +71,7 @@ fn config(mode: RunMode) -> EngineConfig {
         split_unwind: SplitUnwindConfig::default(),
         certain: wm_strategy::CertainConfig::default(),
         book_confirmed: wm_strategy::BookConfirmedConfig::default(),
+        peak_slot: wm_strategy::PeakSlotConfig::default(),
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: false,
         decision_log_capacity: 500,
@@ -1032,4 +1033,183 @@ impl OutcomeSideForTest for wm_core::portfolio::Position {
     fn outcome_side_for_test(&self) -> OutcomeSide {
         self.instrument.outcome_side
     }
+}
+
+/// A fixed model that also carries learned peak times (strategy F's slots).
+struct PeakModel {
+    probs: Vec<f64>,
+    peaks: wm_strategy::PeakTimes,
+}
+
+impl ProbabilityModel for PeakModel {
+    fn id(&self) -> &str {
+        "fixed-test-model-with-peak-times"
+    }
+    fn distribution(&self, _f: &PeakFeatures) -> Option<IncrementDistribution> {
+        Some(IncrementDistribution {
+            probs: self.probs.clone(),
+            support: 500,
+            source: "fixed".into(),
+        })
+    }
+    fn peak_times(&self) -> Option<&wm_strategy::PeakTimes> {
+        Some(&self.peaks)
+    }
+}
+
+/// Summer peak times with the median at `from` and the 90th percentile at
+/// `to` (local minutes at :25 or :55).
+fn summer_peaks(from: u16, to: u16) -> wm_strategy::PeakTimes {
+    let start = utc("2026-06-30T22:25:00Z");
+    let mut b = wm_strategy::PeakTimesBuilder::new();
+    for peak in std::iter::repeat_n(from, 5).chain(std::iter::repeat_n(to, 5)) {
+        let points: Vec<wm_strategy::ObsPoint> = (0..48u16)
+            .map(|i| {
+                let minute = (25 + 30 * i) % 1440;
+                wm_strategy::ObsPoint {
+                    observed_at: start + Duration::minutes(30 * i64::from(i)),
+                    local_minute_of_day: minute,
+                    local_minute_of_hour: (minute % 60) as u8,
+                    temp: TempC::from_whole(if minute == peak { 25 } else { 15 }),
+                    report_type: ReportType::Metar,
+                    version: 1,
+                }
+            })
+            .collect();
+        b.add_day(
+            NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            wm_core::time::Season::Summer,
+            &points,
+            25,
+        );
+    }
+    b.build()
+}
+
+/// The shipped risk limits, with strategy F's own caps.
+fn risk_with_f_caps() -> RiskConfig {
+    let mut r = RiskConfig {
+        global_max_exposure_usd: Usd::from_whole(200),
+        max_location_exposure_usd: Some(Usd::from_whole(150)),
+        max_daily_new_exposure_usd: Some(Usd::from_whole(160)),
+        ..RiskConfig::default()
+    };
+    r.strategy_caps.insert(
+        "F_peak_slot".into(),
+        wm_risk::StrategyCaps {
+            position_size_usd: Usd::from_whole(100),
+            max_market_exposure_usd: Some(Usd::from_whole(110)),
+            max_strategy_exposure_usd: Some(Usd::from_whole(110)),
+        },
+    );
+    r
+}
+
+/// Strategy F end to end: high 18 °C at 13:55 local, the 15:55 report known
+/// at 15:58, inside the learned summer slot; 100 shares cost at most 0.94.
+#[test]
+fn strategy_f_buys_100_shares_of_the_high_inside_the_learned_slot() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut cfg = config(RunMode::Paper);
+    // F alone.
+    cfg.buy_yes.enabled = false;
+    cfg.buy_no.enabled = false;
+    cfg.certain.enabled = false;
+    cfg.book_confirmed.enabled = false;
+    cfg.risk = risk_with_f_caps();
+    let yes18 = m.outcome_for_value(18).unwrap().yes_token.clone();
+    let mut events = vec![
+        health_event("2026-07-01T06:00:00Z", ProviderHealthState::Healthy),
+        env(
+            "2026-07-01T06:00:01Z",
+            WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+        ),
+    ];
+    events.extend(night_and_morning());
+    for (t, x) in [
+        ("2026-07-01T10:25:00Z", 16),
+        ("2026-07-01T10:55:00Z", 17),
+        ("2026-07-01T11:25:00Z", 17),
+        ("2026-07-01T11:55:00Z", 18),
+        ("2026-07-01T12:25:00Z", 18),
+        ("2026-07-01T12:55:00Z", 17),
+        ("2026-07-01T13:25:00Z", 17),
+    ] {
+        events.push(obs_event(t, x));
+    }
+    let mut b = synthetic_book(&yes18, Some("0.92"), None, 200, utc("2026-07-01T13:57:50Z"));
+    b.asks = vec![
+        BookLevel {
+            price: Price::parse("0.93").unwrap(),
+            size: Shares::from_whole(60),
+        },
+        BookLevel {
+            price: Price::parse("0.94").unwrap(),
+            size: Shares::from_whole(100),
+        },
+    ];
+    events.push(env(
+        "2026-07-01T13:57:50Z",
+        WeatherMachineEvent::OrderBookUpdate(OrderBookEvent { book: b }),
+    ));
+    events.push(obs_event("2026-07-01T13:55:00Z", 17)); // known at 15:58 local
+    let model = |from: u16, to: u16| {
+        Arc::new(PeakModel {
+            probs: vec![0.985, 0.012, 0.002, 0.001],
+            peaks: summer_peaks(from, to),
+        })
+    };
+
+    // Learned slot 15:25–17:26: bought, 100 shares at ≤ 0.94, filled.
+    let mut engine = Engine::new(cfg.clone(), model(15 * 60 + 25, 17 * 60 + 25));
+    let outs = run(&mut engine, events.clone(), m.fees);
+    let a = approvals(&outs);
+    assert_eq!(a.len(), 1, "{a:?}");
+    let approved = outs.iter().flat_map(|o| &o.approved).next().unwrap();
+    let i = approved.intent();
+    assert_eq!(i.strategy.as_str(), "F_peak_slot");
+    assert_eq!(i.bucket_label, "18°C");
+    assert_eq!(i.shares, Shares::from_whole(100));
+    assert_eq!(i.limit_price, Price::parse("0.94").unwrap());
+    assert_eq!(
+        i.rationale[0],
+        "15:58 local inside the summer slot 15:25–17:26 (median → 90% of 10 days' peak times)"
+    );
+    let pos = engine.positions().get(&yes18).expect("filled in paper");
+    assert_eq!(pos.shares, Shares::from_whole(100));
+
+    // Without F's own risk caps the $10 position limit refuses it.
+    let mut capped = cfg.clone();
+    capped.risk = RiskConfig::default();
+    let mut engine = Engine::new(capped, model(15 * 60 + 25, 17 * 60 + 25));
+    let outs = run(&mut engine, events.clone(), m.fees);
+    assert!(approvals(&outs).is_empty());
+    assert!(
+        engine.snapshot().decisions.iter().any(|d| {
+            d.strategy.as_str() == "F_peak_slot"
+                && !d.approved
+                && d.reasons.iter().any(|r| r.starts_with("PositionSize"))
+        }),
+        "the rejection is recorded"
+    );
+
+    // A later slot (16:25–17:56): 15:58 is before it, and the evaluation says so.
+    let mut engine = Engine::new(cfg, model(16 * 60 + 25, 17 * 60 + 55));
+    let outs = run(&mut engine, events, m.fees);
+    assert!(approvals(&outs).is_empty());
+    assert!(
+        engine.snapshot().decisions.iter().any(|d| {
+            let o = d.outputs.to_string();
+            d.strategy.as_str() == "evaluation"
+                && o.contains("F 18°C YES")
+                && o.contains("15:58 outside the summer slot 16:25–17:56")
+        }),
+        "{:?}",
+        engine
+            .snapshot()
+            .decisions
+            .iter()
+            .map(|d| &d.outputs)
+            .collect::<Vec<_>>()
+    );
 }

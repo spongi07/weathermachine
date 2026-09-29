@@ -1,11 +1,11 @@
-# 22–28 · Peak detection, probability, strategies A/B/C/D/E, market pooling, unwind (+ EV)
+# 22–28 · Peak detection, probability, strategies A/B/C/D/E/F, market pooling, unwind (+ EV)
 
 > **The core trading belief is a HYPOTHESIS TO BACKTEST, not a fact:** once
 > the day's high has been reached and not retested for N minutes, it becomes
 > increasingly likely to be final. The code never assumes it. The
 > probability of "final" comes only from a model trained on history
 > (`EmpiricalPeakModel`). Without such a model the `NoEdgeModel` returns
-> nothing, and strategies A, B and E cannot propose any trade.
+> nothing, and strategies A, B, E and F cannot propose any trade.
 
 ## 22. PeakDetectionEngine
 
@@ -326,6 +326,142 @@ trade. Replay tests `strategy_e_is_replayed_with_its_book_stand_in` and
 `taker_flow_counts_the_lookback_and_the_ask_it_began_with` cover the
 research side, and further tests cover configuration mapping and
 validation.
+
+## 27d. PEAK SLOT — strategy F
+
+**PURPOSE.** The operator's rule: learn when the day's highest temperature
+is measured, which differs per season; inside that time slot, watch the
+order book of the bucket holding the day's high, and once it is offered
+above 0.90 buy 100 shares of its YES. `PeakSlotHigh`
+(`wm-strategy::peak_slot`), `[strategies.peak_slot]`; the peak times are
+`PeakTimes` (`wm-strategy::peak_times`).
+
+**PEAK TIMES.** Training (`model train`, and the automatic training of
+`run`) walks the METAR history and records, per meteorological season
+(DJF / MAM / JJA / SON, hemisphere from `[peak]`), the local minute of the
+**first report at each day's whole-degree high**. From that report on, the
+bucket holding the high wins unless a later report beats it. Only days whose
+reports cover them count: the first within 90 min of midnight, the last
+within 90 min of the day's end, no gap over 120 min. Others are counted as
+incomplete. The histogram is stored in the model file (`peak_times`) and
+printed in the training report and in `research market`. The printout
+shows:
+
+* the mean and the median (the "average time");
+* the 10 / 25 / 75 / 90 % quantiles;
+* the slot;
+* the share of days whose high came after the slot, after 17:00, or before
+  09:00.
+
+Night maxima (winter warm fronts) pull the mean earlier, so the slot is
+built from quantiles. A model file without peak times is retrained once,
+automatically. Operator-supplied files (`retrain_existing = false`) are
+never retrained, and F then uses its fallback slots.
+
+**KNOWN FACT (KMI/IRM).** In Belgium maxima are typically reached around
+14:30 UTC all year, 2–3 hours after solar noon: ≈ 16:30 local in summer,
+≈ 15:30 in winter. In winter the day's highest temperature can come at
+night, after a warm front
+([KMI, maximumtemperatuur](https://www.meteo.be/nl/info/weerwoorden/maximumtemperatuur)).
+The lag after noon varies between about 1.9 and 2.9 h with latitude and
+season
+([diurnal temperature variation](https://en.wikipedia.org/wiki/Diurnal_temperature_variation)).
+The first report at the *whole-degree* high usually comes somewhat earlier
+than the true maximum, which is why the station's own history sets the
+slot.
+
+**SLOT.** From quantile `slot_from_quantile` (0.5, the median) to
+`slot_to_quantile` (0.9) of the season's peak times, end exclusive:
+`[q50, q90 + 1 min)`. Until an installed model carries peak times,
+`fallback_slots` apply:
+
+| season | fallback slot |
+|---|---|
+| winter | 13:00–16:00 |
+| spring | 14:30–17:30 |
+| summer | 15:00–18:00 |
+| autumn | 14:00–17:00 |
+
+Every evaluation and proposal names the slot and its source, e.g.
+`15:58 local inside the summer slot 15:25–16:56 (median → 90% of 412 days' peak times)`.
+
+**CONDITIONS**, all required. F is evaluated on every weather update and on
+every order-book update, so the book is watched continuously.
+
+* The local time is inside the current season's slot.
+* The bucket holding **the day's high so far** is priced right. This is how
+  "the current measured temperature" is read: a bucket below the high has
+  already lost.
+  * Its best ask is **above** `min_price` (0.90, exclusive).
+  * All `shares` (100) are offered at or below `max_price` (0.95). The
+    order's limit is the price at which 100 shares fill walking the asks
+    (`sweep_price`), fill-and-kill.
+* Optionally, the latest report is ≥ `min_drop_tenths` below the high
+  (default 0 = off).
+* The weather is ≤ 40 min old and the book ≤ 15 s old.
+* A probability model is loaded (fail closed). F claims no model edge: the
+  evaluation shows the pooled probability and the EV, but neither is a gate.
+* F holds no position and no order on the token.
+* The market accepts orders, and 100 shares is at least the market minimum.
+
+**RISK.** 100 shares at up to 0.95 is $95, above the $10 position size.
+`[risk.strategy_caps.F_peak_slot]` gives F its own caps: $100 per position,
+$110 per market and $110 per strategy. The portfolio caps were raised by
+one F position (§30). The per-market cap counts every strategy's legs, so
+after F buys, A, B and E add nothing more to that event. One F loss trips
+the $30 daily-loss stop for the rest of that UTC day. In practice F holds
+one position a day.
+
+**THE PREMISE IS NOT A FACT.** "After the slot the temperature cannot go
+higher" is false by construction: one day in ten (the slot's upper
+quantile) first reports its high after the slot. Inside the slot, a later
+report can also still beat the high. What F needs is that the market
+underprices the high's bucket inside the slot by more than fee and
+slippage.
+
+* At 0.95 the taker fee is 0.05 × p × (1 − p) = 0.24 ¢, so with 0.005
+  slippage the bucket must win **95.7 %** of the time.
+* One loss (−$94 to −$96) costs as much as about 15 wins at 0.93 (+$6.17
+  each) or 22 wins at 0.95 (+$4.26 each).
+
+**Evidence** ([edge research §6a](../research/edge-research.md#6a-strategy-f--the-highs-bucket-inside-the-peak-slot)):
+
+* EHAM buckets priced 0.90–0.98 won 96.8 % of the time at a mean price of
+  0.949.
+* E, which bought 0.90–0.99 later in the day, won 96.2 % at a mean of
+  0.964 and lost 1 % per trade.
+* F's cap at 0.95 keeps it where the favourite discount was measured.
+
+HYPOTHESIS TO BACKTEST: `research market` replays F, five variants and a
+maker version at traded prices, and picks among them out of sample
+(§36a).
+
+**RESIDUAL RISK.**
+
+* A second peak (warm advection, clearing cloud), or a night maximum in
+  winter.
+* A METAR high that is not the resolution value.
+* 100 shares may not be offered at ≤ 0.95. F then waits, and the evaluation
+  says how many were.
+
+**TESTING.**
+
+* `peak_times.rs`: first reach, the coverage rules, quantiles, mean, slot,
+  the report table, serialization.
+* `peak_slot.rs`: the sweep price, and the slot source (history or
+  fallback).
+* `strategy_f_*` in `wm-strategy/tests/strategies.rs`: the signal, the
+  learned slot, every blocker, no second position.
+* The kernel scenario
+  `strategy_f_buys_100_shares_of_the_high_inside_the_learned_slot`:
+  approved with F's caps, rejected by the $10 cap without them, and blocked
+  outside a later slot.
+* The risk tests for `strategy_caps`, and configuration validation
+  (quantiles, prices, shares, slot windows, and every cap one F position
+  must fit).
+* The training test asserting the peak times in the model and the report.
+* The retrain-once test.
+* The replay tests (§36a).
 
 ## 28. UnwindEngine
 

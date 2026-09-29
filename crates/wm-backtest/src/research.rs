@@ -12,18 +12,18 @@ use crate::forecast_eval::{
     EvaluationConfig, ForecastEvaluation, ForecastHistory, PLACEBO_OFFSET_DAYS, Scorer,
 };
 use crate::selection::{Comparer, SelectionConfig, StructureComparison};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use wm_core::ids::StationId;
 use wm_core::resolution::ObservationFilter;
-use wm_core::time::{local_date, local_day_bounds};
+use wm_core::time::{Season, local_date, local_day_bounds};
 use wm_core::weather::Observation;
 use wm_strategy::probability::{drop_bucket, headroom_bucket, hour_bucket, rise_bucket};
 use wm_strategy::{
     CONFIRMATION_WINDOWS, EmpiricalPeakModel, ModelStructure, PeakConfig, PeakDetectionEngine,
-    PeakFeatures, TemperatureStateEngine, ViewKind,
+    PeakFeatures, PeakTimes, PeakTimesBuilder, TemperatureStateEngine, ViewKind,
 };
 
 /// Wilson score interval (95 %).
@@ -139,6 +139,9 @@ pub struct StudyOutput {
     pub evaluation: Option<ForecastEvaluation>,
     /// The candidate structure trained in the same pass ([`study_and_select`]).
     pub candidate: Option<CandidateStudy>,
+    /// When each season's days first reported their high (also stored in
+    /// every model trained here).
+    pub peak_times: PeakTimes,
 }
 
 /// The candidate structure: its model, its own forecast evaluation (with
@@ -257,6 +260,7 @@ fn run_study(
     }
     // (window, stratum) → (samples, finals)
     let mut table: BTreeMap<(u32, String), (u64, u64)> = BTreeMap::new();
+    let mut peaks = PeakTimesBuilder::new();
     let mut days = 0u64;
     for (date, obs) in &by_day {
         for o in obs {
@@ -270,6 +274,12 @@ fn run_study(
             continue;
         };
         days += 1;
+        peaks.add_day(
+            *date,
+            Season::from_month(date.month(), cfg.peak.southern_hemisphere),
+            &final_state.points,
+            final_high,
+        );
         let forecast = forecasts.and_then(|h| h.days.get(date));
         days_with_forecast += u64::from(forecast.is_some());
         let placebo = match (eval.is_some(), forecasts) {
@@ -370,11 +380,13 @@ fn run_study(
         .collect();
     let from = by_day.keys().next().copied();
     let to = by_day.keys().next_back().copied();
+    let peak_times = peaks.build();
     let finish = |mut arm: Arm| {
         if let (Some(f), Some(t)) = (from, to) {
             arm.model.trained_from = f;
             arm.model.trained_to = t;
         }
+        arm.model.peak_times = Some(peak_times.clone());
         let evaluation = match (arm.scorer, forecasts) {
             (Some(sc), Some(h)) => Some(sc.finish(&h.product, days_with_forecast)),
             _ => None,
@@ -403,6 +415,7 @@ fn run_study(
         model,
         evaluation,
         candidate,
+        peak_times,
     }
 }
 

@@ -3,7 +3,7 @@
 use crate::exposure::{Leg, event_exposure};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use wm_core::health::ProviderHealthState;
 use wm_core::ids::{
     ClientOrderId, DecisionId, EventSlug, LocationId, StationId, StrategyId, TokenId,
@@ -49,6 +49,25 @@ pub struct RiskConfig {
     pub max_orders_per_minute: u32,
     /// Live requires a human-approved resolution spec; paper may use machine-tradable specs.
     pub require_approved_resolution_spec: bool,
+    /// Caps of single strategies (by strategy id) that replace the default
+    /// per-position, per-market and per-strategy caps — for a strategy that
+    /// buys a fixed number of shares. The portfolio-wide caps (global,
+    /// location, daily) still count every strategy together.
+    #[serde(default)]
+    pub strategy_caps: BTreeMap<String, StrategyCaps>,
+}
+
+/// One strategy's own caps (see [`RiskConfig::strategy_caps`]); an unset
+/// cap falls back to the default one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyCaps {
+    #[serde(with = "decimal_serde::usd")]
+    pub position_size_usd: Usd,
+    #[serde(with = "decimal_serde::opt_usd", default)]
+    pub max_market_exposure_usd: Option<Usd>,
+    #[serde(with = "decimal_serde::opt_usd", default)]
+    pub max_strategy_exposure_usd: Option<Usd>,
 }
 
 impl Default for RiskConfig {
@@ -70,6 +89,7 @@ impl Default for RiskConfig {
             correction_cooldown_minutes: 10,
             max_orders_per_minute: 6,
             require_approved_resolution_spec: false,
+            strategy_caps: BTreeMap::new(),
         }
     }
 }
@@ -106,7 +126,40 @@ impl RiskConfig {
                 "max_observation_gap_minutes must be ≥ 30 (half-hourly reports)".into(),
             ));
         }
+        for (strategy, caps) in &self.strategy_caps {
+            if caps.position_size_usd <= Usd::ZERO
+                || caps.position_size_usd > self.global_max_exposure_usd
+            {
+                return Err(RiskConfigError(format!(
+                    "strategy_caps.{strategy}.position_size_usd must be positive and ≤ global_max_exposure_usd"
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// The per-position cap of `strategy`.
+    pub fn position_size_for(&self, strategy: &StrategyId) -> Usd {
+        self.strategy_caps
+            .get(strategy.as_str())
+            .map_or(self.position_size_usd, |c| c.position_size_usd)
+    }
+
+    /// The per-event worst-case cap checked on `strategy`'s orders (the
+    /// event's legs of every strategy count).
+    pub fn market_cap_for(&self, strategy: &StrategyId) -> Option<Usd> {
+        self.strategy_caps
+            .get(strategy.as_str())
+            .and_then(|c| c.max_market_exposure_usd)
+            .or(self.max_market_exposure_usd)
+    }
+
+    /// The cap on `strategy`'s own capital.
+    pub fn strategy_cap_for(&self, strategy: &StrategyId) -> Option<Usd> {
+        self.strategy_caps
+            .get(strategy.as_str())
+            .and_then(|c| c.max_strategy_exposure_usd)
+            .or(self.max_strategy_exposure_usd)
     }
 }
 
@@ -602,10 +655,11 @@ impl RiskEngine {
             fail(CheckId::Duplicate, "decision already processed".into());
         }
         let cost = notional(intent.limit_price, intent.shares, Rounding::Up);
-        if opening && cost > cfg.position_size_usd {
+        let position_cap = cfg.position_size_for(&intent.strategy);
+        if opening && cost > position_cap {
             fail(
                 CheckId::PositionSize,
-                format!("cost {cost} > position size {}", cfg.position_size_usd),
+                format!("cost {cost} > position size {position_cap}"),
             );
         }
         if intent.side == Side::Sell {
@@ -671,7 +725,7 @@ impl RiskEngine {
                     ),
                 );
             }
-            if let Some(max) = cfg.max_market_exposure_usd
+            if let Some(max) = cfg.market_cap_for(&intent.strategy)
                 && this_event > max
             {
                 fail(
@@ -688,7 +742,7 @@ impl RiskEngine {
                     );
                 }
             }
-            if let Some(max) = cfg.max_strategy_exposure_usd {
+            if let Some(max) = cfg.strategy_cap_for(&intent.strategy) {
                 let sx = per_strategy
                     .get(&intent.strategy)
                     .copied()

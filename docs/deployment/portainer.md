@@ -148,6 +148,15 @@ structure — walk-forward comparison* of the same report and in the MODEL
 pill's tooltip. After updating to a version with this comparison, the model
 retrains once in the background; the running model keeps trading meanwhile.
 
+Training also learns, per season, **when the day's high is first
+reported**: the mean, the median and the quantiles of that local time.
+These are strategy F's slots, stored in the model and shown in the section
+*When the day's high is first reported (strategy F)* of the same report.
+After updating to the version with strategy F, the model retrains once in
+the background. Until the new model is loaded, F uses its fallback slots
+(`[strategies.peak_slot.fallback_slots]`), and every F evaluation names the
+slot and where it came from.
+
 If Open-Meteo is unreachable the model simply runs without the forecast.
 
 Retrain by hand (for example once a year) with a one-off container on the
@@ -193,6 +202,20 @@ book is not archived, so the replay stands in for it with the trades. Each
 probabilities, the market, the high bucket's taker flow and every simulated
 trade.
 
+Strategy F (the high's bucket inside the season's peak slot, 100 shares)
+runs six ways at 100 shares a trade:
+
+* as configured;
+* up to 0.99;
+* an earlier slot and a later slot;
+* only once the report is 1 °C below the high;
+* as a resting bid.
+
+Each market day uses the slots that the METAR days before it learned. Read
+the line **Strategy F out of sample** first. It takes the rule that did best
+on the first half of the days and scores it on the second half, which needs
+at least 20 market days. The F table's best row overstates what to expect.
+
 Run it after 00:00 UTC (02:00 in Amsterdam in summer) to include the day
 that just ended. Before then the METAR archive holds only its first hours,
 and the report lists that day as skipped.
@@ -215,6 +238,11 @@ In short:
   bot could act.
 * The resolution check shows whether the METAR high was the resolved
   bucket.
+* If *Strategy F out of sample* is negative, set `enabled = false` in
+  `[strategies.peak_slot]`. If another F rule did better out of sample, you
+  can switch to it in the same section: for example `min_drop_tenths = 10`
+  for "1 °C below", `max_price = "0.99"`, or other slot quantiles. With an
+  interval that includes zero, keep F in paper and collect more days.
 
 ### The paper-run report
 

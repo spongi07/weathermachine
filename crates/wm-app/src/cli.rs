@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
     BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, MakerSim, MarketSimConfig,
-    MarketStudyConfig, StudyConfig, import_iem_csv, run_backtest, study,
+    MarketStudyConfig, PeakSlotSim, StudyConfig, import_iem_csv, run_backtest, study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{RunId, StationId};
@@ -656,6 +656,7 @@ async fn research_market(
             no_distances: no.distances.clone(),
             stake_usd: yes.notional.as_f64(),
             e: BookConfirmedSim::from_live(&cfg.book_confirmed()),
+            f: PeakSlotSim::from_live(&cfg.peak_slot()),
             maker: MakerSim::default(),
         },
         routine_minutes: loc.station.routine_minutes.clone(),
@@ -720,7 +721,13 @@ async fn research_market(
         o.days_downloaded,
         o.unavailable.len()
     );
-    for line in o.report.verdict.iter().chain(&o.report.strategy_verdict) {
+    for line in o
+        .report
+        .verdict
+        .iter()
+        .chain(&o.report.strategy_verdict)
+        .chain(&o.report.f_verdict)
+    {
         println!("• {line}");
     }
     println!("report: {}", o.markdown.display());

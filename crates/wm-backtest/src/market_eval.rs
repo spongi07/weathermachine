@@ -29,6 +29,10 @@
 //! * **Strategies at traded prices** — A and B replayed with either
 //!   structure, several confirmation windows and ask ranges
 //!   ([`crate::market_sim`]), and chosen days report by report.
+//! * **Strategy F** — when each season's high is first reported (the METAR
+//!   history before each market day) and F's peak-slot rule with its
+//!   variants at traded prices, one variant chosen out of sample
+//!   ([`crate::market_peak`]).
 //!
 //! Market prices come from executed trades, not quotes: the midpoint of the
 //! latest taker buy and taker sell of YES (ask and bid proxies), each at most
@@ -37,22 +41,23 @@
 
 use crate::forecast_eval::{ForecastHistory, ratio_ci};
 use crate::market_makers::{self, FlowCollector, MakerTakerStudy};
+use crate::market_peak;
 use crate::market_sim::{
     self, DayTimeline, Decision, Flow, MarketSimConfig, Quote, SimTrade, StrategyRow,
 };
 use crate::research::wilson;
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use wm_core::ids::StationId;
 use wm_core::market::TemperatureBucket;
-use wm_core::time::{local_date, local_day_bounds};
+use wm_core::time::{Season, local_date, local_day_bounds};
 use wm_core::weather::Observation;
 use wm_strategy::{
-    EmpiricalPeakModel, ModelStructure, PeakConfig, PeakDetectionEngine, ProbabilityModel,
-    TemperatureStateEngine, ViewKind, log_pool,
+    EmpiricalPeakModel, ModelStructure, PeakConfig, PeakDetectionEngine, PeakTimes,
+    PeakTimesBuilder, ProbabilityModel, TemperatureStateEngine, ViewKind, log_pool,
 };
 
 /// Probabilities are clamped to `[P_FLOOR, 1 − P_FLOOR]` before scoring:
@@ -323,6 +328,20 @@ pub struct MarketStudyReport {
     /// What resting orders earned on the other side of every trade.
     #[serde(default)]
     pub maker_taker: MakerTakerStudy,
+    /// When each season's high was first reported over the whole METAR
+    /// history (each market day was replayed with the days before it).
+    #[serde(default)]
+    pub peak_times: Option<PeakTimes>,
+    /// Strategy F's rules at traded prices ([`MarketSimConfig::f`]'s shares
+    /// a trade, not the $10 stake of the other rows).
+    #[serde(default)]
+    pub f_strategies: Vec<StrategyRow>,
+    #[serde(default)]
+    pub f_verdict: Vec<String>,
+    /// The F rule best on the first half of the market days, judged on the
+    /// second half.
+    #[serde(default)]
+    pub f_out_of_sample: Option<String>,
     /// Plain-language conclusions.
     pub verdict: Vec<String>,
 }
@@ -532,12 +551,19 @@ pub fn market_study(
         sim_trades: Vec::new(),
         timelines: Vec::new(),
         maker_taker: MakerTakerStudy::default(),
+        peak_times: None,
+        f_strategies: Vec::new(),
+        f_verdict: Vec::new(),
+        f_out_of_sample: None,
         verdict: Vec::new(),
     };
     let mut flows = FlowCollector::default();
     let mut points: Vec<Point> = Vec::new();
     let mut scored_dates: Vec<NaiveDate> = Vec::new();
     let mut seen_market: HashSet<NaiveDate> = HashSet::new();
+    // Peak times of the days before the current one (strategy F's slots).
+    let mut peaks = PeakTimesBuilder::new();
+    let mut f_days: Vec<NaiveDate> = Vec::new();
 
     for (date, obs) in &by_day {
         for o in obs {
@@ -625,6 +651,20 @@ pub fn market_study(
                     &cfg.routine_minutes,
                     cfg.tz,
                 ));
+                trades.extend(market_peak::simulate_peak_slot(
+                    md.date,
+                    &md.buckets,
+                    &md.labels,
+                    md.winner,
+                    &decisions,
+                    &per_bucket,
+                    &peaks.build(),
+                    &cfg.sim,
+                    cfg.taker_fee_rate,
+                    &cfg.routine_minutes,
+                    cfg.tz,
+                ));
+                f_days.push(*date);
                 flows.add_day(
                     md.date,
                     &md.buckets,
@@ -664,6 +704,12 @@ pub fn market_study(
             model.observe(f, *increment);
             candidate.observe(f, *increment);
         }
+        peaks.add_day(
+            *date,
+            Season::from_month(date.month(), cfg.peak.southern_hemisphere),
+            &final_state.points,
+            final_high,
+        );
         engine.prune(*date);
     }
     for d in days {
@@ -726,6 +772,21 @@ pub fn market_study(
     ));
     report.strategies = strategies;
     report.strategy_verdict = market_sim::verdict(&report.strategies, &cfg.sim);
+    report.peak_times = (peaks.days() > 0).then(|| peaks.build());
+    report.f_strategies = market_peak::peak_rows(
+        &report.sim_trades,
+        &cfg.sim,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x53,
+    );
+    report.f_verdict = market_peak::verdict(&report.f_strategies, &cfg.sim);
+    report.f_out_of_sample = market_peak::out_of_sample(
+        &report.sim_trades,
+        &cfg.sim,
+        &f_days,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x54,
+    );
     report.maker_taker = flows.finish(
         cfg.taker_fee_rate,
         cfg.sim.maker.rebate_share,
@@ -1295,6 +1356,9 @@ fn verdict(r: &MarketStudyReport) -> Vec<String> {
     if let Some(line) = r.maker_taker.verdict.first() {
         v.push(line.clone());
     }
+    if let Some(line) = &r.f_out_of_sample {
+        v.push(line.clone());
+    }
     if r.resolution_checked > 0 {
         v.push(format!(
             "The METAR high matched the resolved bucket on {} of {} days.",
@@ -1451,6 +1515,16 @@ impl MarketStudyReport {
             &self.sim_trades,
             &self.sim,
             &self.strategy_verdict,
+        ));
+        if let Some(pt) = &self.peak_times {
+            s.push_str(&pt.to_markdown(self.sim.f.slot_from_quantile, self.sim.f.slot_to_quantile));
+        }
+        s.push_str(&market_peak::markdown(
+            &self.f_strategies,
+            &self.sim_trades,
+            &self.sim,
+            &self.f_verdict,
+            self.f_out_of_sample.as_deref(),
         ));
         s.push_str(&market_makers::maker_taker_markdown(&self.maker_taker));
         for t in &self.timelines {
@@ -2240,6 +2314,185 @@ mod tests {
         ] {
             assert!(md.contains(section), "missing {section}\n{md}");
         }
+    }
+
+    /// The peak times the study had on each of `dates`: those of the days
+    /// before it, learned the same way.
+    fn peak_times_before(
+        obs: &[Observation],
+        dates: &[NaiveDate],
+    ) -> BTreeMap<NaiveDate, PeakTimes> {
+        let mut by_day: BTreeMap<NaiveDate, Vec<&Observation>> = BTreeMap::new();
+        for o in obs {
+            by_day
+                .entry(local_date(o.key.observed_at, TZ))
+                .or_default()
+                .push(o);
+        }
+        let mut e = TemperatureStateEngine::new(3);
+        e.register_station(st(), TZ);
+        let mut b = PeakTimesBuilder::new();
+        let mut out = BTreeMap::new();
+        for (d, os) in by_day {
+            if dates.contains(&d) {
+                out.insert(d, b.build());
+            }
+            for o in os {
+                e.apply_observation(o);
+            }
+            let (_, end) = local_day_bounds(d, TZ);
+            if let Some(s) = e.day_state(&st(), d, ViewKind::All, end)
+                && let Some(h) = s.high
+            {
+                b.add_day(
+                    d,
+                    Season::from_month(d.month(), false),
+                    &s.points,
+                    h.value.round_half_up_whole(),
+                );
+            }
+            e.prune(d);
+        }
+        out
+    }
+
+    fn minute_of(hm: &str) -> u16 {
+        let (h, m) = hm.split_once(':').unwrap();
+        h.parse::<u16>().unwrap() * 60 + m.parse::<u16>().unwrap()
+    }
+
+    #[test]
+    fn strategy_f_buys_the_high_inside_the_slot_the_days_before_learned() {
+        let (obs, highs) = history();
+        // The METAR high's bucket trades at 0.93 all day, the others at 0.02;
+        // the last day resolves one bucket higher than the METAR high.
+        let mut days: Vec<MarketDay> = last_days(&highs, 30)
+            .into_iter()
+            .map(|(d, h)| market_day(d, h, &|i, w| if i == w { 0.93 } else { 0.02 }))
+            .collect();
+        let lost_day = days.last().unwrap().date;
+        days.last_mut().unwrap().winner += 1;
+        let dates: Vec<NaiveDate> = days.iter().map(|d| d.date).collect();
+        assert!(dates.iter().all(|d| d.month() <= 2), "winter market days");
+        let mut c = cfg();
+        c.timeline_days = dates.clone();
+        let r = market_study(&obs, None, &days, &c);
+
+        // When the high is first reported, over the whole history.
+        let pt = r.peak_times.as_ref().expect("peak times");
+        let winter = pt.season(Season::Winter).unwrap();
+        assert!(winter.days >= 100, "{winter:?}");
+        assert_eq!(
+            u64::from(pt.seasons.iter().map(|s| s.days).sum::<u32>() + pt.incomplete_days),
+            r.history_days
+        );
+
+        // Every F trade: YES of the METAR high's bucket at its ask (0.93 +
+        // 0.002), inside the winter slot of the days before it, one a day.
+        let before = peak_times_before(&obs, &dates);
+        let f: Vec<&SimTrade> = r.sim_trades.iter().filter(|t| t.strategy == "F").collect();
+        assert!(f.len() >= 10, "{:?}", r.f_verdict);
+        let fee = 0.05 * 0.932 * (1.0 - 0.932);
+        let mut seen = HashSet::new();
+        for t in &f {
+            assert!(seen.insert(t.date), "one trade a day: {t:?}");
+            assert_eq!(
+                (t.side.as_str(), t.structure.as_str(), t.price),
+                ("YES", "–", 0.932)
+            );
+            let (start, end) = before[&t.date].slot(Season::Winter, 0.5, 0.9).unwrap();
+            // Filled from the tape, or at the knowledge time (report + 5′).
+            let at = t
+                .filled
+                .as_deref()
+                .map_or(minute_of(&t.report) + 5, minute_of);
+            assert!((start..end).contains(&at), "{t:?} outside {start}–{end}");
+            assert_eq!(t.won, t.date != lost_day, "{t:?}");
+            let want = if t.won {
+                100.0 * (1.0 - 0.932 - fee - 0.005)
+            } else {
+                -100.0 * (0.932 + fee + 0.005)
+            };
+            assert!((t.pnl_usd - want).abs() < 1e-9, "{t:?}");
+            // The day's replay shows it at its report.
+            let row = r
+                .timelines
+                .iter()
+                .find(|x| x.date == t.date)
+                .and_then(|x| x.rows.iter().find(|x| x.report == t.report))
+                .unwrap();
+            assert!(
+                row.trades
+                    .iter()
+                    .any(|s| s.starts_with("F · 0.90–0.95: YES")),
+                "{row:?}"
+            );
+        }
+
+        // F's rows are its own, not among the $10 rows.
+        assert_eq!(r.strategies.len(), 2 * (2 * 3 * 2 + 3 + 3));
+        assert!(r.strategies.iter().all(|x| !x.strategy.starts_with('F')));
+        assert_eq!(r.f_strategies.len(), 6);
+        let row = |label: &str| r.f_strategies.iter().find(|x| x.strategy == label).unwrap();
+        let live = row("F");
+        assert!(live.live && r.f_strategies[0].strategy == "F");
+        assert_eq!(live.trades, f.len() as u64);
+        assert_eq!(live.wins, f.iter().filter(|t| t.won).count() as u64);
+        // Asks of 0.932 are inside both ranges: up to 0.99 trades the same.
+        assert_eq!(row("F · to 0.99").trades, live.trades);
+        assert!((row("F · to 0.99").total_usd - live.total_usd).abs() < 1e-9);
+        // Takers sell at the maker's bid (0.928), never through it.
+        assert_eq!(row("F maker").trades, 0);
+        assert!(
+            r.f_verdict[0].starts_with("Strategy F (slot 50% → 90% quantile of the peak times, asks above 0.90 and ≤ 0.95; 100 shares a trade): "),
+            "{:?}",
+            r.f_verdict
+        );
+        let oos = r.f_out_of_sample.as_deref().unwrap();
+        assert!(
+            oos.starts_with("Strategy F out of sample: on the first 15 market days"),
+            "{oos}"
+        );
+        assert!(r.verdict.iter().any(|v| v == oos), "{:?}", r.verdict);
+
+        let md = r.to_markdown();
+        for section in [
+            "## When the day's high is first reported (strategy F)",
+            "## Strategy F at traded prices",
+            "| F **live** | 50% → 90% | 0.90–0.95 |",
+            "| F maker | 50% → 90% | 0.90–0.95 | 0 |",
+            "* Strategy F out of sample: on the first 15 market days",
+        ] {
+            assert!(md.contains(section), "missing {section}\n{md}");
+        }
+        let pos = |x: &str| md.find(x).unwrap();
+        assert!(pos("## Strategies at traded prices") < pos("## When the day's high"));
+        assert!(pos("## When the day's high") < pos("## Strategy F at traded prices"));
+        if f.iter().any(|t| !t.won) {
+            assert!(md.contains(&format!("| {lost_day} | ")), "{md}");
+        }
+
+        // The JSON keeps F; reports written before F still load.
+        let json = serde_json::to_value(&r).unwrap();
+        let back: MarketStudyReport = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.peak_times, r.peak_times);
+        assert_eq!(back.f_verdict, r.f_verdict);
+        assert_eq!(back.f_out_of_sample, r.f_out_of_sample);
+        assert_eq!(back.f_strategies.len(), 6);
+        assert_eq!(back.sim.f, r.sim.f);
+        let mut old = json;
+        let o = old.as_object_mut().unwrap();
+        for k in ["peak_times", "f_strategies", "f_verdict", "f_out_of_sample"] {
+            o.remove(k);
+        }
+        o["sim"].as_object_mut().unwrap().remove("f");
+        for t in o["sim_trades"].as_array_mut().unwrap() {
+            t.as_object_mut().unwrap().remove("filled");
+        }
+        let old: MarketStudyReport = serde_json::from_value(old).unwrap();
+        assert!(old.peak_times.is_none() && old.f_strategies.is_empty());
+        assert!(old.sim_trades.iter().all(|t| t.filled.is_none()));
+        assert_eq!(old.sim.f, crate::PeakSlotSim::default());
     }
 
     #[test]

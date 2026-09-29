@@ -158,6 +158,7 @@ fn ctx<'a>(
         views,
         positions,
         pending_tokens: pending,
+        peak_times: None,
     }
 }
 
@@ -1286,4 +1287,238 @@ fn strategy_e_sees_the_book_between_evaluations() {
         "{:?}",
         out.proposals[0].rationale
     );
+}
+
+// ---------------------------------------------------------------------------
+// Strategy F — the high's bucket inside the season's peak slot
+// ---------------------------------------------------------------------------
+
+use wm_strategy::{PeakSlotConfig, PeakSlotHigh, PeakTimes, PeakTimesBuilder, SeasonSlots};
+
+/// Strategy F evaluated at `NOW` (15:32 local, summer) on `b`.
+fn run_f(
+    m: &DailyTemperatureMarket,
+    cfg: PeakSlotConfig,
+    b: &HashMap<TokenId, OrderBook>,
+    v: &[ViewEvaluation],
+    pending: &HashSet<TokenId>,
+    peak_times: Option<&PeakTimes>,
+) -> StrategyOutput {
+    let (pos, loc) = (PositionBook::new(), LocationId::new("amsterdam").unwrap());
+    let c = StrategyContext {
+        peak_times,
+        ..ctx(m, b, v, &pos, pending, &loc)
+    };
+    PeakSlotHigh::new(cfg).evaluate(&c)
+}
+
+/// Summer peak times whose median → 90 % slot is `from`–`to` (local minutes,
+/// half-hourly reports at :25 and :55).
+fn summer_peaks(from: u16, to: u16) -> PeakTimes {
+    let start = utc("2026-06-30T22:25:00Z");
+    let mut b = PeakTimesBuilder::new();
+    // Five days peaking at `from`, five at `to`: the median is `from`, the
+    // 90th percentile `to`.
+    for peak in std::iter::repeat_n(from, 5).chain(std::iter::repeat_n(to, 5)) {
+        let points: Vec<wm_strategy::ObsPoint> = (0..48u16)
+            .map(|i| {
+                let minute = (25 + 30 * i) % 1440;
+                wm_strategy::ObsPoint {
+                    observed_at: start + chrono::Duration::minutes(30 * i64::from(i)),
+                    local_minute_of_day: minute,
+                    local_minute_of_hour: (minute % 60) as u8,
+                    temp: TempC::from_whole(if minute == peak { 25 } else { 15 }),
+                    report_type: ReportType::Metar,
+                    version: 1,
+                }
+            })
+            .collect();
+        b.add_day(date(), wm_core::time::Season::Summer, &points, 25);
+    }
+    b.build()
+}
+
+#[test]
+fn strategy_f_buys_100_shares_of_the_high_inside_the_slot() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    // 60 + 60 shares at 0.93/0.94: 100 shares cost at most 0.94.
+    let b = e_books(&m, &[("0.93", 60), ("0.94", 60), ("0.99", 500)]);
+    let out = run_f(&m, PeakSlotConfig::default(), &b, &v, &HashSet::new(), None);
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+    let p = &out.proposals[0];
+    assert_eq!(p.strategy.as_str(), "F_peak_slot");
+    assert_eq!(p.bucket_label, "18°C");
+    assert_eq!(
+        (p.side, p.outcome_side, p.kind, p.tif),
+        (
+            Side::Buy,
+            OutcomeSide::Yes,
+            IntentKind::Open,
+            TimeInForce::Fak
+        )
+    );
+    assert_eq!(p.shares, Shares::from_whole(100));
+    assert_eq!(p.limit_price, Price::parse("0.94").unwrap());
+    assert!(p.weather_dependent && !p.research_only);
+    assert_eq!(
+        p.rationale[0],
+        "15:32 local inside the summer slot 15:00–18:00 (fallback: peak times not learned yet)"
+    );
+    assert_eq!(
+        p.rationale[1],
+        "high 18°C bucket offered at 0.93 (> 0.90): 100 shares at ≤ 0.94"
+    );
+    let e = &out.evaluations[0];
+    assert!(e.signal && e.blockers.is_empty(), "{e:?}");
+    assert_eq!(e.ask, Some(Price::parse("0.93").unwrap()));
+    // EV and break-even are shown at the price the whole size costs.
+    let be = e.break_even.unwrap();
+    assert!(be > 0.94 && be < 0.95, "{be}");
+}
+
+#[test]
+fn strategy_f_takes_its_slot_from_the_learned_peak_times() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let b = e_books(&m, &[("0.93", 200)]);
+    let none = HashSet::new();
+    // History: summer highs first reported at 15:25 (median) … 17:25 (90 %).
+    let inside = summer_peaks(15 * 60 + 25, 17 * 60 + 25);
+    let out = run_f(&m, PeakSlotConfig::default(), &b, &v, &none, Some(&inside));
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+    assert_eq!(
+        out.proposals[0].rationale[0],
+        "15:32 local inside the summer slot 15:25–17:26 (median → 90% of 10 days' peak times)"
+    );
+    // Later peaks: 15:32 is before the slot.
+    let later = summer_peaks(15 * 60 + 55, 17 * 60 + 55);
+    let out = run_f(&m, PeakSlotConfig::default(), &b, &v, &none, Some(&later));
+    assert!(out.proposals.is_empty());
+    assert_eq!(
+        out.evaluations[0].blockers,
+        vec!["15:32 outside the summer slot 15:55–17:56"]
+    );
+    // Earlier peaks: 15:32 is after the slot.
+    let earlier = summer_peaks(12 * 60 + 25, 14 * 60 + 55);
+    let out = run_f(&m, PeakSlotConfig::default(), &b, &v, &none, Some(&earlier));
+    assert_eq!(
+        out.evaluations[0].blockers,
+        vec!["15:32 outside the summer slot 12:25–14:56"]
+    );
+    // Other quantiles move the slot: from the 90th percentile on.
+    let cfg = PeakSlotConfig {
+        slot_from_quantile: 0.9,
+        slot_to_quantile: 1.0,
+        ..PeakSlotConfig::default()
+    };
+    let out = run_f(&m, cfg, &b, &v, &none, Some(&inside));
+    assert_eq!(
+        out.evaluations[0].blockers,
+        vec!["15:32 outside the summer slot 17:25–17:26"]
+    );
+}
+
+#[test]
+fn strategy_f_blockers() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let none = HashSet::new();
+    let blockers = |cfg: PeakSlotConfig,
+                    b: &HashMap<TokenId, OrderBook>,
+                    pending: &HashSet<TokenId>,
+                    v: &[ViewEvaluation]|
+     -> Vec<String> {
+        let out = run_f(&m, cfg, b, v, pending, None);
+        assert!(out.proposals.is_empty());
+        out.evaluations[0].blockers.clone()
+    };
+    let d = PeakSlotConfig::default;
+    // Exactly 0.90 is not above 0.90.
+    assert_eq!(
+        blockers(d(), &e_books(&m, &[("0.90", 200)]), &none, &v),
+        vec!["ask 0.90 not above 0.90"]
+    );
+    // Above the cap.
+    assert_eq!(
+        blockers(d(), &e_books(&m, &[("0.96", 200)]), &none, &v),
+        vec!["ask 0.96 above 0.95"]
+    );
+    // Not all 100 shares at or below the cap.
+    assert_eq!(
+        blockers(
+            d(),
+            &e_books(&m, &[("0.93", 50), ("0.95", 40), ("0.96", 500)]),
+            &none,
+            &v
+        ),
+        vec!["only 90 shares offered ≤ 0.95 (need 100)"]
+    );
+    let ok = e_books(&m, &[("0.93", 200)]);
+    // Outside a configured fallback slot.
+    let late = PeakSlotConfig {
+        fallback_slots: SeasonSlots {
+            summer: (16 * 60, 18 * 60),
+            ..SeasonSlots::default()
+        },
+        ..d()
+    };
+    assert_eq!(
+        blockers(late, &ok, &none, &v),
+        vec!["15:32 outside the summer slot 16:00–18:00"]
+    );
+    // The optional temperature condition: 1.0 °C below the high, 2.0 asked.
+    let drop = PeakSlotConfig {
+        min_drop_tenths: 20,
+        ..d()
+    };
+    assert_eq!(
+        blockers(drop, &ok, &none, &v),
+        vec!["1.0 °C below the high < 2.0"]
+    );
+    // No model: fail closed.
+    let nomodel = views(&confirmed_series(), NOW, None);
+    assert_eq!(
+        blockers(d(), &ok, &none, &nomodel),
+        vec!["no probability model"]
+    );
+    // An order already pending on the token.
+    let pending: HashSet<TokenId> = [yes(&m, 18)].into_iter().collect();
+    assert_eq!(blockers(d(), &ok, &pending, &v), vec!["already positioned"]);
+    // Disabled.
+    let off = PeakSlotConfig {
+        enabled: false,
+        ..d()
+    };
+    assert_eq!(blockers(off, &ok, &none, &v), vec!["strategy disabled"]);
+    // No book / no ask / a stale book.
+    let mut nobook = books(&m);
+    nobook.remove(&yes(&m, 18));
+    assert_eq!(blockers(d(), &nobook, &none, &v), vec!["no order book"]);
+    assert_eq!(blockers(d(), &e_books(&m, &[]), &none, &v), vec!["no ask"]);
+    let mut stale = e_books(&m, &[("0.93", 200)]);
+    stale.insert(
+        yes(&m, 18),
+        ladder(
+            &yes(&m, 18),
+            "2026-07-01T13:00:00Z",
+            "0.92",
+            &[("0.93", 200)],
+        ),
+    );
+    assert_eq!(blockers(d(), &stale, &none, &v), vec!["order book stale"]);
+}
+
+#[test]
+fn strategy_f_holds_no_second_position() {
+    let m = market();
+    let v = views(&confirmed_series(), NOW, Some(good_dist()));
+    let b = e_books(&m, &[("0.93", 200)]);
+    let mut pos = PositionBook::new();
+    hold(&mut pos, &m, 18, OutcomeSide::Yes, "0.93");
+    let (none, loc) = (HashSet::new(), LocationId::new("amsterdam").unwrap());
+    let out =
+        PeakSlotHigh::new(PeakSlotConfig::default()).evaluate(&ctx(&m, &b, &v, &pos, &none, &loc));
+    assert!(out.proposals.is_empty());
+    assert_eq!(out.evaluations[0].blockers, vec!["already positioned"]);
 }

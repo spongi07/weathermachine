@@ -145,7 +145,7 @@ enough days.
 **PURPOSE.** Measure, on EHAM's own settled markets, what the market knows
 that the model does not, and the reverse. This is the evidence for
 `market_weight` (§27b) and for strategy D (§27a), and the test of
-strategy E (§27c).
+strategies E (§27c) and F (§27d).
 
 **INPUTS.**
 
@@ -229,6 +229,24 @@ the days downloaded so far are studied.
   * orders are cancelled `cancel_before_report_min` (10) before the next
     routine report;
   * fills earn the rebate.
+* **Strategy F at traded prices (`wm-backtest::market_peak`).** The peak
+  times (§27d) are learned prequentially too: a market day is replayed with
+  the slots of the days before it, and a season without such a day uses the
+  fallback slot, as live. Live F watches the book between reports, so the
+  replay follows the tape: at a report's decision time the latest taker buy
+  of YES on the high's bucket stands for the ask, after it every taker buy
+  does, until the next report is known or the report is older than F's
+  data-age limit (40 min). The first price inside the slot and above
+  `min_price`, at most `max_price`, fills F's `shares` (100) plus the
+  slippage allowance and the taker fee; one trade a day, as the risk caps
+  allow live. Six rules are replayed: *F* (as configured), *F · to 0.99*,
+  *F · earlier slot* (25 → 75 %), *F · later slot* (75 → 95 %),
+  *F · 1 °C below* (the report ≥ 1.0 °C below the high) and *F maker* (a
+  YES bid at the latest taker sell inside the slot, filled only through
+  its price, cancelled at the slot's end or 10 min before the next routine
+  report). **Out of sample:** the rule with the best P&L on the first half
+  of the replayed market days is judged on the second half (at least 20
+  days); that line, not the best row, is the result.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 
@@ -257,6 +275,11 @@ the days downloaded so far are studied.
 * makers and takers: per segment, trades, shares, the taker's P&L and fee,
   and the maker's net with its interval and total, plus the best and worst
   segment for resting orders (≥ 2 % of the shares, on ≥ 5 days);
+* when each season's high is first reported over the whole METAR history
+  (the table of the training report), then strategy F's section: its six
+  rules at **100 shares a trade** (apart from the $10 rows), its verdict
+  line, the out-of-sample line (also in the main verdict) and its losing
+  trades, with the time of fills from the tape;
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
   both clocks, the forecast rise and headroom, both structures' cells and
   P(high stays), the market and ask of the high's bucket, its taker flow
@@ -272,8 +295,10 @@ offers withdrawn or added without a trade are invisible to it, while the
 live rule reads the book itself. The replay decides only at report times,
 whereas live E is evaluated on every book update. Maker fills from the
 public tape are estimates: it shows no queue positions, and in fast markets
-maker replays have flipped sign with 150 ms of latency. The study is
-read-only and changes nothing.
+maker replays have flipped sign with 150 ms of latency. F's replay fills
+100 shares at a traded price where fewer may have been offered, and its
+taker buys stand for an ask it cannot see. The study is read-only and
+changes nothing.
 **TESTING.** Unit tests on synthetic history:
 
 * an oracle market beats the model;
@@ -295,7 +320,17 @@ read-only and changes nothing.
   (`makers_fill_only_through_their_price_and_the_other_side_is_accounted`,
   which fails if at-price fills are allowed). The segmentation, the report
   schedule across the hour and midnight, cancel times and the fill window
-  have their own unit tests in `market_makers`.
+  have their own unit tests in `market_makers`;
+* strategy F: every trade inside the slot the days before it learned
+  (checked against an independent prequential computation), at the high's
+  bucket's ask, one a day, the mis-resolved day as a loss, the day replay,
+  its own rows and section, the out-of-sample line, old reports still
+  loading (`strategy_f_buys_the_high_inside_the_slot_the_days_before_learned`);
+  unit tests in `market_peak` cover the ask at the report and from the tape,
+  the price edges (above 0.90, at most the cap), the slot end, the data-age
+  limit, the fallback slot, the drop variant, the maker's bid, cancel and
+  rebate, the out-of-sample choice (ties keep the configured rule) and the
+  variant list.
 
 Data API paging, the offset cap, window splitting, dedup and the request
 budget are tested against a mock server. An end-to-end run against mock

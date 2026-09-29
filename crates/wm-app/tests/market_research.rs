@@ -235,6 +235,7 @@ fn plan(dir: &Path) -> MarketResearchPlan {
             min_days: 1,
             forecast: None,
             selection: None,
+            slot_quantiles: (0.5, 0.9),
         },
         spec: LocationMarketSpec {
             location: LocationId::new("amsterdam").unwrap(),
@@ -322,6 +323,26 @@ async fn scores_settled_days_and_serves_a_rerun_from_the_cache() {
             .any(|r| r.strategy == "E" && r.live)
     );
     assert!(md.contains("Strategy E buys YES on the bucket holding the high"));
+    // Strategy F: the peak times of the whole history and its six rules
+    // (100 shares a trade), apart from the $10 rows.
+    assert!(
+        md.contains("## When the day's high is first reported (strategy F)"),
+        "{md}"
+    );
+    assert!(md.contains("## Strategy F at traded prices"));
+    assert_eq!(o.report.f_strategies.len(), 6);
+    assert!(o.report.f_strategies[0].live && o.report.f_strategies[0].strategy == "F");
+    assert!(o.report.f_verdict[0].starts_with("Strategy F ("));
+    // Three market days are too few to choose a rule out of sample.
+    assert!(
+        o.report
+            .f_out_of_sample
+            .as_deref()
+            .is_some_and(|l| l.contains("3 replayed market days are too few")),
+        "{:?}",
+        o.report.f_out_of_sample
+    );
+    assert!(o.report.peak_times.is_some());
     assert_eq!(o.report.timelines.len(), 1);
     assert!(!o.report.timelines[0].rows.is_empty());
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&o.json).unwrap()).unwrap();
@@ -330,6 +351,12 @@ async fn scores_settled_days_and_serves_a_rerun_from_the_cache() {
     assert!(json["strategies"].as_array().is_some_and(|a| a.len() == 36));
     assert_eq!(json["sim"]["maker"]["cancel_before_report_min"], 10);
     assert_eq!(json["sim"]["e"]["lookback_minutes"], 30);
+    assert_eq!(json["sim"]["f"]["shares"], 100.0);
+    assert!(
+        json["f_strategies"]
+            .as_array()
+            .is_some_and(|a| a.len() == 6)
+    );
     // Settled days are cached; open or missing ones are not.
     let cache = &plan.cache_dir;
     for day in [d(2025, 4, 10), d(2025, 4, 11), d(2025, 4, 12)] {

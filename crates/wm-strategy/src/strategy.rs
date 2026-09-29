@@ -7,6 +7,7 @@
 
 use crate::ev::{break_even_probability, ev_per_share};
 use crate::peak::PeakAssessment;
+use crate::peak_times::PeakTimes;
 use crate::probability::IncrementDistribution;
 use crate::state::ViewKind;
 use chrono::{DateTime, Utc};
@@ -40,6 +41,9 @@ pub struct StrategyContext<'a> {
     pub positions: &'a PositionBook,
     /// Tokens with live orders (no stacking of orders).
     pub pending_tokens: &'a HashSet<TokenId>,
+    /// When the day's high is usually first reported, per season (the
+    /// installed model's history); `None` without such a model.
+    pub peak_times: Option<&'a PeakTimes>,
 }
 
 /// A strategy's trade proposal (becomes a `TradeIntent` after id assignment).

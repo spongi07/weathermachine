@@ -222,9 +222,103 @@ new size (0 removes it), and the tick size changes above 0.96 and below
 0.04
 ([Polymarket websocket reference](https://github.com/Polymarket/agent-skills/blob/main/websocket.md)).
 
+## 6a. Strategy F — the high's bucket inside the peak slot
+
+The operator's rule: *learn at what time the day's highest temperature is
+measured (it differs per season). Inside that time slot, watch the order
+book; once the bucket of the current measured temperature trades above
+90 ¢, buy 100 shares, because after the slot the temperature cannot go
+higher.* Strategy F implements it
+([§27d](../blueprint/06-strategy.md#27d-peak-slot--strategy-f)) in paper
+mode.
+
+**When is the high measured?**
+
+* In Belgium maxima typically come around 14:30 UTC all year, 2–3 hours
+  after solar noon: about 16:30 local in summer and 15:30 in winter. In
+  winter the highest temperature can also come at night, after a warm
+  front ([KMI](https://www.meteo.be/nl/info/weerwoorden/maximumtemperatuur)).
+* The lag after noon varies between about 1.9 and 2.9 hours with latitude
+  and season
+  ([diurnal temperature variation](https://en.wikipedia.org/wiki/Diurnal_temperature_variation)).
+  The weather of the day, the terrain and the surroundings shift it
+  ([Hong Kong Observatory](https://www.hko.gov.hk/en/education/weather/sunshine-and-uv/00692-What-time-in-a-day-is-highest-lowest-air-temperature.html)).
+* The market settles on something else: the day's highest *whole-degree
+  METAR value*. The moment that matters is the first report at that value.
+  It usually comes before the true maximum, because the rounded value is
+  reached on the way up to the peak. So the bot measures that moment in
+  EHAM's own METAR history, per season.
+  * Training prints the mean, the median, the quantiles and the share of
+    days later than the slot, later than 17:00 and before 09:00.
+  * F's slot runs from the median to the 90th percentile of that moment.
+
+**"It cannot go higher after the slot" is a hypothesis.** The slot ends at
+the 90th percentile, so by construction one day in ten first reports its
+high later. In winter the high can come at night. The table's *later than
+the slot* column shows how often it happened at EHAM.
+
+**Is there an edge?** The arithmetic first. After the taker fee
+(0.05 × p × (1 − p)) and 0.005 slippage, the bucket must win:
+
+| price | must win |
+|---:|---:|
+| 0.91 | 91.9 % |
+| 0.93 | 93.8 % |
+| 0.95 | 95.7 % |
+
+One loss of the 100 shares (about −$94) costs as much as 15 wins at 0.93;
+at 0.95 it is 22 wins.
+
+* EHAM's own report (1 June – 28 September 2026): buckets priced 0.90–0.98
+  won 96.8 % of the time at a mean price of 0.949. That is about one point
+  above break-even, so roughly +$1 per 100 shares, on correlated decision
+  points.
+* Strategy E bought later and dearer (mean 0.964). It won 96.2 % against a
+  97.1 % break-even and lost 1 % per trade (§6).
+* On Polymarket, purchases at ≥ 90 ¢ earned +0.83 ¢ per dollar
+  ([Cardozo & Rivero-Wildemauwe 2026](https://arxiv.org/abs/2609.12878)).
+* Temperature markets are well calibrated at the top
+  ([anaborne](https://github.com/anaborne/kalshi-temperature-calibration)),
+  and weather prices can be too extreme at short horizons
+  ([Decomposing Crowd Wisdom](https://arxiv.org/abs/2602.19520)). The small
+  discount may therefore be gone.
+
+On this evidence the plain rule ("above 90 ¢, 100 shares, in the slot") is
+break-even at best.
+
+**What F does to make it work:**
+
+1. **Price cap 0.95.** All 100 shares must be offered at or below 0.95,
+   walking the offers, fill-and-kill. From 0.96 to 0.99 one loss costs 30
+   to 220 wins, and that is where E lost. Above the cap F waits, and the
+   evaluation shows how many shares were offered.
+2. **The station's own slot per season,** learned in training. In research
+   it is learned prequentially: a day is never traded with a slot that knew
+   it.
+3. **Continuous watching.** F is evaluated on every book update, so it buys
+   the moment the ask first crosses 0.90 inside the slot. That is the lowest
+   price the rule allows, not the price at the next report.
+4. **One position a day, with its own risk caps.** A loss also trips the
+   daily-loss stop.
+5. **Out-of-sample choice between variants.** `research market` replays F
+   at traded prices with five variants: to 0.99, an earlier slot (25 → 75 %),
+   a later slot (75 → 95 %), 1 °C below the high, and a resting bid instead
+   of paying the ask (which pays no fee and earns the rebate). The rule that
+   did best on the first half of the market days is scored on the second
+   half.
+
+**How to decide.** Read the line *Strategy F out of sample* in the verdict.
+
+* Positive, with its 95 % interval above zero: keep F, or switch to the
+  chosen variant through `[strategies.peak_slot]`. Examples:
+  `min_drop_tenths = 10`, `max_price`, `slot_from_quantile` /
+  `slot_to_quantile`.
+* An interval that includes zero: keep it in paper and collect more days.
+* Negative: set `enabled = false`.
+
 ## 7. What we had not tried: providing liquidity
 
-Every strategy so far (A, B, D, E) *takes* liquidity. It crosses the
+Every strategy so far (A, B, D, E, F) *takes* liquidity. It crosses the
 spread with a fill-and-kill order and pays the taker fee. The research on
 who wins on these exchanges points the other way.
 

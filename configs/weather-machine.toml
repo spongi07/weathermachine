@@ -282,11 +282,13 @@ throttle_memory_secs = 1800
 # ---------------------------------------------------------------------------
 [risk]
 position_size_usd = "10.00"
-global_max_exposure_usd = "100.00"
+# The portfolio-wide caps below are the $10-per-position limits (100 / 50 /
+# 60) plus one position of strategy F (its own caps at the end of [risk]).
+global_max_exposure_usd = "200.00"
 max_market_exposure_usd = "30.00"
-max_location_exposure_usd = "50.00"
+max_location_exposure_usd = "150.00"
 max_strategy_exposure_usd = "60.00"
-max_daily_new_exposure_usd = "60.00"
+max_daily_new_exposure_usd = "160.00"
 max_daily_loss_usd = "30.00"
 max_spread = "0.05"
 max_price = "0.99"
@@ -296,6 +298,12 @@ max_book_age_ms = 15000
 correction_cooldown_minutes = 10
 max_orders_per_minute = 6
 require_approved_resolution_spec = false   # set true before any live consideration
+# Strategy F buys a fixed 100 shares (at most 0.95 each): its own position,
+# market and strategy caps. Every other strategy keeps the defaults above.
+[risk.strategy_caps.F_peak_slot]
+position_size_usd = "100.00"
+max_market_exposure_usd = "110.00"
+max_strategy_exposure_usd = "110.00"
 
 # ---------------------------------------------------------------------------
 # Strategies (research parameters; see docs/blueprint/14-research-methodology.md)
@@ -374,6 +382,30 @@ min_model_p = 0.0                 # 0 = no veto; e.g. 0.90 to require the model'
 max_data_age_minutes = 40
 max_book_age_ms = 15000
 slippage_allowance = "0.005"      # for the EV shown (not a gate)
+
+# Strategy F — the high's bucket inside the season's peak slot. The model's
+# training learns, per season, the local time at which each day's high was
+# first reported (METAR history); F trades between two quantiles of it. When
+# the bucket holding the day's high so far is offered above min_price, F buys
+# `shares` of its YES at once, paying at most max_price for every share.
+# HYPOTHESIS TO BACKTEST: `research market` replays F and its variants.
+[strategies.peak_slot]
+enabled = true
+slot_from_quantile = 0.5          # from the median time the high is first reported
+slot_to_quantile = 0.9            # … to the time 90 % of days have it
+min_price = "0.90"                # the best ask must be above this
+max_price = "0.95"                # all shares at or below this
+shares = 100
+min_drop_tenths = 0               # 0 = no temperature condition (10 = ≥ 1 °C below the high)
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.005"      # for the EV shown (not a gate)
+# Only until the model carries the history's peak times (local time):
+[strategies.peak_slot.fallback_slots]
+winter = "13:00-16:00"
+spring = "14:30-17:30"
+summer = "15:00-18:00"
+autumn = "14:00-17:00"
 
 [strategies.split_unwind]
 enabled = false                   # research only; risk rejects outside backtests

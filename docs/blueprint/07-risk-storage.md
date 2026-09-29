@@ -33,10 +33,10 @@ reported, never just the first. Client order ids are deterministic
 | ResolutionSpec | machine-tradable; human-approved hash if required (live) | resolution rules |
 | Partition | bucket set valid | correlated risk |
 | Duplicate | no live order on the token; decision id not reused | duplicate orders |
-| PositionSize | cost ≤ $10 | $10 per position |
-| GlobalExposure | post-trade worst case ≤ $100 | $100 global |
-| MarketExposure / LocationExposure / StrategyExposure | ≤ $30 / $50 / $60 (optional) | future limits |
-| DailyNewExposure / DailyLoss | ≤ $60 new per day; stop after −$30 realised | daily loss |
+| PositionSize | cost ≤ $10 (strategy F: $100, its own cap) | $10 per position |
+| GlobalExposure | post-trade worst case ≤ $200 | $100 global, plus one F position |
+| MarketExposure / LocationExposure / StrategyExposure | ≤ $30 / $150 / $60 (optional; F: $110 per market and strategy) | future limits |
+| DailyNewExposure / DailyLoss | ≤ $160 new per day; stop after −$30 realised | daily loss |
 | OrderRate | ≤ 6 orders/min | — |
 | Oversell | never sell more than held | — |
 
@@ -62,18 +62,40 @@ non-Healthy, stale or kill-switched state rejects. The kernel scenarios and the
 `no_approval_without_healthy_fresh_complete_data` property test drive random
 health/data interleavings through the full engine.
 
-## 30. $10 / $100 exposure model
+## 30. $10 / $100 exposure model (and strategy F's own caps)
 
 ```toml
 [risk]
 position_size_usd = "10.00"
-global_max_exposure_usd = "100.00"
+global_max_exposure_usd = "200.00"     # $100 for the $10 strategies + one F position
 max_market_exposure_usd = "30.00"      # optional limits (all implemented)
-max_location_exposure_usd = "50.00"
+max_location_exposure_usd = "150.00"
 max_strategy_exposure_usd = "60.00"
-max_daily_new_exposure_usd = "60.00"
+max_daily_new_exposure_usd = "160.00"
 max_daily_loss_usd = "30.00"
+
+[risk.strategy_caps.F_peak_slot]       # strategy F buys a fixed 100 shares
+position_size_usd = "100.00"
+max_market_exposure_usd = "110.00"
+max_strategy_exposure_usd = "110.00"
 ```
+
+**Per-strategy caps.** `strategy_caps` gives one strategy (by id) its own
+position, per-market and per-strategy caps; an unset one falls back to the
+default. The portfolio caps (global, location, daily new exposure, daily
+loss) count every strategy together. Strategy F (§27d) buys 100 shares at
+up to 0.95 (≤ $95), so the portfolio caps were raised by one F position.
+Configuration validation refuses an enabled F whose one position would not
+fit every cap it meets (position, market, strategy, global, location, daily
+new exposure); a strategy cap must be positive and ≤ the global cap.
+Consequences, by design:
+
+* The per-market cap is the event's worst case over *every* strategy's
+  legs. Once F holds its position (≈ $93 worst case), A, B and E open
+  nothing more in that event (their cap is $30); F still fits while the
+  others hold at most about $15 there.
+* One F loss (≈ $95) trips the $30 daily-loss stop: nothing new opens for
+  the rest of the UTC day on which the loss is realised.
 
 **KNOWN FACT (design, tested).** Buckets of one daily event are mutually
 exclusive and exhaustive, so exposure is computed **per scenario**. For each
@@ -89,6 +111,8 @@ exposure is the worst-case loss. This captures correlation exactly:
 Amounts are exact micro-dollars; configuration uses decimal strings.
 **TESTING.** `correlated_legs_in_one_event_use_worst_case_not_sum`, exposure
 unit tests for hedges and pending buys, and the global cap in `each_gate_rejects`.
+`a_strategy_with_its_own_caps_buys_100_shares_while_the_others_keep_theirs`
+and `strategy_caps_parse_and_are_validated` cover the per-strategy caps.
 
 ## 31. PostgreSQL schema
 

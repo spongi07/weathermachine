@@ -9,6 +9,7 @@ pub mod exposure;
 
 pub use engine::{
     ApprovedIntent, CheckId, ExposureSummary, OpenOrderView, PortfolioView, RiskConfig,
-    RiskConfigError, RiskDecision, RiskEngine, RiskInputs, RiskRejection, WeatherStatus,
+    RiskConfigError, RiskDecision, RiskEngine, RiskInputs, RiskRejection, StrategyCaps,
+    WeatherStatus,
 };
 pub use exposure::{EventExposure, Leg, event_exposure, scenario_pnl};

@@ -20,6 +20,7 @@
 
 use crate::forecast_eval::ratio_ci;
 use crate::market_makers::{MakerRule, MakerSim};
+use crate::market_peak::PeakSlotSim;
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,8 @@ pub struct MarketSimConfig {
     pub stake_usd: f64,
     /// Strategy E.
     pub e: BookConfirmedSim,
+    /// Strategy F (and its variants).
+    pub f: PeakSlotSim,
     /// The live rules replayed as limit orders.
     pub maker: MakerSim,
 }
@@ -71,6 +74,7 @@ impl Default for MarketSimConfig {
             no_distances: vec![1, 2, 3],
             stake_usd: 10.0,
             e: BookConfirmedSim::default(),
+            f: PeakSlotSim::default(),
             maker: MakerSim::default(),
         }
     }
@@ -271,6 +275,10 @@ pub struct SimTrade {
     /// The bucket that resolved YES.
     #[serde(default)]
     pub resolved: String,
+    /// Local time of the fill when it came after the knowledge time (a
+    /// resting order, or F buying from the tape between reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled: Option<String>,
 }
 
 /// Results of one variant.
@@ -449,6 +457,7 @@ pub(crate) fn simulate_day(
                                 won,
                                 pnl_usd: sim.stake_usd / price * per_share,
                                 resolved: labels[winner].clone(),
+                                filled: None,
                             });
                         }
                     }
@@ -509,6 +518,7 @@ pub(crate) fn simulate_day(
                     won,
                     pnl_usd: sim.stake_usd / price * per_share,
                     resolved: labels[winner].clone(),
+                    filled: None,
                 });
             }
         }
@@ -775,7 +785,8 @@ pub(crate) fn timeline(
 }
 
 /// Trades of one report, variants that made the same trade on one line:
-/// `B · current · 0′/30′/60′ · 0.90–0.99/0.70–0.99: NO 22°C @ 0.982 (p 0.998) → won +0.12 $`.
+/// `B · current · 0′/30′/60′ · 0.90–0.99/0.70–0.99: NO 22°C @ 0.982 (p 0.998) → won +0.12 $`
+/// (F: `F · 0.90–0.95: YES 22°C @ 0.930 at 15:41 (p 0.960) → won +6.20 $`).
 fn grouped(trades: &[&SimTrade]) -> Vec<String> {
     let mut groups: Vec<(&SimTrade, Vec<u32>, Vec<&str>)> = Vec::new();
     for t in trades {
@@ -787,6 +798,7 @@ fn grouped(trades: &[&SimTrade]) -> Vec<String> {
                 && g.price.to_bits() == t.price.to_bits()
                 && g.p_used.to_bits() == t.p_used.to_bits()
                 && g.won == t.won
+                && g.filled == t.filled
         };
         match groups.iter_mut().find(|(g, _, _)| same(g)) {
             Some((_, windows, ranges)) => {
@@ -803,19 +815,30 @@ fn grouped(trades: &[&SimTrade]) -> Vec<String> {
     groups
         .into_iter()
         .map(|(t, windows, ranges)| {
+            // F has neither a model structure nor a confirmation window.
+            let variant = if t.structure == crate::market_peak::STRUCTURE {
+                ranges.join("/")
+            } else {
+                format!(
+                    "{} · {} · {}",
+                    t.structure,
+                    windows
+                        .iter()
+                        .map(|w| format!("{w}′"))
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                    ranges.join("/")
+                )
+            };
             format!(
-                "{} · {} · {} · {}: {} {} @ {:.3} (p {:.3}) → {} {:+.2} $",
+                "{} · {variant}: {} {} @ {:.3}{} (p {:.3}) → {} {:+.2} $",
                 t.strategy,
-                t.structure,
-                windows
-                    .iter()
-                    .map(|w| format!("{w}′"))
-                    .collect::<Vec<_>>()
-                    .join("/"),
-                ranges.join("/"),
                 t.side,
                 t.bucket,
                 t.price,
+                t.filled
+                    .as_ref()
+                    .map_or_else(String::new, |f| format!(" at {f}")),
                 t.p_used,
                 if t.won { "won" } else { "lost" },
                 t.pnl_usd
@@ -885,17 +908,21 @@ pub(crate) fn strategies_markdown(
             r.total_usd
         );
     }
-    s.push_str(&e_losses_markdown(trades));
+    s.push_str(&losses_markdown(
+        trades,
+        'E',
+        "Strategy E's losing trades (at these prices one loss costs as much as 20–30 wins)",
+    ));
     s
 }
 
-/// Strategy E's losing trades, one row per trade, with the variants and
-/// structures that took it.
-fn e_losses_markdown(trades: &[SimTrade]) -> String {
+/// One strategy's losing trades (its label starts with `letter`), one row
+/// per trade, with the variants and structures that took it.
+pub(crate) fn losses_markdown(trades: &[SimTrade], letter: char, title: &str) -> String {
     let mut groups: Vec<(&SimTrade, Vec<(&str, &str)>)> = Vec::new();
     for t in trades
         .iter()
-        .filter(|t| t.strategy.starts_with('E') && !t.won)
+        .filter(|t| t.strategy.starts_with(letter) && !t.won)
     {
         let same = |g: &&SimTrade| {
             g.date == t.date
@@ -912,7 +939,9 @@ fn e_losses_markdown(trades: &[SimTrade]) -> String {
         return String::new();
     }
     groups.sort_by(|a, b| (a.0.date, &a.0.report).cmp(&(b.0.date, &b.0.report)));
-    let mut s = "\nStrategy E's losing trades (at these prices one loss costs as much as 20–30 wins):\n\n| date | report | bought | ask | resolved | taken by |\n|---|---|---|---:|---|---|\n".to_owned();
+    let mut s = format!(
+        "\n{title}:\n\n| date | report | bought | ask | resolved | taken by |\n|---|---|---|---:|---|---|\n"
+    );
     for (t, by) in groups {
         let mut variants: Vec<(&str, Vec<&str>)> = Vec::new();
         for (v, structure) in by {
@@ -923,13 +952,26 @@ fn e_losses_markdown(trades: &[SimTrade]) -> String {
         }
         let taken = variants
             .iter()
-            .map(|(v, ss)| format!("{v} ({})", ss.join(", ")))
+            .map(|(v, ss)| {
+                if ss.iter().all(|x| *x == crate::market_peak::STRUCTURE) {
+                    (*v).to_owned()
+                } else {
+                    format!("{v} ({})", ss.join(", "))
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(
             s,
-            "| {} | {} | YES {} | {:.3} | {} | {taken} |",
-            t.date, t.report, t.bucket, t.price, t.resolved
+            "| {} | {}{} | YES {} | {:.3} | {} | {taken} |",
+            t.date,
+            t.report,
+            t.filled
+                .as_ref()
+                .map_or_else(String::new, |f| format!(" (filled {f})")),
+            t.bucket,
+            t.price,
+            t.resolved
         );
     }
     s
@@ -1017,6 +1059,7 @@ mod tests {
             won,
             pnl_usd: 1.5,
             resolved: if won { "21°C" } else { "22°C" }.into(),
+            filled: None,
         }
     }
 
@@ -1037,7 +1080,7 @@ mod tests {
             },
             trade("current", 60, "0.90–0.99", false),
         ];
-        let md = e_losses_markdown(&ts);
+        let md = losses_markdown(&ts, 'E', "E's losses");
         assert_eq!(
             md.lines()
                 .filter(|l| l.starts_with("| 2026"))
@@ -1047,7 +1090,7 @@ mod tests {
             ]
         );
         assert!(
-            e_losses_markdown(&ts[3..]).is_empty(),
+            losses_markdown(&ts[3..], 'E', "E's losses").is_empty(),
             "A's losses and E's wins are not listed"
         );
     }

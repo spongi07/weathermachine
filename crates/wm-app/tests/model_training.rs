@@ -88,6 +88,7 @@ fn plan(dir: &Path, min_days: u64) -> TrainPlan {
             bootstrap_iterations: 200,
             ..wm_backtest::SelectionConfig::default()
         }),
+        slot_quantiles: (0.5, 0.9),
     }
 }
 
@@ -451,6 +452,24 @@ async fn trains_from_history_and_downloads_each_finished_year_once() {
         report.contains("## Provenance")
             && report.contains("| 2024 |")
             && report.contains("| 2025 |")
+    );
+    // Strategy F's peak times travel with the model and are in the report.
+    let pt = model.peak_times.clone().expect("peak times learned");
+    let days: u32 = pt.seasons.iter().map(|s| s.days).sum();
+    assert!(u64::from(days) >= o.days * 9 / 10, "{days} of {}", o.days);
+    for season in &pt.seasons {
+        assert!(
+            pt.slot(season.season, 0.5, 0.9).is_some(),
+            "{:?}: {season:?}",
+            season.season
+        );
+    }
+    assert!(
+        // The synthetic history runs from October to April.
+        report.contains("## When the day's high is first reported (strategy F)")
+            && report.contains("| winter |")
+            && !report.contains("| summer |"),
+        "{report}"
     );
     // Both structures were compared; the verdict travels with the model.
     let sel = model.selection.clone().unwrap();

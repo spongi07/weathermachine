@@ -26,8 +26,9 @@ use wm_risk::{
 use wm_strategy::{
     BookConfirmedConfig, BookConfirmedHigh, BucketEvaluation, BuyNoAboveHigh, BuyNoConfig,
     BuyYesConfig, BuyYesFinalHigh, CertainConfig, CertainOutcomes, ForecastDay, PeakConfig,
-    PeakDetectionEngine, ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig, Strategy,
-    StrategyContext, TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind,
+    PeakDetectionEngine, PeakSlotConfig, PeakSlotHigh, ProbabilityModel, Proposal, SplitUnwind,
+    SplitUnwindConfig, Strategy, StrategyContext, TemperatureStateEngine, UnwindConfig,
+    UnwindEngine, ViewEvaluation, ViewKind,
 };
 
 /// A location the engine trades.
@@ -59,6 +60,9 @@ pub struct EngineConfig {
     /// shrinking book agree.
     #[serde(default)]
     pub book_confirmed: BookConfirmedConfig,
+    /// Strategy F: the high's bucket inside the season's peak slot.
+    #[serde(default)]
+    pub peak_slot: PeakSlotConfig,
     pub unwind: UnwindConfig,
     pub evaluate_on_book_updates: bool,
     pub decision_log_capacity: usize,
@@ -208,6 +212,7 @@ impl Engine {
             Box::new(BuyNoAboveHigh::new(cfg.buy_no.clone())),
             Box::new(SplitUnwind::new(cfg.split_unwind.clone())),
             Box::new(BookConfirmedHigh::new(cfg.book_confirmed.clone())),
+            Box::new(PeakSlotHigh::new(cfg.peak_slot.clone())),
         ];
         let risk = RiskEngine::new(cfg.risk.clone(), &cfg.run_id);
         let unwind = UnwindEngine::new(cfg.unwind.clone());
@@ -692,6 +697,7 @@ impl Engine {
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut evaluations: Vec<BucketEvaluation> = Vec::new();
         if complete && !views.is_empty() {
+            let model = Arc::clone(&self.model);
             let ctx = StrategyContext {
                 now: self.now,
                 mode: self.cfg.mode,
@@ -701,6 +707,7 @@ impl Engine {
                 views: &views,
                 positions: &self.positions,
                 pending_tokens: &pending,
+                peak_times: model.peak_times(),
             };
             for s in self.strategies.iter_mut() {
                 if !s.enabled() {

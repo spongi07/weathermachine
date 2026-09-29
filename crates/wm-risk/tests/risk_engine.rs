@@ -15,7 +15,7 @@ use wm_core::trading::{Fill, IntentKind, Liquidity, RunMode, TimeInForce, TradeI
 use wm_core::units::{Price, Probability, Shares, Usd};
 use wm_risk::{
     CheckId, OpenOrderView, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs,
-    WeatherStatus,
+    StrategyCaps, WeatherStatus,
 };
 
 fn utc(s: &str) -> DateTime<Utc> {
@@ -503,6 +503,122 @@ fn order_rate_limit() {
             assert!(checks(&d).contains(&CheckId::OrderRate));
         }
     }
+}
+
+/// The shipped limits with strategy F's own caps: 100 shares at ≤ 0.95.
+fn with_f_caps() -> RiskConfig {
+    let mut cfg = RiskConfig {
+        global_max_exposure_usd: Usd::from_whole(200),
+        max_location_exposure_usd: Some(Usd::from_whole(150)),
+        max_daily_new_exposure_usd: Some(Usd::from_whole(160)),
+        ..RiskConfig::default()
+    };
+    cfg.strategy_caps.insert(
+        "F_peak_slot".into(),
+        StrategyCaps {
+            position_size_usd: Usd::from_whole(100),
+            max_market_exposure_usd: Some(Usd::from_whole(110)),
+            max_strategy_exposure_usd: Some(Usd::from_whole(110)),
+        },
+    );
+    cfg
+}
+
+fn f_intent(m: &DailyTemperatureMarket, price: &str, shares: i64, decision: u64) -> TradeIntent {
+    TradeIntent {
+        strategy: StrategyId::new("F_peak_slot").unwrap(),
+        ..intent(m, 18, OutcomeSide::Yes, price, shares, decision)
+    }
+}
+
+#[test]
+fn a_strategy_with_its_own_caps_buys_100_shares_while_the_others_keep_theirs() {
+    let w = World::new();
+    let ws = weather(ProviderHealthState::Healthy, 5);
+    let i = f_intent(&w.market, "0.94", 100, 1);
+    let book = book_for(&i.token, "0.93", "0.94");
+    let run = |cfg: RiskConfig, i: TradeIntent| {
+        RiskEngine::new(cfg, &RunId::deterministic(7))
+            .evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None))
+    };
+    // $94 breaks every default cap it meets.
+    let c = checks(&run(RiskConfig::default(), i.clone()));
+    for id in [
+        CheckId::PositionSize,
+        CheckId::MarketExposure,
+        CheckId::LocationExposure,
+        CheckId::StrategyExposure,
+        CheckId::DailyNewExposure,
+    ] {
+        assert!(c.contains(&id), "{id:?} missing in {c:?}");
+    }
+    // With F's caps: approved.
+    let d = run(with_f_caps(), i);
+    assert!(d.is_approved(), "{:?}", checks(&d));
+    // Strategy A under the same configuration keeps its $10, $30 and $60.
+    let a = intent(&w.market, 18, OutcomeSide::Yes, "0.94", 100, 2);
+    assert_eq!(
+        checks(&run(with_f_caps(), a)),
+        vec![
+            CheckId::PositionSize,
+            CheckId::MarketExposure,
+            CheckId::StrategyExposure
+        ]
+    );
+    // F cannot exceed its own cap: 110 shares at 0.94 cost $103.40.
+    assert_eq!(
+        checks(&run(with_f_caps(), f_intent(&w.market, "0.94", 110, 3))),
+        vec![CheckId::PositionSize]
+    );
+}
+
+#[test]
+fn strategy_caps_parse_and_are_validated() {
+    let cfg = with_f_caps();
+    cfg.validate().unwrap();
+    assert_eq!(
+        cfg.position_size_for(&StrategyId::new("F_peak_slot").unwrap()),
+        Usd::from_whole(100)
+    );
+    assert_eq!(
+        cfg.position_size_for(&StrategyId::new("A_buy_yes_final_high").unwrap()),
+        Usd::from_whole(10)
+    );
+    for bad in [Usd::ZERO, Usd::from_whole(201)] {
+        let mut c = with_f_caps();
+        c.strategy_caps
+            .get_mut("F_peak_slot")
+            .unwrap()
+            .position_size_usd = bad;
+        assert!(c.validate().is_err(), "{bad}");
+    }
+    let toml_text = r#"
+        position_size_usd = "10.00"
+        global_max_exposure_usd = "200.00"
+        max_spread = "0.05"
+        max_price = "0.99"
+        min_price = "0.01"
+        max_weather_age_minutes = 40
+        max_book_age_ms = 15000
+        correction_cooldown_minutes = 10
+        max_orders_per_minute = 6
+        require_approved_resolution_spec = false
+        [strategy_caps.F_peak_slot]
+        position_size_usd = "100.00"
+        max_market_exposure_usd = "110.00"
+    "#;
+    let parsed: RiskConfig = toml::from_str(toml_text).unwrap();
+    let f = &parsed.strategy_caps["F_peak_slot"];
+    assert_eq!(f.position_size_usd, Usd::from_whole(100));
+    assert_eq!(f.max_market_exposure_usd, Some(Usd::from_whole(110)));
+    assert_eq!(
+        f.max_strategy_exposure_usd, None,
+        "falls back to the default"
+    );
+    parsed.validate().unwrap();
+    // Unknown keys in a strategy's caps are refused.
+    let typo = toml_text.replace("max_market_exposure_usd", "max_market_exposure");
+    assert!(toml::from_str::<RiskConfig>(&typo).is_err());
 }
 
 #[test]

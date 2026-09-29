@@ -83,6 +83,8 @@ pub struct TrainPlan {
     /// Walk-forward comparison of the two model structures; `None` = train
     /// the current structure only.
     pub selection: Option<SelectionConfig>,
+    /// Strategy F's slot quantiles, for the peak-time table of the report.
+    pub slot_quantiles: (f64, f64),
 }
 
 /// The forecast part of a training run.
@@ -142,6 +144,10 @@ impl TrainPlan {
             min_days: at.min_days,
             forecast,
             selection: Some(SelectionConfig::default()),
+            slot_quantiles: {
+                let f = cfg.peak_slot();
+                (f.slot_from_quantile, f.slot_to_quantile)
+            },
         })
     }
 
@@ -386,6 +392,7 @@ async fn train_on(
                 let (report, model) = study(&observations, &cfg);
                 StudyOutput {
                     report,
+                    peak_times: model.peak_times.clone().unwrap_or_default(),
                     model,
                     evaluation: None,
                     candidate: None,
@@ -421,6 +428,9 @@ async fn train_on(
     );
     let n_obs = files.iter().map(|f| f.rows).sum::<usize>();
     let mut md = report.to_markdown();
+    if let Some(pt) = &model.peak_times {
+        md.push_str(&pt.to_markdown(plan.slot_quantiles.0, plan.slot_quantiles.1));
+    }
     if let Some(c) = &comparison {
         md.push_str(&c.to_markdown());
     }

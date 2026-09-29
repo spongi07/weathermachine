@@ -220,7 +220,152 @@ pub struct StrategiesSection {
     /// shrinking book).
     #[serde(default)]
     pub book_confirmed: BookConfirmedConfigToml,
+    /// Strategy F (the high's bucket inside the season's peak slot). Off
+    /// when the section is missing: its 100 shares need their own risk caps.
+    #[serde(default = "PeakSlotConfigToml::absent")]
+    pub peak_slot: PeakSlotConfigToml,
     pub unwind: UnwindConfig,
+}
+
+/// A local time window as TOML: `"15:00-18:00"` (end exclusive; `24:00`
+/// allowed as the end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window(pub u16, pub u16);
+
+impl Window {
+    fn parse(s: &str) -> Result<Self, String> {
+        let minute = |t: &str| -> Result<u16, String> {
+            let (h, m) = t
+                .trim()
+                .split_once(':')
+                .ok_or_else(|| format!("'{t}' is not HH:MM"))?;
+            let (h, m): (u16, u16) = (
+                h.parse().map_err(|_| format!("bad hour in '{t}'"))?,
+                m.parse().map_err(|_| format!("bad minute in '{t}'"))?,
+            );
+            if m > 59 || h > 24 || (h == 24 && m > 0) {
+                return Err(format!("'{t}' is not a time of day"));
+            }
+            Ok(h * 60 + m)
+        };
+        let (a, b) = s
+            .split_once('-')
+            .ok_or_else(|| format!("'{s}' is not HH:MM-HH:MM"))?;
+        let (start, end) = (minute(a)?, minute(b)?);
+        if start >= end {
+            return Err(format!("'{s}': the start must be before the end"));
+        }
+        Ok(Self(start, end))
+    }
+}
+
+impl std::fmt::Display for Window {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02}:{:02}-{:02}:{:02}",
+            self.0 / 60,
+            self.0 % 60,
+            self.1 / 60,
+            self.1 % 60
+        )
+    }
+}
+
+impl Serialize for Window {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Window {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Window::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Strategy F's slots per season until the history's peak times are learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeasonSlotsToml {
+    pub winter: Window,
+    pub spring: Window,
+    pub summer: Window,
+    pub autumn: Window,
+}
+
+impl From<wm_strategy::SeasonSlots> for SeasonSlotsToml {
+    fn from(s: wm_strategy::SeasonSlots) -> Self {
+        let w = |(a, b): (u16, u16)| Window(a, b);
+        Self {
+            winter: w(s.winter),
+            spring: w(s.spring),
+            summer: w(s.summer),
+            autumn: w(s.autumn),
+        }
+    }
+}
+
+impl From<SeasonSlotsToml> for wm_strategy::SeasonSlots {
+    fn from(s: SeasonSlotsToml) -> Self {
+        let w = |x: Window| (x.0, x.1);
+        Self {
+            winter: w(s.winter),
+            spring: w(s.spring),
+            summer: w(s.summer),
+            autumn: w(s.autumn),
+        }
+    }
+}
+
+/// TOML mirror of [`wm_strategy::PeakSlotConfig`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PeakSlotConfigToml {
+    pub enabled: bool,
+    pub slot_from_quantile: f64,
+    pub slot_to_quantile: f64,
+    pub fallback_slots: SeasonSlotsToml,
+    #[serde(with = "decimal_serde::price")]
+    pub min_price: Price,
+    #[serde(with = "decimal_serde::price")]
+    pub max_price: Price,
+    pub shares: u32,
+    pub min_drop_tenths: i32,
+    pub max_data_age_minutes: i64,
+    pub max_book_age_ms: i64,
+    #[serde(with = "decimal_serde::price")]
+    pub slippage_allowance: Price,
+}
+
+impl PeakSlotConfigToml {
+    /// A configuration file without `[strategies.peak_slot]`: F is off.
+    fn absent() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for PeakSlotConfigToml {
+    fn default() -> Self {
+        let d = wm_strategy::PeakSlotConfig::default();
+        Self {
+            enabled: d.enabled,
+            slot_from_quantile: d.slot_from_quantile,
+            slot_to_quantile: d.slot_to_quantile,
+            fallback_slots: d.fallback_slots.into(),
+            min_price: d.min_price,
+            max_price: d.max_price,
+            shares: u32::try_from(d.shares.micros() / 1_000_000).unwrap_or(100),
+            min_drop_tenths: d.min_drop_tenths,
+            max_data_age_minutes: d.max_data_age_minutes,
+            max_book_age_ms: d.max_book_age_ms,
+            slippage_allowance: d.slippage_allowance,
+        }
+    }
 }
 
 /// TOML mirror of [`wm_strategy::BookConfirmedConfig`].
@@ -768,6 +913,65 @@ impl AppConfig {
         if e.min_minutes_at_high < 0 || e.min_drop_tenths < 0 {
             bail!("strategies.book_confirmed: min_minutes_at_high and min_drop_tenths must be ≥ 0");
         }
+        let f = &st.peak_slot;
+        if !(0.0..=1.0).contains(&f.slot_from_quantile)
+            || !(0.0..=1.0).contains(&f.slot_to_quantile)
+            || f.slot_from_quantile > f.slot_to_quantile
+        {
+            bail!(
+                "strategies.peak_slot: need 0 ≤ slot_from_quantile ≤ slot_to_quantile ≤ 1, got {} … {}",
+                f.slot_from_quantile,
+                f.slot_to_quantile
+            );
+        }
+        if !(Price::ZERO < f.min_price && f.min_price < f.max_price && f.max_price < Price::ONE) {
+            bail!(
+                "strategies.peak_slot: need 0 < min_price < max_price < 1, got {} … {}",
+                f.min_price,
+                f.max_price
+            );
+        }
+        if f.shares == 0 {
+            bail!("strategies.peak_slot.shares must be ≥ 1");
+        }
+        if f.min_drop_tenths < 0 {
+            bail!("strategies.peak_slot.min_drop_tenths must be ≥ 0");
+        }
+        if f.enabled {
+            // One position must fit every pre-trade cap, or F never trades.
+            let cost = wm_core::units::notional(
+                f.max_price,
+                wm_core::units::Shares::from_whole(i64::from(f.shares)),
+                wm_core::units::Rounding::Up,
+            );
+            let risk = &self.file.risk;
+            let id = wm_core::ids::StrategyId::from_static("F_peak_slot");
+            let caps = [
+                ("its position cap", Some(risk.position_size_for(&id))),
+                ("its per-market cap", risk.market_cap_for(&id)),
+                ("its per-strategy cap", risk.strategy_cap_for(&id)),
+                (
+                    "global_max_exposure_usd",
+                    Some(risk.global_max_exposure_usd),
+                ),
+                ("max_location_exposure_usd", risk.max_location_exposure_usd),
+                (
+                    "max_daily_new_exposure_usd",
+                    risk.max_daily_new_exposure_usd,
+                ),
+            ];
+            for (name, cap) in caps {
+                if let Some(cap) = cap
+                    && cost > cap
+                {
+                    bail!(
+                        "strategies.peak_slot: {} shares at up to {} cost {cost}, above {name} {cap}, so F could never trade — see [risk.strategy_caps.F_peak_slot] and the [risk] caps of the shipped configuration",
+                        f.shares,
+                        f.max_price
+                    );
+                }
+            }
+        }
         self.file.risk.validate().context("risk")?;
         if self.locations.is_empty() {
             bail!("no enabled locations configured");
@@ -910,6 +1114,23 @@ impl AppConfig {
         }
     }
 
+    pub fn peak_slot(&self) -> wm_strategy::PeakSlotConfig {
+        let c = &self.file.strategies.peak_slot;
+        wm_strategy::PeakSlotConfig {
+            enabled: c.enabled,
+            slot_from_quantile: c.slot_from_quantile,
+            slot_to_quantile: c.slot_to_quantile,
+            fallback_slots: c.fallback_slots.into(),
+            min_price: c.min_price,
+            max_price: c.max_price,
+            shares: wm_core::units::Shares::from_whole(i64::from(c.shares)),
+            min_drop_tenths: c.min_drop_tenths,
+            max_data_age_minutes: c.max_data_age_minutes,
+            max_book_age_ms: c.max_book_age_ms,
+            slippage_allowance: c.slippage_allowance,
+        }
+    }
+
     pub fn split_unwind(&self) -> SplitUnwindConfig {
         let c = &self.file.strategies.split_unwind;
         SplitUnwindConfig {
@@ -949,9 +1170,25 @@ mod tests {
             cfg.file.risk.position_size_usd,
             wm_core::units::Usd::from_whole(10)
         );
+        // $100 for the $10 strategies plus one $100 position of strategy F,
+        // which alone may exceed the $10 per position.
+        let usd = wm_core::units::Usd::from_whole;
+        assert_eq!(cfg.file.risk.global_max_exposure_usd, usd(200));
+        let f_id = wm_core::ids::StrategyId::from_static("F_peak_slot");
+        assert_eq!(cfg.file.risk.position_size_for(&f_id), usd(100));
         assert_eq!(
-            cfg.file.risk.global_max_exposure_usd,
-            wm_core::units::Usd::from_whole(100)
+            cfg.file
+                .risk
+                .position_size_for(&wm_core::ids::StrategyId::from_static(
+                    "E_book_confirmed_high"
+                )),
+            usd(10)
+        );
+        assert_eq!(cfg.file.risk.max_daily_loss_usd, Some(usd(30)));
+        assert_eq!(
+            cfg.peak_slot(),
+            wm_strategy::PeakSlotConfig::default(),
+            "the shipped [strategies.peak_slot] and the documented defaults must agree"
         );
         assert_eq!(cfg.file.app.mode, RunMode::Paper);
         assert!(cfg.file.providers.awc.policy.min_interval >= std::time::Duration::from_secs(30));
@@ -1023,6 +1260,9 @@ mod tests {
                 "providers.polymarket_data",
                 "strategies.certain",
                 "strategies.book_confirmed",
+                "strategies.peak_slot",
+                "strategies.peak_slot.fallback_slots",
+                "risk.strategy_caps.F_peak_slot",
             ],
             &["market_weight", "max_market_spread"],
         );
@@ -1042,11 +1282,95 @@ mod tests {
         }
         assert!(st.certain.enabled);
         assert_eq!(st.book_confirmed, BookConfirmedConfigToml::default());
+        // F needs its own risk caps: without its section it is off.
+        assert!(!st.peak_slot.enabled);
+        assert!(file.risk.strategy_caps.is_empty());
         let data = &file.providers.polymarket_data;
         assert!(data.enabled);
         assert_eq!(data.base_url, "https://data-api.polymarket.com");
         assert!(data.policy.min_interval >= std::time::Duration::from_millis(500));
         assert!(data.policy.validate().is_ok());
+    }
+
+    #[test]
+    fn peak_slot_settings_map_and_are_validated() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        let f = cfg.peak_slot();
+        assert!(f.enabled);
+        assert_eq!(f.shares, wm_core::units::Shares::from_whole(100));
+        assert_eq!(f.fallback_slots.summer, (15 * 60, 18 * 60));
+        let ok = cfg.file.strategies.peak_slot.clone();
+        let bad: [fn(&mut PeakSlotConfigToml); 7] = [
+            |f| f.slot_from_quantile = -0.1,
+            |f| f.slot_to_quantile = 1.1,
+            |f| (f.slot_from_quantile, f.slot_to_quantile) = (0.9, 0.5),
+            |f| f.min_price = f.max_price,
+            |f| f.max_price = Price::ONE,
+            |f| f.shares = 0,
+            |f| f.min_drop_tenths = -1,
+        ];
+        for (i, f) in bad.into_iter().enumerate() {
+            cfg.file.strategies.peak_slot = ok.clone();
+            f(&mut cfg.file.strategies.peak_slot);
+            assert!(cfg.validate().is_err(), "case {i} must be refused");
+        }
+        cfg.file.strategies.peak_slot = ok.clone();
+        cfg.validate().unwrap();
+        // 100 shares at up to 0.95 need F's own position cap …
+        let risk = cfg.file.risk.clone();
+        cfg.file.risk.strategy_caps.clear();
+        let err = format!("{:#}", cfg.validate().unwrap_err());
+        assert!(err.contains("above its position cap $10.00"), "{err}");
+        assert!(err.contains("[risk.strategy_caps.F_peak_slot]"), "{err}");
+        // … and room under every other cap an order of F meets.
+        let short: [fn(&mut wm_risk::RiskConfig); 5] = [
+            |r| {
+                r.strategy_caps
+                    .get_mut("F_peak_slot")
+                    .unwrap()
+                    .max_market_exposure_usd = None;
+            },
+            |r| {
+                r.strategy_caps
+                    .get_mut("F_peak_slot")
+                    .unwrap()
+                    .max_strategy_exposure_usd = None;
+            },
+            |r| r.global_max_exposure_usd = wm_core::units::Usd::from_whole(90),
+            |r| r.max_location_exposure_usd = Some(wm_core::units::Usd::from_whole(50)),
+            |r| r.max_daily_new_exposure_usd = Some(wm_core::units::Usd::from_whole(60)),
+        ];
+        for (i, f) in short.into_iter().enumerate() {
+            cfg.file.risk = risk.clone();
+            f(&mut cfg.file.risk);
+            let err = format!("{:#}", cfg.validate().unwrap_err());
+            assert!(err.contains("so F could never trade"), "case {i}: {err}");
+        }
+        // A disabled F needs none of it.
+        cfg.file.risk.strategy_caps.clear();
+        cfg.file.strategies.peak_slot.enabled = false;
+        cfg.validate().unwrap();
+        cfg.file.risk = risk;
+        // Fallback slots are written as local times.
+        let slots: SeasonSlotsToml = toml::from_str(
+            "winter = \"13:00-16:00\"\nspring = \"14:30-17:30\"\nsummer = \"15:00-24:00\"\nautumn = \"00:00-17:00\"",
+        )
+        .unwrap();
+        assert_eq!(slots.summer, Window(15 * 60, 24 * 60));
+        assert_eq!(slots.autumn.to_string(), "00:00-17:00");
+        for bad in [
+            "\"25:00-26:00\"",
+            "\"16:00-15:00\"",
+            "\"1500-1800\"",
+            "\"15:60-16:00\"",
+            "\"24:30-24:40\"",
+        ] {
+            let text = format!(
+                "winter = {bad}\nspring = \"14:30-17:30\"\nsummer = \"15:00-18:00\"\nautumn = \"14:00-17:00\""
+            );
+            assert!(toml::from_str::<SeasonSlotsToml>(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

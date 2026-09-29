@@ -298,9 +298,9 @@ pub(crate) fn simulate_makers(
                         continue;
                     }
                     let trades = per_bucket.get(o.bucket).map_or(&[][..], Vec::as_slice);
-                    if through_fill(trades, d.knowledge, cancel, o.resting).is_none() {
+                    let Some(filled) = through_fill(trades, d.knowledge, cancel, o.resting) else {
                         continue;
-                    }
+                    };
                     done.insert(o.bucket);
                     let won = match rule {
                         MakerRule::A | MakerRule::E => o.bucket == winner,
@@ -322,6 +322,7 @@ pub(crate) fn simulate_makers(
                         won,
                         pnl_usd: sim.stake_usd / o.price * per_share,
                         resolved: labels[winner].clone(),
+                        filled: Some(local_hm(filled, tz)),
                     });
                 }
             }

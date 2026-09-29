@@ -10,6 +10,7 @@
 //! [`NoEdgeModel`] returns nothing and no weather-dependent trade is possible.
 
 use crate::peak::{PeakFeatures, TrajectoryClass};
+use crate::peak_times::PeakTimes;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,6 +103,11 @@ pub trait ProbabilityModel: Send + Sync {
     /// derives the forecast rise only from events of this product, with the
     /// product's knowledge rule; any other forecast is ignored.
     fn forecast_product(&self) -> Option<&ForecastProduct> {
+        None
+    }
+    /// When the day's high is usually first reported, per season (learned
+    /// from the same history as the model), if the model carries it.
+    fn peak_times(&self) -> Option<&PeakTimes> {
         None
     }
 }
@@ -397,6 +403,10 @@ pub struct EmpiricalPeakModel {
     /// Structure comparison result (models trained with a comparison).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<StructureSelection>,
+    /// When the day's high was first reported, per season, over the
+    /// training history (strategy F's slots).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_times: Option<PeakTimes>,
 }
 
 impl EmpiricalPeakModel {
@@ -421,6 +431,7 @@ impl EmpiricalPeakModel {
             cells: HashMap::new(),
             forecast: None,
             selection: None,
+            peak_times: None,
         }
     }
 
@@ -535,6 +546,10 @@ impl ProbabilityModel for EmpiricalPeakModel {
             .as_ref()
             .filter(|f| f.adopted && self.uses_forecast())
             .map(|f| &f.product)
+    }
+
+    fn peak_times(&self) -> Option<&PeakTimes> {
+        self.peak_times.as_ref()
     }
 
     /// Descends the hierarchy while cells exist; each level shrinks toward

@@ -1154,6 +1154,9 @@ fn training_due(
     if p.compare_structures && m.selection.is_none() {
         return Some("compare the candidate model structure".into());
     }
+    if m.peak_times.is_none() {
+        return Some("learn when each season's high is first reported (strategy F)".into());
+    }
     match p.retrain_after {
         Some(age) if now - m.created_at >= age => Some(format!(
             "model is {} days old",
@@ -1664,6 +1667,7 @@ mod tests {
         let mut m =
             EmpiricalPeakModel::new("m", "EHAM", "all", 4, EmpiricalPeakModel::default_levels());
         m.created_at = t(created);
+        m.peak_times = Some(wm_strategy::PeakTimes::default());
         m.forecast = forecast.map(|(evaluated, model)| wm_strategy::ForecastModelInfo {
             product: product(model),
             adopted: false,
@@ -1729,6 +1733,26 @@ mod tests {
             training_due(None, &operator, now).is_some(),
             "but trained when missing"
         );
+    }
+
+    #[test]
+    fn a_model_without_peak_times_is_retrained_once() {
+        let p = policy();
+        let now = t("2026-09-29T12:00:00Z");
+        let mut m = model_at("2026-09-28T12:00:00Z", Some((true, "gfs_global")));
+        assert_eq!(training_due(Some(&m), &p, now), None, "has them: fresh");
+        m.peak_times = None;
+        assert!(
+            training_due(Some(&m), &p, now)
+                .unwrap()
+                .contains("strategy F")
+        );
+        // Never for an operator-supplied model file.
+        let operator = MaintenancePolicy {
+            retrain_existing: false,
+            ..p
+        };
+        assert_eq!(training_due(Some(&m), &operator, now), None);
     }
 
     #[test]
