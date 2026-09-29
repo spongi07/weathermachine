@@ -5,7 +5,9 @@
 //! polling every 30 s all day would waste ~98 % of requests. Instead:
 //!
 //! * inside an **arrival window** after each expected report, poll at the
-//!   mode's `window_interval` (a few polls at most);
+//!   mode's `window_interval` (a few quick polls at most), then at the slower
+//!   `late_interval` until the window closes, so a late report is still seen
+//!   within a minute or two instead of at the next background poll;
 //! * outside windows, poll slowly (`background_interval`) to catch SPECIs;
 //! * when a report is overdue, do **not** speed up — slow down after a while;
 //! * throttling or gate closure always wins (never poll faster than the gate).
@@ -69,8 +71,12 @@ impl CadenceModel {
 /// Intervals for one polling mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeParams {
+    /// Spacing of the quick polls that open each arrival window.
     pub window_interval_secs: i64,
+    /// Spacing once the quick polls are used up, until the window closes.
+    pub late_interval_secs: i64,
     pub background_interval_secs: i64,
+    /// Number of quick polls per window.
     pub max_polls_per_window: u32,
 }
 
@@ -87,6 +93,9 @@ pub struct PollingParams {
     /// After a report is overdue by this long, poll only every `stale_interval`.
     pub stale_slowdown_after_secs: i64,
     pub stale_interval_secs: i64,
+    /// While a window poll finds the expected report missing, ask the standby
+    /// source (TGFTP) as well, whenever its own gate admits a request.
+    pub poll_standby_in_window: bool,
 }
 
 impl Default for PollingParams {
@@ -94,16 +103,19 @@ impl Default for PollingParams {
         Self {
             low: ModeParams {
                 window_interval_secs: 120,
+                late_interval_secs: 180,
                 background_interval_secs: 15 * 60,
                 max_polls_per_window: 3,
             },
             normal: ModeParams {
                 window_interval_secs: 60,
+                late_interval_secs: 90,
                 background_interval_secs: 10 * 60,
                 max_polls_per_window: 6,
             },
             peak: ModeParams {
                 window_interval_secs: 30,
+                late_interval_secs: 60,
                 background_interval_secs: 5 * 60,
                 max_polls_per_window: 10,
             },
@@ -111,6 +123,7 @@ impl Default for PollingParams {
             night_end_minute: 5 * 60,
             stale_slowdown_after_secs: 2 * 3600,
             stale_interval_secs: 20 * 60,
+            poll_standby_in_window: true,
         }
     }
 }
@@ -137,6 +150,8 @@ pub enum PollingMode {
 pub enum PollReason {
     Initial,
     ArrivalWindow,
+    /// Quick polls used up, window still open: slower polls until it closes.
+    LateWindow,
     Background,
     Overdue,
     StaleSlowdown,
@@ -219,6 +234,7 @@ impl PollingPolicy {
         let mode = self.mode(i);
         let p = self.params_for(mode);
         let window_iv = Duration::seconds(p.window_interval_secs);
+        let late_iv = Duration::seconds(p.late_interval_secs);
         let background_iv = Duration::seconds(p.background_interval_secs);
 
         let window = Duration::seconds(self.cadence.arrival_window_secs);
@@ -263,8 +279,12 @@ impl PollingPolicy {
                         PollReason::ArrivalWindow,
                         true,
                     )
+                } else if i.now <= w_end && last + late_iv <= w_end {
+                    // Quick polls used up but the window is still open: keep
+                    // looking, more slowly, until it closes.
+                    (last + late_iv, PollReason::LateWindow, true)
                 } else {
-                    // Window exhausted without the report: fall back to the
+                    // Window closed without the report: fall back to the
                     // background cadence (never faster).
                     (last + background_iv, PollReason::Overdue, false)
                 }
@@ -387,10 +407,72 @@ mod tests {
         let d = policy().next_poll(&i);
         assert!(d.in_window);
         assert_eq!(d.at, utc("2026-09-26T13:27:30Z"));
+        // Quick polls used up: the window (to 13:37) is still watched, more slowly.
         i.polls_in_current_window = 6;
         let d = policy().next_poll(&i);
+        assert_eq!(d.reason, PollReason::LateWindow);
+        assert!(d.in_window);
+        assert_eq!(d.at, utc("2026-09-26T13:28:00Z"));
+        // The last late poll may land on the window's end...
+        i.now = utc("2026-09-26T13:35:40Z");
+        i.last_poll_at = Some(utc("2026-09-26T13:35:30Z"));
+        i.polls_in_current_window = 9;
+        let d = policy().next_poll(&i);
+        assert_eq!(d.reason, PollReason::LateWindow);
+        assert_eq!(d.at, utc("2026-09-26T13:37:00Z"));
+        // ...and after it the background cadence takes over.
+        i.now = utc("2026-09-26T13:37:00Z");
+        i.last_poll_at = Some(utc("2026-09-26T13:37:00Z"));
+        i.polls_in_current_window = 10;
+        let d = policy().next_poll(&i);
         assert_eq!(d.reason, PollReason::Overdue);
-        assert_eq!(d.at, utc("2026-09-26T13:36:30Z"));
+        assert!(!d.in_window);
+        assert_eq!(d.at, utc("2026-09-26T13:47:00Z"));
+        // Once the window has closed, the wait is for the next report.
+        i.now = utc("2026-09-26T13:37:05Z");
+        let d = policy().next_poll(&i);
+        assert_eq!(d.reason, PollReason::Background);
+        assert_eq!(d.expected_report, Some(utc("2026-09-26T13:55:00Z")));
+        assert_eq!(d.at, utc("2026-09-26T13:47:00Z"));
+    }
+
+    /// 29 Sep 2026: the 12:25 report was over six minutes late at AWC. Peak
+    /// mode spent its ten quick polls by +360 s and then waited the 5-minute
+    /// background interval, so the report was only seen at +660 s. The late
+    /// polls now cover the rest of the window.
+    #[test]
+    fn late_report_is_seen_within_a_late_interval() {
+        let p = policy();
+        let nominal = utc("2026-09-29T12:25:00Z");
+        let published = nominal + Duration::seconds(400);
+        let mut i = inputs(
+            "2026-09-29T12:24:00Z",
+            Some("2026-09-29T11:55:00Z"),
+            Some("2026-09-29T12:21:00Z"),
+        );
+        i.hints.peak_watch = true;
+        let mut polls = Vec::new();
+        let seen = loop {
+            let d = p.next_poll(&i);
+            assert_eq!(d.expected_report, Some(nominal));
+            i.now = d.at;
+            i.last_poll_at = Some(d.at);
+            if d.in_window {
+                i.polls_in_current_window += 1;
+            }
+            polls.push((d.at - nominal, d.reason));
+            if d.at >= published {
+                break d.at;
+            }
+            assert!(polls.len() < 30, "runaway polling: {polls:?}");
+        };
+        assert_eq!(seen - nominal, Duration::seconds(420), "{polls:?}");
+        let quick = polls
+            .iter()
+            .filter(|(_, r)| *r == PollReason::ArrivalWindow)
+            .count();
+        assert_eq!(quick, 10);
+        assert_eq!(polls.last().map(|(_, r)| *r), Some(PollReason::LateWindow));
     }
 
     #[test]
@@ -429,16 +511,16 @@ mod tests {
         assert_eq!(d.expected_report, Some(utc("2026-09-26T14:25:00Z")));
         assert_eq!(d.reason, PollReason::Background);
         assert_eq!(d.at, utc("2026-09-26T14:18:00Z"));
-        // Window of a missed report exhausted: back to background cadence.
+        // Window of a missed report closed: back to background cadence.
         let mut i = inputs(
-            "2026-09-26T13:35:00Z",
+            "2026-09-26T13:36:10Z",
             Some("2026-09-26T12:55:00Z"),
-            Some("2026-09-26T13:34:30Z"),
+            Some("2026-09-26T13:36:00Z"),
         );
-        i.polls_in_current_window = 6;
+        i.polls_in_current_window = 8;
         let d = policy().next_poll(&i);
         assert_eq!(d.reason, PollReason::Overdue);
-        assert_eq!(d.at, utc("2026-09-26T13:44:30Z"));
+        assert_eq!(d.at, utc("2026-09-26T13:46:00Z"));
         // Long outage (> 2 h since the newest observation): slow down further.
         let d = policy().next_poll(&inputs(
             "2026-09-26T17:00:00Z",
@@ -481,10 +563,10 @@ mod tests {
         assert_eq!(policy().mode(&i), PollingMode::Low);
     }
 
-    /// Simulate a full day of polling with reports arriving 2–4 minutes after
-    /// the nominal time and count requests: the budget must stay modest.
-    #[test]
-    fn simulated_day_request_budget() {
+    /// Simulate a full day of polling with every report published `delay`
+    /// after its nominal time. Returns the requests made and the longest wait
+    /// between a report's publication and the poll that saw it.
+    fn simulate_day(delay: Duration) -> (u32, Duration) {
         let p = policy();
         let start = utc("2026-09-26T00:00:00Z");
         let end = start + Duration::days(1);
@@ -493,6 +575,7 @@ mod tests {
         let mut last_poll: Option<DateTime<Utc>> = None;
         let mut polls_in_window = 0;
         let mut requests = 0;
+        let mut worst_wait = Duration::zero();
         let mut current_expected = None;
         while now < end {
             let mut i = inputs("2026-09-26T00:00:00Z", None, None);
@@ -515,19 +598,52 @@ mod tests {
             if d.in_window {
                 polls_in_window += 1;
             }
-            // Newest report available at this moment (published 3 min after nominal).
+            // Newest report available at this moment.
             let mut t = start - Duration::minutes(5);
             while let Some(n) = p.cadence.next_report_after(t) {
-                if n + Duration::minutes(3) > now {
+                if n + delay > now {
                     break;
                 }
                 t = n;
             }
             if Some(t) > last_obs {
+                // Every report published since the previous poll is seen now.
+                let mut r = last_obs.unwrap_or(t);
+                while let Some(n) = p.cadence.next_report_after(r) {
+                    if n > t {
+                        break;
+                    }
+                    worst_wait = worst_wait.max(now - (n + delay));
+                    r = n;
+                }
                 last_obs = Some(t);
             }
         }
+        (requests, worst_wait)
+    }
+
+    /// Reports arriving on time (3 min after nominal): the budget stays modest.
+    #[test]
+    fn simulated_day_request_budget() {
+        let (requests, worst_wait) = simulate_day(Duration::minutes(3));
         assert!(requests < 400, "requests per day {requests}");
         assert!(requests > 100, "requests per day {requests}");
+        assert!(
+            worst_wait <= Duration::minutes(2),
+            "worst wait {worst_wait}"
+        );
+    }
+
+    /// Every report 11 minutes late: the late polls still see each one within
+    /// a few minutes of publication at a cost far inside AWC's daily budget
+    /// (2,000 requests).
+    #[test]
+    fn simulated_late_day_stays_timely_and_in_budget() {
+        let (requests, worst_wait) = simulate_day(Duration::minutes(11));
+        assert!(requests < 800, "requests per day {requests}");
+        assert!(
+            worst_wait <= Duration::minutes(3),
+            "worst wait {worst_wait}"
+        );
     }
 }

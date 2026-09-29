@@ -63,8 +63,9 @@ first_poll_delay_secs, arrival_window_secs }`.
 Rules (KNOWN FACT, `wm-weather::polling`):
 1. The expected report is the next routine time (HH:25/HH:55 for EHAM) after
    the newest known observation. The first poll comes `first_poll_delay`
-   (90 s) after it, then every `window_interval` until the report arrives, at
-   most `max_polls_per_window` times within the 12-minute arrival window.
+   (90 s) after it, then every `window_interval` until the report arrives,
+   at most `max_polls_per_window` quick polls; after them every
+   `late_interval` until the 12-minute arrival window closes.
 2. Between windows: a slow background poll (catches SPECIs and corrections).
 3. Mode: **Peak** when the engine hints peak watch or exposure; **Low** at
    night (22:00–05:00 local); otherwise **Normal**. Recent throttling steps
@@ -73,12 +74,27 @@ Rules (KNOWN FACT, `wm-weather::polling`):
    cadence (**never faster when late**). With no data for 2 h, the policy
    slows to one poll per 20 min.
 5. The gate always wins: if it says not before T, the decision moves to T.
+6. While a window poll finds the expected report missing, the collector
+   asks the standby source (TGFTP) right after it, if that source's own
+   gate admits a request now (it never waits for it). These asks never move
+   the primary's schedule and are not failovers; whichever source publishes
+   first delivers the report, and the stored observation names it
+   (`report paper` counts them). `poll_standby_in_window = false` turns
+   this off.
 
-| Mode | In window | Background | Max polls/window | Brief's research range |
-|---|---|---|---|---|
-| Low | 120 s | 15 min | 3 | 2–5 min |
-| Normal | 60 s | 10 min | 6 | 1–2 min |
-| Peak | 30 s (NOAA floor) | 5 min | 10 | 30–60 s |
+| Mode | Quick polls | Then, to the window's end | Background | Quick polls/window | Brief's research range |
+|---|---|---|---|---|---|
+| Low | 120 s | 180 s | 15 min | 3 | 2–5 min |
+| Normal | 60 s | 90 s | 10 min | 6 | 1–2 min |
+| Peak | 30 s (NOAA floor) | 60 s | 5 min | 10 | 30–60 s |
+
+**KNOWN FACT (29 Sep 2026, live).** The 12:25 report was more than six
+minutes late at AWC. Peak mode had spent its ten quick polls by +360 s and
+the next poll was the background one, so the report was seen only at
++660 s. With the late polls the same case is seen at +420 s (test
+`late_report_is_seen_within_a_late_interval`). A day on which every report
+is 11 minutes late costs under 800 AWC requests (budget 2,000) and sees
+each report within 3 minutes of publication.
 
 **ASSUMPTION.** These are engineering starting points, not optimised
 parameters. **HYPOTHESIS TO BACKTEST.** Whether peak-mode latency changes
@@ -86,8 +102,10 @@ outcomes at all: the knowledge delay (`fetched_at − observed_at`) is
 recorded for every report, so the value of faster polling can be measured
 before anyone asks for it.
 
-**TESTING.** Unit tests for cadence math, window/overdue/stale transitions and
-night mode; collector scenarios with a manual clock.
+**TESTING.** Unit tests for cadence math, window/late/overdue/stale
+transitions and night mode; collector scenarios with a manual clock,
+including a standby that publishes first, one that is only asked while the
+report is missing, and the switch turned off.
 
 ## 11. RateLimiter
 

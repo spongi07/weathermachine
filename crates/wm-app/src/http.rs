@@ -5,6 +5,7 @@
 //! | `GET /api/v1/snapshot`    | current [`DashboardSnapshot`] (JSON)                 |
 //! | `GET /api/v1/stream`      | Server-Sent Events: a `snapshot` event per publish   |
 //! | `POST /api/v1/kill-switch`| engage/release (header `X-WM-Admin-Token`)           |
+//! | `GET /api/v1/report/paper`| `report paper` from the database (`?from=&to=&format=json`) |
 //! | `GET /healthz`            | liveness: the engine loop is publishing              |
 //! | `GET /readyz`             | readiness: startup done, storage reachable           |
 //! | `GET /metrics`            | Prometheus exposition                                |
@@ -16,8 +17,9 @@
 //! protects everything except the health probes.
 
 use crate::lite;
+use crate::paper_report::{self, ReportService};
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -145,6 +147,8 @@ pub struct Shared {
     pub ready: Arc<AtomicBool>,
     /// Liveness fails when no snapshot was published for this long.
     pub liveness_max_age: Duration,
+    /// `report paper` over HTTP (`None`: no database).
+    pub paper_report: Option<Arc<ReportService>>,
 }
 
 pub type AppState = Arc<Shared>;
@@ -193,6 +197,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/kill-switch", post(kill_switch))
+        .route("/api/v1/report/paper", get(paper_report_page))
         .route("/api/{*rest}", any(api_not_found))
         .route("/metrics", get(prometheus_metrics))
         .route("/lite", get(lite_page));
@@ -349,6 +354,49 @@ async fn kill_switch(State(state): State<AppState>, headers: HeaderMap, body: By
             "engine loop is not running",
         )
             .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ReportQuery {
+    from: Option<chrono::NaiveDate>,
+    to: Option<chrono::NaiveDate>,
+    /// `json` for the JSON report; Markdown otherwise.
+    format: Option<String>,
+}
+
+/// The paper-run report as Markdown (or JSON), for reading or pasting.
+async fn paper_report_page(
+    State(state): State<AppState>,
+    Query(q): Query<ReportQuery>,
+) -> Response {
+    let Some(service) = state.paper_report.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the report needs the database, which is not configured\n",
+        )
+            .into_response();
+    };
+    match service.report(q.from, q.to).await {
+        Ok(r) if q.format.as_deref() == Some("json") => {
+            ([(header::CACHE_CONTROL, "no-store")], Json(&*r)).into_response()
+        }
+        Ok(r) => (
+            [
+                (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            paper_report::markdown(&r),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "paper report failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("report failed: {e:#}\n"),
+            )
+                .into_response()
+        }
     }
 }
 

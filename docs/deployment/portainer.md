@@ -83,7 +83,8 @@ state as JSON.
 
 * Dashboard: `http://<host>:8080/` (WebAssembly). Zero-JavaScript fallback:
   `/lite`. JSON snapshot: `/api/v1/snapshot`. Live stream (SSE):
-  `/api/v1/stream`. Prometheus metrics: `/metrics`.
+  `/api/v1/stream`. Prometheus metrics: `/metrics`. The paper run day by
+  day: `/api/v1/report/paper` ([below](#the-paper-run-report)).
 * The kill switch (top-right button or
   `curl -X POST -H "X-WM-Admin-Token: $TOKEN" -H 'content-type: application/json' -d '{"engaged":true,"reason":"manual"}' http://<host>:8080/api/v1/kill-switch`)
   blocks every new order immediately; it is journaled like any other event.
@@ -214,6 +215,50 @@ In short:
   bot could act.
 * The resolution check shows whether the METAR high was the resolved
   bucket.
+
+### The paper-run report
+
+What did the bot do while nobody was watching? The dashboard keeps only the
+last 100 decisions and forgets them on a restart; the database keeps
+everything. The report reads it back, day by day:
+
+* the METAR high and when it was first reached; how long each report took
+  to reach the bot, and which source (AWC or TGFTP) delivered it first;
+* the day-1 forecast's maximum and its error against the METAR high;
+* per strategy: how often each blocker stopped it, any signals, and the
+  three closest calls with how they would have ended if bought at the ask;
+* the model against the market on the bucket that won: average
+  probability, log loss, and who was sure (≥ 0.90) first;
+* proposals with the risk verdicts, paper orders, fills and settled P&L;
+* requests, failures and latency per provider, health changes and logged
+  events.
+
+Outcomes are judged by the METAR high, as paper settlement does; today is
+provisional. It only reads.
+
+**In the browser (easiest).** Open `http://<host>:<port>/api/v1/report/paper`
+(the dashboard's address; Basic auth applies if you set it). It covers the
+days since the service first ran, at most the last 31. Choose days with
+`?from=2026-09-26&to=2026-09-29`; add `&format=json` for JSON. Select all,
+copy, paste.
+
+**As a one-off container** (any range; the report is also saved as
+`/data/reports/amsterdam-paper.md` and `.json` when the data volume is
+mounted). In Portainer: *Containers → Add container*, image
+`ghcr.io/spongi07/weathermachine:<tag>`, *Command* override
+`report paper --print`, *Network* the stack's network
+(`weather-machine_default`; *Networks* lists the actual name), env
+`WM_DB_PASSWORD` with the stack's value, restart policy *Never*; then read
+its *Logs*. Or with the Docker CLI:
+
+```sh
+docker run --rm --network weather-machine_default -e WM_DB_PASSWORD=… \
+  ghcr.io/spongi07/weathermachine:latest report paper --print
+```
+
+The first start after updating to the version with this report builds a
+small index on the event journal. It reads through the week of order books
+the journal keeps, which can delay that start by a minute.
 
 ### Other one-off commands
 

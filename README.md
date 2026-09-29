@@ -19,7 +19,9 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   NWS TGFTP), and one rate-limit gate per provider: ≥ 30 s spacing,
   `Retry-After`, backoff with jitter, circuit breaker, daily budget, and
   politeness after throttling. Polling is scheduled around the expected
-  HH:25/HH:55 reports and never speeds up to chase limits.
+  HH:25/HH:55 reports: quick polls first, slower ones until the arrival
+  window closes, and the standby source (TGFTP) is asked too while a report
+  is missing. It never speeds up to chase limits.
 * **Keeps everything.** Raw payloads, every request, observation versions
   and corrections, verbatim market rules (SHA-256), every decision with its
   inputs, orders and fills, and a replayable journal of every engine input.
@@ -87,6 +89,7 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train both model structures, evaluate the forecast and pick the structure; `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
 | `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices and as limit orders, what makers earned on the other side of every trade, a report-by-report replay of each `--day`, resolution check |
+| `weather-machine report paper [--from --to --print]` | The paper run day by day, from the database: METAR high, report delays and which source delivered first, the day-1 forecast's error, every evaluation's blockers per strategy, the closest calls and how they ended, model against market on the winning bucket, proposals, orders, fills, P&L, provider health. The running service also serves it at `/api/v1/report/paper` |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules, and any liquidity-reward pools (read-only) |
 | `weather-machine rules approve --sha256 … --reviewer …` | Human approval of a rules text |

@@ -241,23 +241,33 @@ max_body_bytes = 8388608
 
 # ---------------------------------------------------------------------------
 # Adaptive polling (engineering starting points — NOT optimized parameters).
-# Fast intervals apply only inside the arrival window after an expected report.
+# Fast intervals apply only inside the arrival window after an expected report:
+# up to max_polls_per_window quick polls every window_interval_secs, then one
+# every late_interval_secs until the window closes (a late report is still seen
+# within a minute or two), then the background interval.
 # ---------------------------------------------------------------------------
 [polling]
 night_start_minute = 1320         # 22:00 local
 night_end_minute = 300            # 05:00 local
 stale_slowdown_after_secs = 7200
 stale_interval_secs = 1200
+# While a window poll finds the expected report missing, also ask the standby
+# source (TGFTP) whenever its own gate allows. The report records which source
+# delivered each METAR first.
+poll_standby_in_window = true
 [polling.low]
 window_interval_secs = 120
+late_interval_secs = 180
 background_interval_secs = 900
 max_polls_per_window = 3
 [polling.normal]
 window_interval_secs = 60
+late_interval_secs = 90
 background_interval_secs = 600
 max_polls_per_window = 6
 [polling.peak]
 window_interval_secs = 30
+late_interval_secs = 60
 background_interval_secs = 300
 max_polls_per_window = 10
 

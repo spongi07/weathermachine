@@ -59,6 +59,15 @@ Provider behaviours required by the brief:
   orders, and kernel latency (µs).
 * **Probes:** `/healthz` (engine loop publishing) and `/readyz` (startup,
   storage, kill switch).
+* **The paper run, day by day:** `weather-machine report paper` (or
+  `/api/v1/report/paper`, at most 31 days, one report at a time, reused for
+  a minute) reads the database back: METAR high, report delays and the
+  source that delivered each report first, the day-1 forecast's error, the
+  blockers of every evaluation per strategy, the closest calls and how they
+  would have ended, the model against the recorded book on the winning
+  bucket, proposals, orders, fills, P&L settled at the METAR high, provider
+  requests, health changes and logged events. The dashboard only holds the
+  last 100 decisions of the current run.
 
 ## 40. Recovery architecture
 

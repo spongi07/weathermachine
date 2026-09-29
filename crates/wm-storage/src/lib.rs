@@ -21,6 +21,13 @@ use wm_core::weather::{
     DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision,
 };
 
+pub mod report;
+
+pub use report::{
+    ReportBookTop, ReportDecision, ReportFill, ReportHealthChange, ReportObservation, ReportOrder,
+    ReportOutcome, ReportRequestDay, ReportRun, ReportSystemEvent,
+};
+
 /// Embedded migrations (`/migrations`).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -133,6 +140,16 @@ impl PgStore {
             .acquire_timeout(Duration::from_secs(10))
             .connect(url)
             .await?;
+        Ok(Self { pool })
+    }
+
+    /// A pool that connects on first use, for a server that starts before
+    /// the database is reachable.
+    pub fn connect_lazy(url: &str, max_connections: u32) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections.max(1))
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy(url)?;
         Ok(Self { pool })
     }
 

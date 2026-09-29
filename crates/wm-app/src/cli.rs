@@ -5,6 +5,7 @@ use crate::config::AppConfig;
 use crate::demo::{self, DemoOptions};
 use crate::http::{self, BasicAuth, Publisher, Shared};
 use crate::market_research::{self, MarketResearchClients, MarketResearchPlan, ResearchProgress};
+use crate::paper_report;
 use crate::runtime::{self, RuntimeContext};
 use crate::setup::Providers;
 use crate::training::{self, Progress, TrainPlan};
@@ -102,6 +103,11 @@ pub enum Command {
         /// Write the full JSON report here.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Reports from the database.
+    Report {
+        #[command(subcommand)]
+        command: ReportCommand,
     },
     /// Market tooling.
     Markets {
@@ -211,6 +217,31 @@ pub enum ModelCommand {
         /// First year of history (default: [model.auto_train].from_year).
         #[arg(long)]
         from_year: Option<i32>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReportCommand {
+    /// The paper run day by day: the METAR high, report delays and their
+    /// source, the day-1 forecast's error, every evaluation's blockers per
+    /// strategy, the closest calls and how they ended, the model against the
+    /// market on the winning bucket, proposals, paper orders, fills, P&L and
+    /// provider health. Read-only; needs the database (the stack's
+    /// WM_DB_PASSWORD, or WM_DATABASE_URL).
+    Paper {
+        /// First local date (default: the day the service first ran).
+        #[arg(long)]
+        from: Option<NaiveDate>,
+        /// Last local date (default: today).
+        #[arg(long)]
+        to: Option<NaiveDate>,
+        /// Markdown report (default: <data_dir>/reports/<location>-paper.md;
+        /// the JSON report is written beside it).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Also print the whole Markdown report (for container logs).
+        #[arg(long)]
+        print: bool,
     },
 }
 
@@ -398,6 +429,15 @@ pub async fn execute(cli: Cli) -> Result<()> {
             model,
             out,
         } => backtest(cli.config, synthetic_days, journal, seed, model, out).await,
+        Command::Report {
+            command:
+                ReportCommand::Paper {
+                    from,
+                    to,
+                    out,
+                    print,
+                },
+        } => report_paper(cli.config, from, to, out, print).await,
         Command::Markets {
             command: MarketsCommand::Discover { date },
         } => discover(cli.config, date).await,
@@ -693,6 +733,58 @@ async fn research_market(
     Ok(())
 }
 
+/// `report paper`: the paper run day by day, from the database (read-only).
+async fn report_paper(
+    config: Option<PathBuf>,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    out: Option<PathBuf>,
+    print: bool,
+) -> Result<()> {
+    let cfg = AppConfig::load(config.as_deref())?;
+    telemetry::init_tracing(&cfg.file.app.log_format);
+    let url = cfg.env.database_url.as_deref().context(
+        "the report reads the database: set WM_DB_PASSWORD as in the stack (or WM_DATABASE_URL)",
+    )?;
+    let store = PgStore::connect(url, 2).await?;
+    let target = paper_report::ReportTarget::from_config(&cfg)?;
+    let now = Utc::now();
+    let plan = target.plan(&store, from, to, None, now).await?;
+    println!(
+        "paper run of {} ({}) from {} to {}",
+        plan.location, plan.station, plan.from, plan.to
+    );
+    let inputs = paper_report::collect(&store, &plan).await?;
+    let report = paper_report::build(&inputs, &plan, now);
+    let md = paper_report::markdown(&report);
+    let md_path = out.unwrap_or_else(|| {
+        PathBuf::from(&cfg.file.model.auto_train.data_dir)
+            .join("reports")
+            .join(format!("{}-paper.md", plan.location))
+    });
+    let json_path = md_path.with_extension("json");
+    let written = md_path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&md_path, &md))
+        .and_then(|()| {
+            let json = serde_json::to_vec_pretty(&report).map_err(std::io::Error::other)?;
+            std::fs::write(&json_path, json)
+        });
+    match written {
+        Ok(()) => {
+            println!("report: {}", md_path.display());
+            println!("json:   {}", json_path.display());
+        }
+        // Printing still works without a writable data volume.
+        Err(e) => println!("could not write {}: {e}", md_path.display()),
+    }
+    if print {
+        println!("\n{md}");
+    }
+    Ok(())
+}
+
 /// `run` and `demo`: HTTP server + runtime, graceful shutdown on SIGTERM/SIGINT.
 async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
     let cfg = AppConfig::load(config.as_deref())?;
@@ -719,6 +811,16 @@ async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
     if !ui_dir.join("index.html").is_file() {
         tracing::warn!(ui_dir = %ui_dir.display(), "dashboard assets not found: serving the /lite dashboard only");
     }
+    // The report reads the database with its own small pool, connected on
+    // first use (the runtime connects its pool later).
+    let paper_report = match (&mode, cfg.env.database_url.as_deref()) {
+        (Mode::Run, Some(url)) => Some(Arc::new(paper_report::ReportService::new(
+            PgStore::connect_lazy(url, 2)?,
+            paper_report::ReportTarget::from_config(&cfg)?,
+            Arc::new(SystemClock::new()),
+        ))),
+        _ => None,
+    };
     let shared = Arc::new(Shared {
         snapshots,
         commands: cmd_tx,
@@ -728,6 +830,7 @@ async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
         ui_dir: Some(ui_dir),
         ready: Arc::clone(&ready),
         liveness_max_age: std::time::Duration::from_secs(60),
+        paper_report,
     });
     let listener = tokio::net::TcpListener::bind(&cfg.file.app.http_bind)
         .await

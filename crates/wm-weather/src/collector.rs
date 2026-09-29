@@ -8,6 +8,11 @@
 //! `WeatherCorrection` / `ProviderHealthChanged` events, and the engine may
 //! publish [`PollingHints`] which the collector's [`PollingPolicy`] turns into a
 //! (bounded, gate-respecting) schedule.
+//!
+//! The schedule belongs to the active source (the primary unless it is
+//! unusable). While a window poll finds the expected report missing, a
+//! standby source is asked as well when its own gate admits a request, so
+//! whichever source publishes first delivers the report.
 
 use crate::health::{HealthConfig, HealthTracker};
 use crate::ledger::ObservationLedger;
@@ -92,6 +97,16 @@ pub enum PollOutcome {
 struct Slot {
     source: Arc<dyn ObservationSource>,
     health: HealthTracker,
+}
+
+/// Why a source is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    /// The poll the schedule planned, made to the active source.
+    Scheduled,
+    /// A standby asked right after a window poll found the report missing.
+    /// It never moves the schedule and never waits for its gate.
+    Standby,
 }
 
 /// The per-station collector.
@@ -201,24 +216,34 @@ impl StationCollector {
         &self.cfg.station
     }
 
+    fn usable(&self, s: &Slot) -> bool {
+        !matches!(
+            s.health.state(),
+            ProviderHealthState::Throttled | ProviderHealthState::Unavailable
+        ) && s
+            .source
+            .gate()
+            .not_before_utc()
+            .is_none_or(|t| t <= self.clock.now() + chrono::Duration::minutes(5))
+    }
+
     fn active_index(&self) -> usize {
-        let unusable = |s: &Slot| {
-            matches!(
-                s.health.state(),
-                ProviderHealthState::Throttled | ProviderHealthState::Unavailable
-            ) || s
-                .source
-                .gate()
-                .not_before_utc()
-                .is_some_and(|t| t > self.clock.now() + chrono::Duration::minutes(5))
-        };
         if self.slots.is_empty() {
             return 0;
         }
-        if !unusable(&self.slots[0]) {
+        if self.usable(&self.slots[0]) {
             return 0;
         }
-        self.slots.iter().position(|s| !unusable(s)).unwrap_or(0)
+        self.slots.iter().position(|s| self.usable(s)).unwrap_or(0)
+    }
+
+    /// Is the report expected at `expected` still missing?
+    fn awaiting(&self, expected: Option<DateTime<Utc>>) -> bool {
+        expected.is_some_and(|e| {
+            self.ledger
+                .newest_observation_time(&self.cfg.station)
+                .is_none_or(|t| t < e)
+        })
     }
 
     /// Compute the next poll decision.
@@ -289,7 +314,35 @@ impl StationCollector {
     /// Perform exactly one poll (used by `run` and by `collect --once`).
     pub async fn poll_once(&mut self) -> PollOutcome {
         let idx = self.active_index();
-        let failover = idx != 0;
+        self.poll_slot(idx, Ask::Scheduled).await
+    }
+
+    /// Ask a standby source now, if its gate admits a request without
+    /// waiting; `None` if none can be asked. A failing standby is retried at
+    /// its gate's backoff and circuit-breaker pace, so it can recover; a
+    /// throttled one is left alone.
+    pub async fn poll_standby(&mut self) -> Option<PollOutcome> {
+        let active = self.active_index();
+        let idx = (0..self.slots.len()).find(|&i| {
+            let s = &self.slots[i];
+            i != active
+                && s.health.state() != ProviderHealthState::Throttled
+                && s.source.gate().not_before_utc().is_none()
+        })?;
+        Some(self.poll_slot(idx, Ask::Standby).await)
+    }
+
+    /// Count a request that was made; only scheduled polls move the schedule.
+    fn count_request(&mut self, at: DateTime<Utc>, ask: Ask) {
+        self.status.polls_total += 1;
+        if ask == Ask::Scheduled {
+            self.last_poll_at = Some(at);
+            self.status.last_poll_at = Some(at);
+        }
+    }
+
+    async fn poll_slot(&mut self, idx: usize, ask: Ask) -> PollOutcome {
+        let failover = ask == Ask::Scheduled && idx != 0;
         let Some(slot) = self.slots.get(idx) else {
             return PollOutcome::Failed {
                 provider: ProviderId::replay(),
@@ -299,10 +352,14 @@ impl StationCollector {
         };
         let source = Arc::clone(&slot.source);
         let provider = source.provider().clone();
-        self.status.active_provider = Some(provider.clone());
-        let result = source
-            .fetch(&self.cfg.station, self.cfg.max_gate_wait)
-            .await;
+        let max_gate_wait = match ask {
+            Ask::Scheduled => {
+                self.status.active_provider = Some(provider.clone());
+                self.cfg.max_gate_wait
+            }
+            Ask::Standby => Duration::ZERO,
+        };
+        let result = source.fetch(&self.cfg.station, max_gate_wait).await;
         let now = self.clock.now();
         let gate = Arc::clone(source.gate());
 
@@ -315,9 +372,7 @@ impl StationCollector {
                 }
             }
             Ok(fetch) => {
-                self.last_poll_at = Some(now);
-                self.status.polls_total += 1;
-                self.status.last_poll_at = Some(now);
+                self.count_request(now, ask);
                 for w in &fetch.warnings {
                     tracing::warn!(station = %self.cfg.station, %provider, warning = %w, "provider payload warning");
                 }
@@ -419,9 +474,7 @@ impl StationCollector {
                 raw,
                 request,
             }) => {
-                self.last_poll_at = Some(now);
-                self.status.polls_total += 1;
-                self.status.last_poll_at = Some(now);
+                self.count_request(now, ask);
                 let stats = gate.stats();
                 let health = self.slots[idx].health.on_malformed(
                     now,
@@ -448,9 +501,7 @@ impl StationCollector {
                 }
             }
             Err(SourceError::Fetch(err)) => {
-                self.last_poll_at = Some(now);
-                self.status.polls_total += 1;
-                self.status.last_poll_at = Some(now);
+                self.count_request(now, ask);
                 let throttled = err.is_throttled();
                 let status = err.record().and_then(|r| r.status);
                 let stats = gate.stats();
@@ -557,6 +608,13 @@ impl StationCollector {
             }
             let outcome = self.poll_once().await;
             tracing::debug!(station = %self.cfg.station, ?outcome, reason = ?decision.reason, mode = ?decision.mode, "poll complete");
+            if decision.in_window
+                && self.cfg.policy.params.poll_standby_in_window
+                && self.awaiting(decision.expected_report)
+                && let Some(standby) = self.poll_standby().await
+            {
+                tracing::debug!(station = %self.cfg.station, outcome = ?standby, "standby poll complete");
+            }
             if let PollOutcome::GateClosed { retry_in, .. } = outcome {
                 // Never spin: honour the gate's own schedule.
                 tokio::time::sleep(retry_in.max(Duration::from_secs(1))).await;

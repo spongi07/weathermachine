@@ -955,6 +955,11 @@ mod tests {
         );
         assert_eq!(cfg.file.app.mode, RunMode::Paper);
         assert!(cfg.file.providers.awc.policy.min_interval >= std::time::Duration::from_secs(30));
+        assert_eq!(
+            cfg.file.polling,
+            PollingParams::default(),
+            "the shipped polling section and the documented defaults must agree"
+        );
     }
 
     #[test]

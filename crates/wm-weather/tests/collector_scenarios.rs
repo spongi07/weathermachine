@@ -708,6 +708,85 @@ async fn untried_fallback_never_masks_a_throttled_primary() {
     );
 }
 
+/// A standby that fails is asked again only when its own gate allows (backoff,
+/// then the open circuit), and recovers once it answers.
+#[tokio::test]
+async fn failing_standby_is_retried_at_its_gates_pace_and_recovers() {
+    let primary = MockServer::start().await;
+    mount(
+        &primary,
+        awc_json(&[(
+            "METAR EHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG",
+            T1255,
+            "METAR",
+        )]),
+    )
+    .await;
+    let secondary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(3)
+        .mount(&secondary)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/data/observations/metar/stations/EHAM.TXT"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "2026/09/26 12:55\nEHAM 261255Z 24012KT 9999 FEW030 18/12 Q1016 NOSIG\n",
+        ))
+        .mount(&secondary)
+        .await;
+    let clock = ManualClock::new(utc("2026-09-26T12:58:00Z"));
+    let tg_gate = ProviderGate::new(ProviderId::tgftp(), policy(), Arc::new(clock.clone()), 12);
+    let tg_fetcher = Arc::new(
+        HttpFetcher::new(tg_gate, "WeatherMachine-test/0 (test@example.invalid)").unwrap(),
+    );
+    let tg: Arc<dyn ObservationSource> =
+        Arc::new(TgftpMetarSource::new(tg_fetcher, secondary.uri()));
+    let mut h = harness(vec![awc_source(&primary.uri(), &clock, "awc"), tg], clock);
+    assert!(matches!(
+        h.collector.poll_once().await,
+        PollOutcome::Fetched { new: 1, .. }
+    ));
+
+    // Every 30 s for 40 minutes: ask the standby whenever the gate allows.
+    let mut asks = Vec::new();
+    for step in 0..80 {
+        h.clock.advance(Duration::from_secs(30));
+        if let Some(o) = h.collector.poll_standby().await {
+            asks.push((step, o));
+        }
+    }
+    let failed = asks
+        .iter()
+        .take_while(|(_, o)| matches!(o, PollOutcome::Failed { .. }))
+        .count();
+    assert_eq!(failed, 3, "{asks:?}");
+    assert!(
+        matches!(asks.get(3), Some((_, PollOutcome::Fetched { .. }))),
+        "recovers on the first ask the open circuit allows: {asks:?}"
+    );
+    let (fourth, _) = asks[3];
+    let (third, _) = asks[2];
+    assert!(
+        (fourth - third) * 30 >= 600,
+        "the open circuit (600 s) spaces the retry"
+    );
+    let tg_state = h
+        .collector
+        .status()
+        .borrow()
+        .providers
+        .iter()
+        .find(|p| p.provider == ProviderId::tgftp())
+        .map(|p| p.state);
+    assert_eq!(tg_state, Some(ProviderHealthState::Healthy));
+    assert_eq!(
+        secondary.received_requests().await.unwrap().len(),
+        asks.len(),
+        "one request per ask"
+    );
+}
+
 #[test]
 fn second_collector_for_same_station_is_refused() {
     let registry = CollectorRegistry::new();
@@ -715,110 +794,125 @@ fn second_collector_for_same_station_is_refused() {
     assert!(registry.claim(&eham()).is_err());
 }
 
-/// Run the real collector loop for six virtual hours against a scripted source
-/// and verify the request count stays within the polite budget.
-#[tokio::test(start_paused = true)]
-async fn run_loop_request_budget_over_six_virtual_hours() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use wm_core::ingest::BoxFuture;
-    use wm_weather::{ParsedReport, SourceError, SourceFetch, metar};
+/// A scripted source: it serves the newest routine report once `delay` has
+/// passed since its nominal time, and counts the requests it answered.
+struct Scripted {
+    gate: Arc<ProviderGate>,
+    clock: Arc<dyn Clock>,
+    calls: Arc<std::sync::atomic::AtomicU32>,
+    delay: CDuration,
+}
 
-    struct Scripted {
-        gate: Arc<ProviderGate>,
-        clock: Arc<dyn Clock>,
-        calls: Arc<AtomicU32>,
+impl ObservationSource for Scripted {
+    fn provider(&self) -> &ProviderId {
+        self.gate.provider()
     }
-    impl ObservationSource for Scripted {
-        fn provider(&self) -> &ProviderId {
-            self.gate.provider()
-        }
-        fn gate(&self) -> &Arc<ProviderGate> {
-            &self.gate
-        }
-        fn fetch<'a>(
-            &'a self,
-            station: &'a StationId,
-            _w: Duration,
-        ) -> BoxFuture<'a, Result<SourceFetch, SourceError>> {
-            Box::pin(async move {
-                let permit = self
-                    .gate
-                    .try_acquire()
-                    .map_err(|w| SourceError::Fetch(wm_net::FetchError::GateClosed(w)))?;
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let now = self.clock.now();
-                // Newest report published 3 minutes after nominal time.
-                let cadence = CadenceModel::eham();
-                let mut t = now - CDuration::hours(2);
-                while let Some(n) = cadence.next_report_after(t) {
-                    if n + CDuration::minutes(3) > now {
-                        break;
-                    }
-                    t = n;
+    fn gate(&self) -> &Arc<ProviderGate> {
+        &self.gate
+    }
+    fn fetch<'a>(
+        &'a self,
+        station: &'a StationId,
+        _w: Duration,
+    ) -> wm_core::ingest::BoxFuture<'a, Result<wm_weather::SourceFetch, wm_weather::SourceError>>
+    {
+        use wm_weather::{ParsedReport, SourceError, SourceFetch, metar};
+        Box::pin(async move {
+            let permit = self
+                .gate
+                .try_acquire()
+                .map_err(|w| SourceError::Fetch(wm_net::FetchError::GateClosed(w)))?;
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let now = self.clock.now();
+            let cadence = CadenceModel::eham();
+            let mut t = now - CDuration::hours(2);
+            while let Some(n) = cadence.next_report_after(t) {
+                if n + self.delay > now {
+                    break;
                 }
-                let raw = format!(
-                    "METAR EHAM {} 24012KT 9999 FEW030 18/12 Q1016",
-                    t.format("%d%H%MZ")
-                );
-                let m = metar::parse_metar(&raw).unwrap();
-                permit.complete(wm_net::RequestOutcome::Success { status: 200 });
-                let request = wm_core::ingest::ProviderRequestRecord {
-                    provider: self.provider().clone(),
-                    endpoint: "/scripted".into(),
-                    station: Some(station.clone()),
-                    requested_at: now,
-                    completed_at: now,
-                    status: Some(200),
-                    latency_ms: 1,
-                    bytes: raw.len() as u64,
-                    cache: wm_core::ingest::CacheOutcome::Miss,
-                    retry_count: 0,
-                    throttled: false,
-                    error_class: None,
-                    gate_wait_ms: 0,
-                    payload_sha256: None,
-                };
-                let rawrec = wm_weather::source::raw_record(
-                    self.provider(),
-                    station,
-                    "/scripted",
-                    now,
-                    200,
-                    None,
-                    raw.as_bytes(),
-                );
-                Ok(SourceFetch {
-                    reports: vec![ParsedReport {
-                        station: station.clone(),
-                        observed_at: t,
-                        report_type: m.report_type,
-                        raw_text: raw.clone(),
-                        metar: Some(m),
-                        provider_temp_tenths: None,
-                        provider_receipt_at: None,
-                    }],
-                    raw: rawrec,
-                    request,
-                    cache: wm_core::ingest::CacheOutcome::Miss,
-                    warnings: vec![],
-                })
+                t = n;
+            }
+            let raw = format!(
+                "METAR EHAM {} 24012KT 9999 FEW030 18/12 Q1016",
+                t.format("%d%H%MZ")
+            );
+            let m = metar::parse_metar(&raw).unwrap();
+            permit.complete(wm_net::RequestOutcome::Success { status: 200 });
+            let request = wm_core::ingest::ProviderRequestRecord {
+                provider: self.provider().clone(),
+                endpoint: "/scripted".into(),
+                station: Some(station.clone()),
+                requested_at: now,
+                completed_at: now,
+                status: Some(200),
+                latency_ms: 1,
+                bytes: raw.len() as u64,
+                cache: wm_core::ingest::CacheOutcome::Miss,
+                retry_count: 0,
+                throttled: false,
+                error_class: None,
+                gate_wait_ms: 0,
+                payload_sha256: None,
+            };
+            let rawrec = wm_weather::source::raw_record(
+                self.provider(),
+                station,
+                "/scripted",
+                now,
+                200,
+                None,
+                raw.as_bytes(),
+            );
+            Ok(SourceFetch {
+                reports: vec![ParsedReport {
+                    station: station.clone(),
+                    observed_at: t,
+                    report_type: m.report_type,
+                    raw_text: raw.clone(),
+                    metar: Some(m),
+                    provider_temp_tenths: None,
+                    provider_receipt_at: None,
+                }],
+                raw: rawrec,
+                request,
+                cache: wm_core::ingest::CacheOutcome::Miss,
+                warnings: vec![],
             })
-        }
+        })
     }
+}
 
-    let clock: Arc<dyn Clock> = Arc::new(wm_net::TokioClock::new(utc("2026-09-26T08:00:00Z")));
-    let gate = ProviderGate::new(
-        ProviderId::awc(),
-        RateLimitPolicy::nws_conservative(),
-        Arc::clone(&clock),
-        5,
-    );
-    let calls = Arc::new(AtomicU32::new(0));
-    let source: Arc<dyn ObservationSource> = Arc::new(Scripted {
+/// A scripted source behind a production-like NOAA gate with `min_interval`.
+fn scripted(
+    provider: ProviderId,
+    clock: &Arc<dyn Clock>,
+    delay: CDuration,
+    min_interval: Duration,
+) -> (
+    Arc<dyn ObservationSource>,
+    Arc<std::sync::atomic::AtomicU32>,
+) {
+    let mut policy = RateLimitPolicy::nws_conservative();
+    policy.min_interval = min_interval;
+    let gate = ProviderGate::new(provider, policy, Arc::clone(clock), 5);
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let source = Arc::new(Scripted {
         gate,
-        clock: Arc::clone(&clock),
+        clock: Arc::clone(clock),
         calls: Arc::clone(&calls),
+        delay,
     });
+    (source, calls)
+}
+
+/// Run the real collector loop in peak mode for `hours` virtual hours from
+/// 08:00 UTC and return the new observations it emitted.
+async fn run_peak_hours(
+    clock: &Arc<dyn Clock>,
+    sources: Vec<Arc<dyn ObservationSource>>,
+    params: PollingParams,
+    hours: u64,
+) -> Vec<wm_core::weather::Observation> {
     let registry = CollectorRegistry::new();
     let (tx, mut rx) = mpsc::channel(4096);
     let (_hints_tx, hints_rx) = watch::channel(PollingHints {
@@ -829,38 +923,169 @@ async fn run_loop_request_budget_over_six_virtual_hours() {
         station: eham(),
         location: LocationId::new("amsterdam").unwrap(),
         timezone: chrono_tz::Europe::Amsterdam,
-        policy: PollingPolicy::new(CadenceModel::eham(), PollingParams::default()),
+        policy: PollingPolicy::new(CadenceModel::eham(), params),
         health: HealthConfig::default(),
         max_gate_wait: Duration::ZERO,
     };
     let collector = StationCollector::new(
         registry.claim(&eham()).unwrap(),
         cfg,
-        vec![source],
+        sources,
         Arc::new(MemoryIngestSink::new()),
         tx,
         hints_rx,
-        Arc::clone(&clock),
+        Arc::clone(clock),
     );
     let (stop_tx, stop_rx) = watch::channel(false);
     let handle = tokio::spawn(collector.run(stop_rx));
-    tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+    tokio::time::sleep(Duration::from_secs(hours * 3600)).await;
     stop_tx.send(true).unwrap();
     handle.await.unwrap();
-    let n = calls.load(Ordering::SeqCst);
-    // 12 routine reports; peak mode: ≤ ~5 polls/window + slow background.
-    assert!(n >= 12, "too few polls: {n}");
-    assert!(n <= 120, "too many polls for 6 hours: {n}");
-    let mut new_obs = 0;
+    let mut new_obs = Vec::new();
     while let Ok(e) = rx.try_recv() {
         if let WeatherMachineEvent::WeatherObservation(o) = e.event
             && o.class == DedupClass::New
         {
-            new_obs += 1;
+            new_obs.push(o.observation);
         }
     }
-    assert!(
-        (11..=13).contains(&new_obs),
-        "each routine report emitted once, got {new_obs}"
+    new_obs
+}
+
+fn paused_clock() -> Arc<dyn Clock> {
+    Arc::new(wm_net::TokioClock::new(utc("2026-09-26T08:00:00Z")))
+}
+
+/// Every routine report from 08:25 to 13:25 was emitted, and none twice.
+fn assert_each_report_once(new_obs: &[wm_core::weather::Observation]) {
+    let mut times: Vec<_> = new_obs.iter().map(|o| o.key.observed_at).collect();
+    times.sort();
+    let n = times.len();
+    times.dedup();
+    assert_eq!(times.len(), n, "a report was emitted twice: {times:?}");
+    let mut t = utc("2026-09-26T08:25:00Z");
+    while t <= utc("2026-09-26T13:25:00Z") {
+        assert!(times.contains(&t), "report {t} missing from {times:?}");
+        t += CDuration::minutes(30);
+    }
+}
+
+/// Run the real collector loop for six virtual hours against a scripted source
+/// and verify the request count stays within the polite budget.
+#[tokio::test(start_paused = true)]
+async fn run_loop_request_budget_over_six_virtual_hours() {
+    let clock = paused_clock();
+    let (source, calls) = scripted(
+        ProviderId::awc(),
+        &clock,
+        CDuration::minutes(3),
+        Duration::from_secs(30),
     );
+    let new_obs = run_peak_hours(&clock, vec![source], PollingParams::default(), 6).await;
+    let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+    // 12 routine reports; peak mode: ≤ ~5 polls/window + slow background.
+    assert!(n >= 12, "too few polls: {n}");
+    assert!(n <= 120, "too many polls for 6 hours: {n}");
+    assert_each_report_once(&new_obs);
+}
+
+/// The primary publishes each report 6 minutes late, the standby after 2: the
+/// standby is asked while the report is missing and delivers it first, as a
+/// regular (not failover) observation, without moving the primary's schedule.
+#[tokio::test(start_paused = true)]
+async fn standby_delivers_the_report_when_it_publishes_first() {
+    let clock = paused_clock();
+    let (awc, awc_calls) = scripted(
+        ProviderId::awc(),
+        &clock,
+        CDuration::minutes(6),
+        Duration::from_secs(30),
+    );
+    let (tg, tg_calls) = scripted(
+        ProviderId::tgftp(),
+        &clock,
+        CDuration::minutes(2),
+        Duration::from_secs(60),
+    );
+    let new_obs = run_peak_hours(&clock, vec![awc, tg], PollingParams::default(), 6).await;
+    assert_each_report_once(&new_obs);
+    let first_by_tgftp: Vec<_> = new_obs
+        .iter()
+        .filter(|o| o.provider == ProviderId::tgftp())
+        .collect();
+    assert!(
+        first_by_tgftp.len() >= new_obs.len() - 1,
+        "the faster standby should deliver nearly every report first: {} of {}",
+        first_by_tgftp.len(),
+        new_obs.len()
+    );
+    for o in &first_by_tgftp {
+        assert!(!o.quality.from_failover, "a standby poll is not a failover");
+        // Reports issued before the loop started (08:00) are start-up catch-up.
+        let delay = o.fetched_at - o.key.observed_at;
+        assert!(
+            o.key.observed_at < utc("2026-09-26T08:00:00Z") || delay <= CDuration::minutes(3),
+            "{} seen {delay} after the observation",
+            o.key.observed_at
+        );
+    }
+    let (a, t) = (
+        awc_calls.load(std::sync::atomic::Ordering::SeqCst),
+        tg_calls.load(std::sync::atomic::Ordering::SeqCst),
+    );
+    // Once the standby has delivered, the window is over for the primary too.
+    assert!(a <= 120, "primary polls {a}");
+    // The standby's own 60 s gate bounds it: at most ~2 asks per window.
+    assert!((12..=40).contains(&t), "standby polls {t}");
+}
+
+/// Both sources publish 3 minutes after the nominal time: the primary delivers
+/// every report and the standby is asked only while the report is missing.
+#[tokio::test(start_paused = true)]
+async fn standby_is_asked_only_while_the_report_is_missing() {
+    let clock = paused_clock();
+    let (awc, _) = scripted(
+        ProviderId::awc(),
+        &clock,
+        CDuration::minutes(3),
+        Duration::from_secs(30),
+    );
+    let (tg, tg_calls) = scripted(
+        ProviderId::tgftp(),
+        &clock,
+        CDuration::minutes(3),
+        Duration::from_secs(60),
+    );
+    let new_obs = run_peak_hours(&clock, vec![awc, tg], PollingParams::default(), 6).await;
+    assert_each_report_once(&new_obs);
+    assert!(
+        new_obs.iter().all(|o| o.provider == ProviderId::awc()),
+        "the primary polls first and wins ties"
+    );
+    let t = tg_calls.load(std::sync::atomic::Ordering::SeqCst);
+    // Misses at +90 s and +150 s per window (its gate skips +120 s); none once
+    // the report is in, none between windows.
+    assert!((12..=30).contains(&t), "standby polls {t}");
+
+    // Switched off, the standby is never asked while the primary is healthy.
+    let clock = paused_clock();
+    let (awc, _) = scripted(
+        ProviderId::awc(),
+        &clock,
+        CDuration::minutes(3),
+        Duration::from_secs(30),
+    );
+    let (tg, tg_calls) = scripted(
+        ProviderId::tgftp(),
+        &clock,
+        CDuration::minutes(3),
+        Duration::from_secs(60),
+    );
+    let params = PollingParams {
+        poll_standby_in_window: false,
+        ..PollingParams::default()
+    };
+    let new_obs = run_peak_hours(&clock, vec![awc, tg], params, 6).await;
+    assert_each_report_once(&new_obs);
+    assert_eq!(tg_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

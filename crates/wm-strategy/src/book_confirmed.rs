@@ -136,11 +136,11 @@ impl BookSample {
 
     /// Shares offered at or below `x`.
     pub fn depth_upto(&self, x: Price) -> f64 {
+        // Folded from +0.0: an empty f64 `sum()` is −0.0, which prints "-0".
         self.asks
             .iter()
             .filter(|(p, _)| *p <= x)
-            .map(|(_, s)| s)
-            .sum()
+            .fold(0.0, |total, (_, s)| total + s)
     }
 }
 
@@ -584,6 +584,12 @@ mod tests {
         let empty = BookSample::of(&book("2026-09-28T12:00:00Z", &[]), cap());
         assert_eq!((empty.top, empty.best_ask), (None, None));
         assert_eq!(empty.depth_upto(cap()), 0.0);
+        // Blocker texts print the depth: "only 0 shares", never "only -0".
+        assert_eq!(format!("{:.0}", empty.depth_upto(cap())), "0");
+        assert_eq!(
+            format!("{:.0}", s.depth_upto(Price::parse("0.90").unwrap())),
+            "0"
+        );
     }
 
     #[test]

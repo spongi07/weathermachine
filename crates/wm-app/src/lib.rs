@@ -12,6 +12,7 @@ pub mod healthcheck;
 pub mod http;
 pub mod lite;
 pub mod market_research;
+pub mod paper_report;
 pub mod runtime;
 pub mod setup;
 pub mod telemetry;

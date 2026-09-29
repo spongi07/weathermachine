@@ -32,6 +32,7 @@ fn fixture(admin: Option<&str>, basic: Option<(&str, &str)>) -> Fixture {
         ui_dir: None,
         ready: Arc::clone(&ready),
         liveness_max_age: Duration::from_secs(60),
+        paper_report: None,
     });
     Fixture {
         publisher,
@@ -153,6 +154,17 @@ async fn kill_switch_is_disabled_without_a_configured_token() {
 }
 
 #[tokio::test]
+async fn paper_report_needs_the_database_and_basic_auth() {
+    let f = fixture(None, None);
+    let (status, _, body) = call(&f.shared, get("/api/v1/report/paper")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("needs the database"), "{body}");
+    let f = fixture(None, Some(("op", "secret")));
+    let (status, ..) = call(&f.shared, get("/api/v1/report/paper")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn basic_auth_protects_everything_but_probes() {
     let mut f = fixture(None, Some(("ops", "pa55")));
     f.publisher.publish(DashboardSnapshot::default());
@@ -218,6 +230,7 @@ async fn probes_reflect_startup_and_engine_liveness() {
         ui_dir: None,
         ready: Arc::new(AtomicBool::new(true)),
         liveness_max_age: Duration::ZERO,
+        paper_report: None,
     });
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert_eq!(
