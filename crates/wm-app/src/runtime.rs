@@ -894,6 +894,11 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     }
 
     // -- Engine loop ---------------------------------------------------------------------
+    // The strategy pages: the catalog, and strategy F's slots from the
+    // installed model's peak times (updated when a new model is installed).
+    let strategy_catalog = crate::strategies::catalog(&cfg);
+    let peak_slot_cfg = cfg.peak_slot();
+    let mut peak_times = model.peak_times().cloned();
     let mut session =
         SimulationSession::new(engine_cfg, SimConfig::default(), Duration::hours(2), model)
             .with_event_capture(true);
@@ -969,6 +974,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                     let previous = session.engine().model_id().to_owned();
                     session.engine_mut().set_model(Arc::clone(&m) as Arc<dyn ProbabilityModel>);
                     set_loaded(&model_status, &m);
+                    peak_times = m.peak_times.clone();
                     tracing::info!(previous = %previous, model = %m.id, "probability model installed");
                     if let Some(s) = store.clone() {
                         let details = serde_json::json!({
@@ -1032,6 +1038,9 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 model: &model_now,
                 yes_pooling: cfg.buy_yes().pooling(),
                 no_pooling: cfg.buy_no().pooling(),
+                strategies: &strategy_catalog,
+                peak_slot: &peak_slot_cfg,
+                peak_times: peak_times.as_ref(),
             };
             publisher.publish(dto::build(&snap, &inputs, now));
         }

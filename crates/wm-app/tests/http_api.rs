@@ -33,6 +33,7 @@ fn fixture(admin: Option<&str>, basic: Option<(&str, &str)>) -> Fixture {
         ready: Arc::clone(&ready),
         liveness_max_age: Duration::from_secs(60),
         paper_report: None,
+        research: Vec::new(),
     });
     Fixture {
         publisher,
@@ -231,6 +232,7 @@ async fn probes_reflect_startup_and_engine_liveness() {
         ready: Arc::new(AtomicBool::new(true)),
         liveness_max_age: Duration::ZERO,
         paper_report: None,
+        research: Vec::new(),
     });
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert_eq!(
@@ -283,4 +285,152 @@ async fn sse_stream_delivers_snapshots() {
         .unwrap()
         .unwrap();
     assert!(String::from_utf8_lossy(&next).contains("\"instance\":\"second\""));
+}
+
+fn strategies() -> Vec<wm_dashboard_api::StrategyDto> {
+    vec![
+        wm_dashboard_api::StrategyDto {
+            id: "E_book_confirmed_high".into(),
+            letter: "E".into(),
+            name: "Book-confirmed high".into(),
+            enabled: true,
+            summary: "E's summary.".into(),
+            ..Default::default()
+        },
+        wm_dashboard_api::StrategyDto {
+            id: "F_peak_slot".into(),
+            letter: "F".into(),
+            name: "Peak slot".into(),
+            enabled: true,
+            summary: "F's summary.".into(),
+            settings: vec![("shares".into(), "100".into())],
+            ..Default::default()
+        },
+    ]
+}
+
+#[tokio::test]
+async fn each_strategy_has_a_log_to_read_or_download() {
+    let mut f = fixture(None, Some(("ops", "pw")));
+    f.publisher.publish(DashboardSnapshot {
+        engine_time_ms: 1_790_762_400_000, // 2026-09-30 06:40 UTC
+        strategies: strategies(),
+        ..Default::default()
+    });
+    // Behind Basic auth like the rest of the dashboard.
+    let (status, _, _) = call(&f.shared, get("/api/v1/strategies/F/log")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let authed = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Basic b3BzOnB3")
+            .body(Body::empty())
+            .unwrap()
+    };
+    // By letter or id, any case.
+    for uri in [
+        "/api/v1/strategies/F/log",
+        "/api/v1/strategies/f_peak_slot/log",
+    ] {
+        let (status, headers, body) = call(&f.shared, authed(uri)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert!(headers.get(header::CONTENT_DISPOSITION).is_none());
+        assert!(
+            body.starts_with("# Strategy F — Peak slot (`F_peak_slot`)"),
+            "{body}"
+        );
+        assert!(body.contains("| shares | 100 |"), "{body}");
+        assert!(body.contains("No database"), "{body}");
+        assert!(!body.contains("E's summary"), "{body}");
+    }
+    // As a file to save.
+    let (status, headers, _) = call(&f.shared, authed("/api/v1/strategies/E/log?download=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment; filename=\"strategy-E-2026-09-30.md\""
+    );
+    // Unknown strategies name the known ones.
+    let (status, _, body) = call(&f.shared, authed("/api/v1/strategies/Z/log")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body.contains("known: E_book_confirmed_high, F_peak_slot"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn research_reports_are_listed_and_served_by_name_only() {
+    let dir = std::env::temp_dir().join(format!(
+        "wm-research-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join("research")).unwrap();
+    std::fs::write(
+        dir.join("research").join("eham-market.md"),
+        "# Model versus market — EHAM\n\n* Strategy F out of sample: …\n",
+    )
+    .unwrap();
+    let (publisher, snapshots) = Publisher::new();
+    let (tx, _rx) = mpsc::channel(1);
+    let shared = Arc::new(Shared {
+        snapshots,
+        commands: tx,
+        admin_token: None,
+        basic_auth: None,
+        prometheus: None,
+        ui_dir: None,
+        ready: Arc::new(AtomicBool::new(true)),
+        liveness_max_age: Duration::from_secs(60),
+        paper_report: None,
+        research: wm_app::http::ResearchFile::defaults(&dir, "EHAM"),
+    });
+    let (status, _, body) = call(&shared, get("/api/v1/research")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list: Vec<wm_dashboard_api::ResearchReportDto> = serde_json::from_str(&body).unwrap();
+    let names: Vec<(&str, bool)> = list
+        .iter()
+        .map(|r| (r.name.as_str(), r.available))
+        .collect();
+    assert_eq!(names, [("market", true), ("training", false)]);
+    assert!(list[0].bytes > 0 && list[0].modified_ms.is_some());
+    assert!(list[0].how.contains("research market"));
+    let (status, headers, body) = call(&shared, get("/api/v1/research/market")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    assert!(body.contains("Strategy F out of sample"));
+    let (_, headers, _) = call(&shared, get("/api/v1/research/market?download")).await;
+    assert_eq!(
+        headers.get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment; filename=\"eham-market.md\""
+    );
+    // Not produced yet: says how.
+    let (status, _, body) = call(&shared, get("/api/v1/research/training")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body.contains("does not exist yet") && body.contains("model training"),
+        "{body}"
+    );
+    // Only the configured names, never a path.
+    for uri in [
+        "/api/v1/research/secrets",
+        "/api/v1/research/..%2F..%2Fetc%2Fpasswd",
+        "/api/v1/research/eham-market.md",
+    ] {
+        let (status, _, _) = call(&shared, get(uri)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+    }
+    drop(publisher);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -45,6 +45,167 @@ pub struct DashboardSnapshot {
     pub decisions: Vec<DecisionDto>,
     pub alerts: Vec<AlertDto>,
     pub break_even: Vec<BreakEvenDto>,
+    /// Every strategy of the engine, for its page.
+    #[serde(default)]
+    pub strategies: Vec<StrategyDto>,
+}
+
+impl DashboardSnapshot {
+    /// A strategy's one-line status for its card: `(class, text)` — a
+    /// signal, else strategy F's slot and the blocker on the high's bucket.
+    pub fn strategy_status(&self, s: &StrategyDto) -> (&'static str, String) {
+        if !s.enabled {
+            return ("muted", "disabled".to_owned());
+        }
+        let evals: Vec<(&LocationDto, &EvaluationDto)> = self
+            .locations
+            .iter()
+            .flat_map(|l| l.evaluations.iter().map(move |e| (l, e)))
+            .filter(|(_, e)| e.strategy == s.id)
+            .collect();
+        if let Some((_, e)) = evals.iter().find(|(_, e)| e.signal) {
+            return ("good", format!("SIGNAL {} {}", e.bucket, e.side));
+        }
+        let slot = s
+            .peak_slot
+            .as_ref()
+            .and_then(|p| p.today.first())
+            .map(|t| format!("{} slot {}–{}: {}", t.season, t.start, t.end, t.status));
+        // The high's bucket first: that is where a trade would come from.
+        let on_high = evals.iter().find(|(l, e)| {
+            l.market.as_ref().is_some_and(|m| {
+                m.rows
+                    .iter()
+                    .any(|r| r.contains_high && r.label == e.bucket)
+            })
+        });
+        let blocker = on_high.or(evals.first()).and_then(|(_, e)| {
+            e.blockers
+                .first()
+                .map(|b| format!("{} {}: {b}", e.bucket, e.side))
+        });
+        match (slot, blocker) {
+            (Some(slot), Some(b)) => ("", format!("{slot} · {b}")),
+            (Some(slot), None) => ("", slot),
+            (None, Some(b)) => ("", b),
+            (None, None) => (
+                "muted",
+                "no evaluation yet (no market, model or report)".to_owned(),
+            ),
+        }
+    }
+
+    /// A strategy's counts in this run: (proposals approved, rejected,
+    /// orders, orders with a fill).
+    pub fn strategy_counts(&self, s: &StrategyDto) -> (usize, usize, usize, usize) {
+        let mine = self.decisions.iter().filter(|d| d.strategy == s.id);
+        let approved = mine.clone().filter(|d| d.approved).count();
+        let rejected = mine.filter(|d| !d.approved).count();
+        let orders: Vec<&OrderDto> = self.orders.iter().filter(|o| o.strategy == s.id).collect();
+        let filled = orders.iter().filter(|o| o.filled > 0.0).count();
+        (approved, rejected, orders.len(), filled)
+    }
+}
+
+/// One strategy: what it does, whether it runs and how it is configured.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StrategyDto {
+    /// Engine id, e.g. `F_peak_slot` (orders and decisions carry it).
+    pub id: String,
+    /// The letter evaluation lines start with, e.g. `F`.
+    pub letter: String,
+    pub name: String,
+    pub enabled: bool,
+    /// What it does, in a sentence or two.
+    pub summary: String,
+    /// The configured settings, keys as in the configuration file.
+    pub settings: Vec<(String, String)>,
+    /// Strategy F: its time slots.
+    #[serde(default)]
+    pub peak_slot: Option<PeakSlotDto>,
+}
+
+impl StrategyDto {
+    /// Does an evaluation line (`"F 21°C YES · …"`) belong to this strategy?
+    pub fn owns_line(&self, line: &str) -> bool {
+        line.split_once(' ')
+            .is_some_and(|(tag, _)| tag == self.letter)
+    }
+}
+
+/// Strategy F's time slots per season.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PeakSlotDto {
+    /// Where the slots come from (the model's peak times or the fallback).
+    pub source: String,
+    /// Today, per location.
+    pub today: Vec<SlotTodayDto>,
+    pub seasons: Vec<SeasonSlotDto>,
+}
+
+/// Today's slot of one location and where its local time stands.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SlotTodayDto {
+    pub location: String,
+    pub season: String,
+    pub local_time: String,
+    /// `HH:MM`, end exclusive.
+    pub start: String,
+    pub end: String,
+    pub inside: bool,
+    /// e.g. "before the slot: it starts in 2 h 13 min".
+    pub status: String,
+}
+
+/// One season's slot and the peak times behind it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SeasonSlotDto {
+    pub season: String,
+    pub start: String,
+    pub end: String,
+    /// Days of history behind it (0: the fallback slot).
+    pub days: u32,
+    /// Local time the day's high was first reported: mean, median, 90 %.
+    pub mean: Option<String>,
+    pub median: Option<String>,
+    pub q90: Option<String>,
+    /// Share of days whose high was first reported after the slot.
+    pub later_than_slot: Option<f64>,
+}
+
+/// One strategy's latest evaluation of one bucket.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvaluationDto {
+    /// Engine id of the strategy.
+    pub strategy: String,
+    pub bucket: String,
+    /// `YES` or `NO`.
+    pub side: String,
+    pub ask: Option<f64>,
+    pub bid: Option<f64>,
+    /// The probability the strategy uses (model pooled with the market).
+    pub p_win: Option<f64>,
+    pub model_p: Option<f64>,
+    pub market_p: Option<f64>,
+    /// Per share after fee and slippage allowance.
+    pub ev: Option<f64>,
+    pub break_even: Option<f64>,
+    pub signal: bool,
+    /// Everything that blocks it (empty on a signal).
+    pub blockers: Vec<String>,
+}
+
+/// A research report saved on the data volume (`/api/v1/research`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResearchReportDto {
+    /// Path segment: `/api/v1/research/{name}`.
+    pub name: String,
+    pub title: String,
+    pub available: bool,
+    pub bytes: u64,
+    pub modified_ms: Option<i64>,
+    /// How to produce or refresh it.
+    pub how: String,
 }
 
 /// Probability model status.
@@ -253,6 +414,9 @@ pub struct LocationDto {
     pub market: Option<MarketDto>,
     #[serde(default)]
     pub forecast: Option<ForecastDto>,
+    /// Every strategy's latest evaluation of today's buckets.
+    #[serde(default)]
+    pub evaluations: Vec<EvaluationDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -383,6 +547,147 @@ pub struct KillSwitchRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluation_lines_belong_to_the_strategy_of_their_letter() {
+        let f = StrategyDto {
+            id: "F_peak_slot".into(),
+            letter: "F".into(),
+            ..Default::default()
+        };
+        assert!(f.owns_line("F 21°C YES · ask 0.93 — SIGNAL"));
+        assert!(!f.owns_line("E 21°C YES · ask 0.93 — SIGNAL"));
+        assert!(!f.owns_line("FF 21°C YES"));
+        assert!(!f.owns_line("F"));
+    }
+
+    #[test]
+    fn a_snapshot_without_the_new_fields_still_decodes() {
+        let old = r#"{"api_version":1,"generated_at_ms":0,"engine_time_ms":0,"mode":"paper","demo":false,"version":"0","instance":"i","run_id":"r","model_id":"m","kill_switch":null,"storage_ok":true,"execution_ok":true,"live_trading_enabled":false,"engine":{"events_total":0,"evaluations_total":0,"proposals_total":0,"approvals_total":0,"rejections_total":0,"fills_total":0,"last_handle_micros":0,"max_handle_micros":0,"last_seq":0,"events_by_kind":[]},"locations":[],"providers":[],"market_stream":null,"risk":{"position_size_usd":10.0,"global_worst_case_usd":0.0,"global_limit_usd":100.0,"capital_deployed_usd":0.0,"daily_new_exposure_usd":0.0,"daily_new_limit_usd":null,"daily_realized_pnl_usd":0.0,"daily_loss_limit_usd":null,"realized_pnl_total_usd":0.0,"max_price":0.99,"max_spread":0.05,"max_weather_age_min":40,"per_event":[],"checks":[]},"positions":[],"orders":[],"decisions":[],"alerts":[],"break_even":[]}"#;
+        let s: DashboardSnapshot = serde_json::from_str(old).unwrap();
+        assert!(s.strategies.is_empty());
+    }
+
+    fn f() -> StrategyDto {
+        StrategyDto {
+            id: "F_peak_slot".into(),
+            letter: "F".into(),
+            name: "Peak slot".into(),
+            enabled: true,
+            peak_slot: Some(PeakSlotDto {
+                today: vec![SlotTodayDto {
+                    location: "amsterdam".into(),
+                    season: "autumn".into(),
+                    start: "13:25".into(),
+                    end: "15:26".into(),
+                    status: "before the slot: it starts in 2 h".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn with_evals(evals: Vec<EvaluationDto>) -> DashboardSnapshot {
+        DashboardSnapshot {
+            locations: vec![LocationDto {
+                market: Some(MarketDto {
+                    rows: vec![
+                        LadderRowDto {
+                            label: "19°C".into(),
+                            contains_high: true,
+                            ..Default::default()
+                        },
+                        LadderRowDto {
+                            label: "20°C".into(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                evaluations: evals,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn eval(strategy: &str, bucket: &str, signal: bool, blocker: &str) -> EvaluationDto {
+        EvaluationDto {
+            strategy: strategy.into(),
+            bucket: bucket.into(),
+            side: "YES".into(),
+            signal,
+            blockers: if signal { vec![] } else { vec![blocker.into()] },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_status_shows_a_signal_then_the_slot_and_the_high_buckets_blocker() {
+        let s = with_evals(vec![
+            eval("F_peak_slot", "20°C", false, "ask 0.30 not above 0.90"),
+            eval(
+                "F_peak_slot",
+                "19°C",
+                false,
+                "08:42 outside the autumn slot 13:25–15:26",
+            ),
+            eval("E_book_confirmed_high", "19°C", true, ""),
+        ]);
+        assert_eq!(
+            s.strategy_status(&f()),
+            (
+                "",
+                "autumn slot 13:25–15:26: before the slot: it starts in 2 h · 19°C YES: 08:42 outside the autumn slot 13:25–15:26".to_owned()
+            )
+        );
+        let signal = with_evals(vec![eval("F_peak_slot", "19°C", true, "")]);
+        assert_eq!(
+            signal.strategy_status(&f()),
+            ("good", "SIGNAL 19°C YES".to_owned())
+        );
+        let mut off = f();
+        off.enabled = false;
+        assert_eq!(s.strategy_status(&off).1, "disabled");
+        let mut e = f();
+        e.peak_slot = None;
+        assert_eq!(with_evals(vec![]).strategy_status(&e).0, "muted");
+    }
+
+    #[test]
+    fn strategy_counts_are_its_own() {
+        let mut s = with_evals(vec![]);
+        s.decisions = vec![
+            DecisionDto {
+                strategy: "F_peak_slot".into(),
+                approved: true,
+                ..Default::default()
+            },
+            DecisionDto {
+                strategy: "F_peak_slot".into(),
+                ..Default::default()
+            },
+            DecisionDto {
+                strategy: "evaluation".into(),
+                ..Default::default()
+            },
+        ];
+        s.orders = vec![
+            OrderDto {
+                strategy: "F_peak_slot".into(),
+                filled: 100.0,
+                ..Default::default()
+            },
+            OrderDto {
+                strategy: "E_book_confirmed_high".into(),
+                filled: 5.0,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(s.strategy_counts(&f()), (1, 1, 1, 1));
+    }
 
     #[test]
     fn snapshot_roundtrips_as_json() {

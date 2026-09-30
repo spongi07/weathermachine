@@ -31,6 +31,28 @@ pub struct DtoInputs<'a> {
     /// How strategies A (YES) and B (NO) pool the model with the market.
     pub yes_pooling: Pooling,
     pub no_pooling: Pooling,
+    /// Every strategy ([`crate::strategies::catalog`]).
+    pub strategies: &'a [StrategyDto],
+    /// Strategy F's settings and the installed model's peak times.
+    pub peak_slot: &'a wm_strategy::PeakSlotConfig,
+    pub peak_times: Option<&'a wm_strategy::PeakTimes>,
+}
+
+fn evaluation_dto(e: &wm_strategy::BucketEvaluation) -> EvaluationDto {
+    EvaluationDto {
+        strategy: e.strategy.to_string(),
+        bucket: e.bucket_label.clone(),
+        side: e.outcome_side.as_str().to_owned(),
+        ask: e.ask.map(|p| p.as_f64()),
+        bid: e.bid.map(|p| p.as_f64()),
+        p_win: e.p_win,
+        model_p: e.model_p,
+        market_p: e.market_p,
+        ev: e.ev_per_share,
+        break_even: e.break_even,
+        signal: e.signal,
+        blockers: e.blockers.clone(),
+    }
 }
 
 /// The per-bucket lines of a routine evaluation (`outputs.evaluations`).
@@ -421,6 +443,7 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                     .collect()
             },
         }),
+        evaluations: l.evaluations.iter().map(evaluation_dto).collect(),
     }
 }
 
@@ -638,6 +661,36 @@ pub fn build(
         checks,
     };
     let fee = wm_core::market::FeeSchedule::taker(50_000);
+    let strategies = inp
+        .strategies
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            if s.id == crate::strategies::PEAK_SLOT_ID {
+                let places: Vec<crate::strategies::SlotLocation<'_>> = snap
+                    .locations
+                    .iter()
+                    .zip(&locations)
+                    .map(|(l, d)| crate::strategies::SlotLocation {
+                        location: d.location.as_str(),
+                        tz: l.timezone.parse().unwrap_or(chrono_tz::UTC),
+                        season: d
+                            .views
+                            .iter()
+                            .find_map(|v| v.season.as_deref())
+                            .and_then(crate::strategies::season_from_name),
+                    })
+                    .collect();
+                s.peak_slot = Some(crate::strategies::peak_slot(
+                    inp.peak_slot,
+                    inp.peak_times,
+                    &places,
+                    snap.now,
+                ));
+            }
+            s
+        })
+        .collect();
     DashboardSnapshot {
         api_version: API_VERSION,
         generated_at_ms: ms(generated_at),
@@ -694,6 +747,7 @@ pub fn build(
                 wins_to_recover_one_loss: r.wins_to_recover_one_loss,
             })
             .collect(),
+        strategies,
     }
 }
 

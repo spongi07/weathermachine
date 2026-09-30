@@ -59,8 +59,13 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
 * **Shows it all.** A dashboard with live SSE updates shows the intraday
   chart, peak state and model distribution, market ladder (implied vs model,
   edge, EV, break-even), gates, provider rate limits, blotter, decision audit
-  log and kernel latency. A zero-JS `/lite` view, JSON API and Prometheus
-  metrics are also served.
+  log and kernel latency. Every strategy has its own page (`#/strategy/F`):
+  its settings, strategy F's time slot, its live evaluation of every bucket,
+  this run's proposals, orders and evaluation trail, and a **Copy log**
+  button that copies all of it plus its last days from the database, ready
+  to paste into a chat. A *Reports to paste* panel copies the replay at
+  traded prices, the training report and the paper-run report the same way.
+  A zero-JS `/lite` view, JSON API and Prometheus metrics are also served.
 
 ## Quick start
 

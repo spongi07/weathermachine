@@ -147,6 +147,12 @@ impl ReportService {
         }
     }
 
+    /// The report the dashboard links to: from the service's first day to
+    /// today, at most [`ReportService::MAX_DAYS`] days.
+    pub async fn latest(&self) -> Result<Arc<PaperReport>> {
+        self.report(None, None).await
+    }
+
     pub async fn report(
         &self,
         from: Option<NaiveDate>,
@@ -262,6 +268,9 @@ pub struct DayReport {
     /// Paper P&L of this day's market, settled at the METAR high (`None`:
     /// nothing traded, or the day is still open).
     pub pnl_usd: Option<f64>,
+    /// The same per strategy (engine id; fills of orders placed before the
+    /// report's first day count as `?`).
+    pub strategy_pnl: BTreeMap<String, f64>,
     pub providers: Vec<ProviderDay>,
     pub health_changes: Vec<String>,
     pub events: Vec<EventCount>,
@@ -459,6 +468,8 @@ pub struct Totals {
     pub fills: usize,
     /// Settled paper P&L (days that are over).
     pub pnl_usd: f64,
+    /// The same per strategy.
+    pub pnl_by_strategy: BTreeMap<String, f64>,
     pub forecast_days: usize,
     pub forecast_mean_error_c: Option<f64>,
     pub forecast_mean_abs_error_c: Option<f64>,
@@ -485,10 +496,13 @@ pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) 
         .into_iter()
         .collect();
     let pnl = settle(&inputs.fills, &tokens, &highs, today);
+    let by_strategy = settle_by_strategy(&inputs.fills, &inputs.orders, &tokens, &highs, today);
     let mut days = Vec::new();
     let mut date = plan.from;
     while date <= plan.to {
-        days.push(build_day(inputs, plan, date, date >= today, &tokens, &pnl));
+        let mut day = build_day(inputs, plan, date, date >= today, &tokens, &pnl);
+        day.strategy_pnl = by_strategy.get(&date).cloned().unwrap_or_default();
+        days.push(day);
         match date.succ_opt() {
             Some(d) => date = d,
             None => break,
@@ -619,6 +633,37 @@ fn settle(
         };
         let payout = if info.wins(high) { shares } else { 0.0 };
         *out.entry(info.date).or_insert(0.0) += cash + payout;
+    }
+    out
+}
+
+/// [`settle`] per strategy: each fill counts for its order's strategy.
+fn settle_by_strategy(
+    fills: &[ReportFill],
+    orders: &[ReportOrder],
+    tokens: &HashMap<String, TokenInfo>,
+    highs: &HashMap<NaiveDate, i32>,
+    today: NaiveDate,
+) -> HashMap<NaiveDate, BTreeMap<String, f64>> {
+    let strategy_of: HashMap<&str, &str> = orders
+        .iter()
+        .map(|o| (o.client_order_id.as_str(), o.strategy.as_str()))
+        .collect();
+    let mut groups: BTreeMap<&str, Vec<ReportFill>> = BTreeMap::new();
+    for f in fills {
+        let s = strategy_of
+            .get(f.client_order_id.as_str())
+            .copied()
+            .unwrap_or("?");
+        groups.entry(s).or_default().push(f.clone());
+    }
+    let mut out: HashMap<NaiveDate, BTreeMap<String, f64>> = HashMap::new();
+    for (strategy, fills) in groups {
+        for (date, pnl) in settle(&fills, tokens, highs, today) {
+            out.entry(date)
+                .or_default()
+                .insert(strategy.to_owned(), pnl);
+        }
     }
     out
 }
@@ -779,6 +824,7 @@ fn build_day(
         orders,
         fills,
         pnl_usd: pnl.get(&date).copied(),
+        strategy_pnl: BTreeMap::new(),
         providers,
         health_changes,
         events: events.into_values().collect(),
@@ -1246,6 +1292,9 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
         t.orders += d.orders.len();
         t.fills += d.fills;
         t.pnl_usd += d.pnl_usd.unwrap_or(0.0);
+        for (k, v) in &d.strategy_pnl {
+            *t.pnl_by_strategy.entry(k.clone()).or_default() += v;
+        }
         if let Some(e) = d.forecast.as_ref().and_then(|f| f.error_c)
             && !d.in_progress
         {
@@ -1289,6 +1338,19 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
 // Markdown
 // ---------------------------------------------------------------------------
 
+/// `$+1.20 (A_buy_yes_final_high $+1.20)`: a total with its split per
+/// strategy, when there is one.
+fn with_split(total: String, split: &BTreeMap<String, f64>) -> String {
+    if split.is_empty() {
+        return total;
+    }
+    let parts: Vec<String> = split
+        .iter()
+        .map(|(k, v)| format!("{k} {}", usd(*v)))
+        .collect();
+    format!("{total} ({})", parts.join(", "))
+}
+
 fn cell(s: &str) -> String {
     s.replace('|', "/").replace('\n', " ")
 }
@@ -1297,7 +1359,7 @@ fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map_or_else(|| "–".to_owned(), |x| x.to_string())
 }
 
-fn p2(v: Option<f64>) -> String {
+pub(crate) fn p2(v: Option<f64>) -> String {
     v.map_or_else(|| "–".to_owned(), |x| format!("{x:.2}"))
 }
 
@@ -1305,7 +1367,7 @@ fn secs(v: Option<i64>) -> String {
     v.map_or_else(|| "–".to_owned(), |s| format!("{s} s"))
 }
 
-fn usd(v: f64) -> String {
+pub(crate) fn usd(v: f64) -> String {
     // Avoid "-0.00" for an exact break-even.
     let v = if v.abs() < 0.005 { 0.0 } else { v };
     if v < 0.0 {
@@ -1315,7 +1377,7 @@ fn usd(v: f64) -> String {
     }
 }
 
-fn call_text(c: &Call) -> String {
+pub(crate) fn call_text(c: &Call) -> String {
     let mut s = format!("{} {} {}", c.at, c.bucket, c.side);
     if let Some(a) = c.ask {
         let _ = write!(s, " · ask {a:.2}");
@@ -1387,7 +1449,7 @@ pub fn markdown(r: &PaperReport) -> String {
         t.approved,
         t.orders,
         t.fills,
-        usd(t.pnl_usd)
+        with_split(usd(t.pnl_usd), &t.pnl_by_strategy)
     );
     let _ = writeln!(
         s,
@@ -1725,7 +1787,7 @@ fn day_markdown(s: &mut String, d: &DayReport) {
         let _ = writeln!(
             s,
             "- **Settled paper P&L of this day's market:** {}",
-            usd(p)
+            with_split(usd(p), &d.strategy_pnl)
         );
     }
     if !d.providers.is_empty() {

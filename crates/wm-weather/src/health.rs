@@ -16,7 +16,7 @@ pub struct HealthConfig {
     /// active source is polled at least every 20 minutes, so only an idle
     /// fallback reaches it.
     pub stale_after_secs: i64,
-    /// Latency EWMA above this ⇒ `Degraded`.
+    /// Latency EWMA *and* the latest request above this ⇒ `Degraded`.
     pub degraded_latency_ms: u64,
     /// Consecutive failures that make the provider `Unavailable`.
     pub unavailable_after_failures: u32,
@@ -219,10 +219,18 @@ impl HealthTracker {
             }
             _ => {}
         }
-        if s.latency_ms_ewma
-            .is_some_and(|l| l > self.cfg.degraded_latency_ms as f64)
+        // Slow means slow on average *and* now. One slow response (say the
+        // first after a restart) weighs on the average for many polls, and
+        // would keep the source degraded, and every trade blocked, that long.
+        let limit = self.cfg.degraded_latency_ms as f64;
+        if let (Some(avg), Some(last)) = (s.latency_ms_ewma, s.latency_ms_last)
+            && avg > limit
+            && last as f64 > limit
         {
-            return (ProviderHealthState::Degraded, "high latency".into());
+            return (
+                ProviderHealthState::Degraded,
+                format!("high latency: last {last} ms, average {avg:.0} ms"),
+            );
         }
         (ProviderHealthState::Healthy, "ok".into())
     }
@@ -418,5 +426,47 @@ mod tests {
             .unwrap();
         assert_eq!(ev.snapshot.state, ProviderHealthState::Unavailable);
         assert!(!ev.snapshot.state.allows_new_weather_positions());
+    }
+
+    #[test]
+    fn one_slow_response_does_not_keep_a_source_degraded() {
+        let mut t = tracker();
+        let ok = |t: &mut HealthTracker, at: &str, ms: u64| {
+            t.on_success(
+                utc(at),
+                200,
+                ms,
+                Some(utc("2026-09-26T12:55:00Z")),
+                0,
+                &gate(),
+                None,
+            );
+            (t.state(), t.snapshot().reason.clone())
+        };
+        // The first request after a restart took 19.5 s: degraded …
+        let (state, reason) = ok(&mut t, "2026-09-26T12:58:00Z", 19_516);
+        assert_eq!(state, ProviderHealthState::Degraded);
+        assert_eq!(reason, "high latency: last 19516 ms, average 19516 ms");
+        // … until the next normal-speed poll, although the average (15.7 s)
+        // needs six more to fall under 5 s.
+        let (state, _) = ok(&mut t, "2026-09-26T12:59:00Z", 300);
+        assert_eq!(state, ProviderHealthState::Healthy);
+        assert!(t.snapshot().latency_ms_ewma.unwrap() > 15_000.0);
+        // A source that stays slow stays degraded.
+        for (at, ms) in [
+            ("2026-09-26T13:00:00Z", 9_000),
+            ("2026-09-26T13:01:00Z", 8_000),
+        ] {
+            ok(&mut t, at, ms);
+        }
+        assert_eq!(t.state(), ProviderHealthState::Degraded);
+        assert!(!t.state().allows_new_weather_positions());
+        // One spike after fast responses, with the average fine: healthy.
+        let mut t = tracker();
+        for m in 0..10 {
+            ok(&mut t, &format!("2026-09-26T13:{m:02}:00Z"), 300);
+        }
+        let (state, _) = ok(&mut t, "2026-09-26T13:10:00Z", 8_000);
+        assert_eq!(state, ProviderHealthState::Healthy);
     }
 }

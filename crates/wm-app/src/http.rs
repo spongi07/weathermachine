@@ -6,6 +6,9 @@
 //! | `GET /api/v1/stream`      | Server-Sent Events: a `snapshot` event per publish   |
 //! | `POST /api/v1/kill-switch`| engage/release (header `X-WM-Admin-Token`)           |
 //! | `GET /api/v1/report/paper`| `report paper` from the database (`?from=&to=&format=json`) |
+//! | `GET /api/v1/strategies/{id}/log` | one strategy's log as Markdown (`?days=&download`) |
+//! | `GET /api/v1/research`    | the research reports on the data volume (JSON)       |
+//! | `GET /api/v1/research/{name}` | one of them as text (`?download`)                |
 //! | `GET /healthz`            | liveness: the engine loop is publishing              |
 //! | `GET /readyz`             | readiness: startup done, storage reachable           |
 //! | `GET /metrics`            | Prometheus exposition                                |
@@ -18,8 +21,9 @@
 
 use crate::lite;
 use crate::paper_report::{self, ReportService};
+use crate::strategy_log::{self, History};
 use axum::body::Body;
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -40,7 +44,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use wm_core::event::OperatorCommand;
-use wm_dashboard_api::{API_VERSION, DashboardSnapshot, KillSwitchRequest};
+use wm_dashboard_api::{API_VERSION, DashboardSnapshot, KillSwitchRequest, ResearchReportDto};
 
 /// Content-Security-Policy for every response. WebAssembly needs
 /// `'wasm-unsafe-eval'`; no inline scripts are allowed.
@@ -149,7 +153,45 @@ pub struct Shared {
     pub liveness_max_age: Duration,
     /// `report paper` over HTTP (`None`: no database).
     pub paper_report: Option<Arc<ReportService>>,
+    /// Research reports served by name (`/api/v1/research/{name}`).
+    pub research: Vec<ResearchFile>,
 }
+
+/// A research report the service can serve from the data volume.
+#[derive(Debug, Clone)]
+pub struct ResearchFile {
+    /// Path segment of its URL.
+    pub name: String,
+    pub title: String,
+    pub path: PathBuf,
+    /// How to produce or refresh it.
+    pub how: String,
+}
+
+impl ResearchFile {
+    /// The reports of a station under `<data_dir>/research/`.
+    pub fn defaults(data_dir: &std::path::Path, station: &str) -> Vec<Self> {
+        let lower = station.to_ascii_lowercase();
+        let dir = data_dir.join("research");
+        vec![
+            Self {
+                name: "market".into(),
+                title: "Replay at traded prices: model versus market and strategies A–F (research market)".into(),
+                path: dir.join(format!("{lower}-market.md")),
+                how: "Run `research market --from 2026-06-01 --print` as a one-off container on the data volume (Deployment guide → Model versus market). It writes this file.".into(),
+            },
+            Self {
+                name: "training".into(),
+                title: "Model training report: peak survival, forecast evaluation, model structure, when each season's high is first reported".into(),
+                path: dir.join(format!("{lower}-survival.md")),
+                how: "Written by every model training (automatic on first start and every 30 days).".into(),
+            },
+        ]
+    }
+}
+
+/// Research files larger than this are not served.
+const MAX_RESEARCH_BYTES: u64 = 16 * 1024 * 1024;
 
 pub type AppState = Arc<Shared>;
 
@@ -198,6 +240,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/kill-switch", post(kill_switch))
         .route("/api/v1/report/paper", get(paper_report_page))
+        .route("/api/v1/strategies/{id}/log", get(strategy_log_page))
+        .route("/api/v1/research", get(research_list))
+        .route("/api/v1/research/{name}", get(research_file))
         .route("/api/{*rest}", any(api_not_found))
         .route("/metrics", get(prometheus_metrics))
         .route("/lite", get(lite_page));
@@ -397,6 +442,156 @@ async fn paper_report_page(
             )
                 .into_response()
         }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TextQuery {
+    /// Days of database history (strategy logs; default 7).
+    days: Option<usize>,
+    /// Present: send as a file to save.
+    download: Option<String>,
+}
+
+/// Plain text to read or paste; as an attachment named `file` if given.
+fn text_response(body: String, file: Option<String>) -> Response {
+    let mut resp = (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response();
+    if let Some(v) =
+        file.and_then(|f| HeaderValue::from_str(&format!("attachment; filename=\"{f}\"")).ok())
+    {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    resp
+}
+
+/// One strategy's log: its live state from the latest snapshot and its
+/// history from the database, as Markdown for pasting.
+async fn strategy_log_page(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<TextQuery>,
+) -> Response {
+    let published = Arc::clone(&state.snapshots.borrow());
+    let snap = &published.snapshot;
+    let Some(strategy) = snap
+        .strategies
+        .iter()
+        .find(|s| strategy_log::matches(s, &id))
+    else {
+        let known: Vec<&str> = snap.strategies.iter().map(|s| s.id.as_str()).collect();
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no strategy '{id}' (known: {})\n", known.join(", ")),
+        )
+            .into_response();
+    };
+    let days = q
+        .days
+        .unwrap_or(7)
+        .clamp(1, usize::try_from(ReportService::MAX_DAYS).unwrap_or(31));
+    let report = match &state.paper_report {
+        Some(service) => Some(service.latest().await),
+        None => None,
+    };
+    let history = match &report {
+        None => History::Unavailable,
+        Some(Ok(r)) => History::Report { report: r, days },
+        Some(Err(e)) => {
+            tracing::warn!(error = %format!("{e:#}"), "strategy log history failed");
+            History::Failed(format!("{e:#}"))
+        }
+    };
+    let body = strategy_log::render(snap, strategy, history);
+    let date = chrono::DateTime::from_timestamp_millis(snap.engine_time_ms)
+        .map_or_else(String::new, |t| t.format("-%Y-%m-%d").to_string());
+    let file = format!("strategy-{}{date}.md", strategy.letter);
+    text_response(body, q.download.is_some().then_some(file))
+}
+
+/// The research reports and whether each exists yet.
+async fn research_list(State(state): State<AppState>) -> Response {
+    let mut list = Vec::with_capacity(state.research.len());
+    for f in &state.research {
+        let meta = tokio::fs::metadata(&f.path)
+            .await
+            .ok()
+            .filter(std::fs::Metadata::is_file);
+        list.push(ResearchReportDto {
+            name: f.name.clone(),
+            title: f.title.clone(),
+            available: meta.is_some(),
+            bytes: meta.as_ref().map_or(0, std::fs::Metadata::len),
+            modified_ms: meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| i64::try_from(d.as_millis()).ok()),
+            how: f.how.clone(),
+        });
+    }
+    ([(header::CACHE_CONTROL, "no-store")], Json(list)).into_response()
+}
+
+/// One research report as text (only the configured files, by name).
+async fn research_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<TextQuery>,
+) -> Response {
+    let Some(f) = state.research.iter().find(|f| f.name == name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no research report '{name}'\n"),
+        )
+            .into_response();
+    };
+    match tokio::fs::metadata(&f.path).await {
+        Ok(m) if m.len() > MAX_RESEARCH_BYTES => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "{} is {} MB, more than the dashboard serves; copy it from the data volume\n",
+                    f.path.display(),
+                    m.len() / (1024 * 1024)
+                ),
+            )
+                .into_response();
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("{} does not exist yet. {}\n", f.path.display(), f.how),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot read {}: {e}\n", f.path.display()),
+            )
+                .into_response();
+        }
+    }
+    match tokio::fs::read(&f.path).await {
+        Ok(bytes) => {
+            let file = f.path.file_name().map(|n| n.to_string_lossy().into_owned());
+            text_response(
+                String::from_utf8_lossy(&bytes).into_owned(),
+                q.download.is_some().then_some(file).flatten(),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read {}: {e}\n", f.path.display()),
+        )
+            .into_response(),
     }
 }
 

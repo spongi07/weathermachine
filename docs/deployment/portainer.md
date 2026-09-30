@@ -225,7 +225,8 @@ API. That is one or two requests per day, two per second at most, and
 settled days are cached in `/data/research/polymarket/EHAM/`. The METAR
 history comes from the training cache. The log shows the verdict and the
 full report, which is also saved as `/data/research/eham-market.md` and
-`.json`.
+`.json`. The dashboard's *Reports to paste* panel then copies it in one
+click.
 
 What each section means and how to act on it is in
 [the edge research](../research/edge-research.md#4-the-measurement-weather-machine-research-market).
@@ -243,6 +244,35 @@ In short:
   can switch to it in the same section: for example `min_drop_tenths = 10`
   for "1 °C below", `max_price = "0.99"`, or other slot quantiles. With an
   interval that includes zero, keep F in paper and collect more days.
+
+### Strategy pages and logs to paste
+
+The dashboard's **Strategies** panel has a card per strategy (A–F and the
+unwind exits). Each card shows what the strategy is doing now, for example
+"autumn slot 13:25–15:26: before the slot: it starts in 2 h 13 min", or the
+blocker on the high's bucket. It also shows this run's proposals and orders,
+with two buttons:
+
+* **Open** shows the strategy's page:
+  * its settings;
+  * strategy F's time slot today and per season;
+  * its evaluation of every bucket right now, with everything that blocks
+    it;
+  * this run's proposals and risk verdicts, orders and evaluation trail;
+  * a preview of the log.
+* **Copy log** copies that log plus the strategy's last 7 days from the
+  database, including its settled P&L. Paste it into the chat. *Download*
+  saves it as a `.md` file, and *Open as text* shows it in a tab.
+
+The **Reports to paste** panel at the bottom copies, downloads or opens:
+
+* the replay at traded prices (`research market`), once it has run;
+* the training report, including when each season's high is first reported;
+* the paper run day by day.
+
+On plain `http://` in the LAN the browser has no clipboard API. The button
+then copies another way, or opens the text selected: press Ctrl+C (⌘C).
+Without JavaScript, `/lite` lists every strategy with links to its log.
 
 ### The paper-run report
 

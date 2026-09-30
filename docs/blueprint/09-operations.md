@@ -57,6 +57,22 @@ Provider behaviours required by the brief:
   They show provider health and budgets, collector schedule, the knowledge
   delay of each report, gates with reasons, the decision log, positions and
   orders, and kernel latency (µs).
+* **Strategy pages:** one per strategy (`/#/strategy/<id>`), fed by the
+  snapshot's strategy catalog (settings straight from the configuration)
+  and every strategy's latest evaluation of each bucket. Each shows
+  strategy F's slot where it applies, the live evaluation with all
+  blockers, this run's proposals, orders and evaluation trail.
+  `GET /api/v1/strategies/{id}/log` (id or letter; `?days=`, default 7;
+  `?download`) renders all of it as Markdown, plus the strategy's last days
+  from `report paper`, with its settled P&L split by strategy. The page's
+  *Copy log* button copies it. It uses the clipboard API on https and
+  localhost, `execCommand` on plain http, and otherwise opens a dialog with
+  the text selected.
+* **Reports to paste:** `GET /api/v1/research` lists and
+  `GET /api/v1/research/{market|training}` serves the replay at traded
+  prices and the training report from the data volume. Only these names are
+  served, never a path, and files over 16 MB are refused. The dashboard
+  copies them with the same button.
 * **Probes:** `/healthz` (engine loop publishing) and `/readyz` (startup,
   storage, kill switch).
 * **The paper run, day by day:** `weather-machine report paper` (or

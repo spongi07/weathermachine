@@ -15,5 +15,7 @@ pub mod market_research;
 pub mod paper_report;
 pub mod runtime;
 pub mod setup;
+pub mod strategies;
+pub mod strategy_log;
 pub mod telemetry;
 pub mod training;

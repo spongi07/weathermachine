@@ -195,6 +195,31 @@ fn location(out: &mut String, l: &LocationDto) {
     out.push_str("</table></section>");
 }
 
+/// Every strategy with its status now, this run's counts and its log (plain
+/// text: select all and copy), then the reports to paste.
+fn strategies(out: &mut String, s: &DashboardSnapshot) {
+    if s.strategies.is_empty() {
+        return;
+    }
+    out.push_str("<section><h2>Strategies</h2><table><tr><th>Strategy</th><th>State</th><th>Now</th><th>This run</th><th>Log to paste</th></tr>");
+    for st in &s.strategies {
+        let (class, status) = s.strategy_status(st);
+        let (approved, rejected, orders, filled) = s.strategy_counts(st);
+        let log = format!("/api/v1/strategies/{}/log", esc(&st.id));
+        let _ = write!(
+            out,
+            "<tr><td><b>{}</b> · {}</td><td class=\"{}\">{}</td><td class=\"wrap {}\">{}</td><td>{approved} approved · {rejected} rejected · {orders} order(s), {filled} filled</td><td><a href=\"{log}\">open</a> · <a href=\"{log}?download=1\">save</a></td></tr>",
+            esc(&st.letter),
+            esc(&st.name),
+            if st.enabled { "ok" } else { "" },
+            if st.enabled { "on" } else { "off" },
+            if class == "good" { "ok" } else { "" },
+            esc(&status),
+        );
+    }
+    out.push_str("</table><p class=\"note\">Reports to paste: <a href=\"/api/v1/research/market\">replay at traded prices (research market)</a> · <a href=\"/api/v1/research/training\">model training</a> · <a href=\"/api/v1/report/paper\">paper run day by day</a></p></section>");
+}
+
 /// Render the page.
 pub fn render(s: &DashboardSnapshot) -> String {
     let mut out = String::with_capacity(32 * 1024);
@@ -248,6 +273,7 @@ pub fn render(s: &DashboardSnapshot) -> String {
         );
     }
     out.push_str("<main>");
+    strategies(&mut out, s);
     let r = &s.risk;
     let _ = write!(
         out,
@@ -418,5 +444,38 @@ mod tests {
         assert!(html.contains("DEMO"));
         assert!(html.contains("KILL SWITCH ENGAGED"));
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn strategies_link_their_logs() {
+        let s = DashboardSnapshot {
+            strategies: vec![
+                wm_dashboard_api::StrategyDto {
+                    id: "F_peak_slot".into(),
+                    letter: "F".into(),
+                    name: "Peak <slot>".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                wm_dashboard_api::StrategyDto {
+                    id: "C_split_unwind".into(),
+                    letter: "C".into(),
+                    name: "Split".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let html = render(&s);
+        assert!(html.contains("<b>F</b> · Peak &lt;slot&gt;"), "{html}");
+        assert!(html.contains("<a href=\"/api/v1/strategies/F_peak_slot/log\">open</a>"));
+        assert!(html.contains("/api/v1/strategies/F_peak_slot/log?download=1"));
+        assert!(
+            html.contains(">off</td><td class=\"wrap \">disabled</td>"),
+            "{html}"
+        );
+        assert!(html.contains("/api/v1/research/market"));
+        // Nothing without strategies.
+        assert!(!render(&DashboardSnapshot::default()).contains("<h2>Strategies</h2>"));
     }
 }

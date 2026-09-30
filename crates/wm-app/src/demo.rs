@@ -404,6 +404,9 @@ pub async fn run(
     };
 
     let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, RunId::new_v7())?;
+    let strategy_catalog = crate::strategies::catalog(&cfg);
+    let peak_slot_cfg = cfg.peak_slot();
+    let peak_times = model.peak_times().cloned();
     let mut session =
         SimulationSession::new(engine_cfg, SimConfig::default(), Duration::hours(2), model)
             .with_event_capture(true);
@@ -532,6 +535,9 @@ pub async fn run(
                 model: &model_status,
                 yes_pooling: cfg.buy_yes().pooling(),
                 no_pooling: cfg.buy_no().pooling(),
+                strategies: &strategy_catalog,
+                peak_slot: &peak_slot_cfg,
+                peak_times: peak_times.as_ref(),
             };
             publisher.publish(dto::build(&snap, &inputs, Utc::now()));
         }

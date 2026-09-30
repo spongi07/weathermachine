@@ -7,6 +7,7 @@
 mod app;
 mod chart;
 mod fmt;
+mod strategies;
 
 fn main() {
     std::panic::set_hook(Box::new(|info| {

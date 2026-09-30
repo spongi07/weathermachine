@@ -175,9 +175,13 @@ fn book(token: &str, at: &str, bid: &str, ask: &str) -> OrderBook {
     }
 }
 
-/// The dashboard router serving only the report.
-fn dashboard(service: paper_report::ReportService) -> axum::Router {
-    let (_publisher, snapshots) = wm_app::http::Publisher::new();
+/// The dashboard router serving the report, with `snapshot` published.
+fn dashboard(
+    service: paper_report::ReportService,
+    snapshot: wm_dashboard_api::DashboardSnapshot,
+) -> axum::Router {
+    let (mut publisher, snapshots) = wm_app::http::Publisher::new();
+    publisher.publish(snapshot);
     let (commands, _) = tokio::sync::mpsc::channel(1);
     wm_app::http::router(std::sync::Arc::new(wm_app::http::Shared {
         snapshots,
@@ -189,6 +193,7 @@ fn dashboard(service: paper_report::ReportService) -> axum::Router {
         ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         liveness_max_age: std::time::Duration::from_secs(60),
         paper_report: Some(std::sync::Arc::new(service)),
+        research: Vec::new(),
     }))
 }
 
@@ -418,6 +423,13 @@ async fn paper_report_reads_a_day_back_from_the_database() {
     )
     .await
     .unwrap();
+    // Events are stamped by the database clock: put this one on the
+    // reported day, whatever day the test runs.
+    sqlx::query("UPDATE system_events SET at = $1 WHERE kind = 'market_stream'")
+        .bind(utc("2026-09-29T12:40:00Z"))
+        .execute(s.pool())
+        .await
+        .unwrap();
 
     // Build the report the next morning.
     let now = utc("2026-09-30T08:00:00Z");
@@ -509,6 +521,10 @@ async fn paper_report_reads_a_day_back_from_the_database() {
     assert_eq!(d.fills, 1);
     let pnl = d.pnl_usd.unwrap();
     assert!((pnl - (10.0 * 0.06 - 0.0282)).abs() < 1e-6, "pnl {pnl}");
+    // … all of it strategy E's.
+    assert_eq!(d.strategy_pnl.len(), 1);
+    assert!((d.strategy_pnl["E_book_confirmed_high"] - pnl).abs() < 1e-9);
+    assert!((r.totals.pnl_by_strategy["E_book_confirmed_high"] - pnl).abs() < 1e-9);
     assert_eq!(d.providers.iter().map(|p| p.requests).sum::<i64>(), 26);
     assert_eq!(d.events.len(), 1);
 
@@ -526,6 +542,8 @@ async fn paper_report_reads_a_day_back_from_the_database() {
         "Sure (≥ 0.90) first: model 18:28, market 16:58",
         "open_meteo/gfs_global/d1 day maximum 26.3 °C, error +1.3 °C",
         "warning market_stream ×1",
+        "settled paper P&L $0.57 (E_book_confirmed_high $0.57).",
+        "- **Settled paper P&L of this day's market:** $0.57 (E_book_confirmed_high $0.57)",
     ] {
         assert!(md.contains(needle), "missing {needle:?} in\n{md}");
     }
@@ -536,7 +554,20 @@ async fn paper_report_reads_a_day_back_from_the_database() {
         target.clone(),
         std::sync::Arc::new(wm_core::time::ManualClock::new(now)),
     );
-    let app = dashboard(service);
+    let e = wm_dashboard_api::StrategyDto {
+        id: "E_book_confirmed_high".into(),
+        letter: "E".into(),
+        name: "Book-confirmed high".into(),
+        enabled: true,
+        ..Default::default()
+    };
+    let app = dashboard(
+        service,
+        wm_dashboard_api::DashboardSnapshot {
+            strategies: vec![e],
+            ..Default::default()
+        },
+    );
     let (status, ctype, body) = get(&app, "/api/v1/report/paper?from=2026-09-29").await;
     assert_eq!(status, 200);
     assert_eq!(ctype, "text/markdown; charset=utf-8");
@@ -547,6 +578,28 @@ async fn paper_report_reads_a_day_back_from_the_database() {
     assert_eq!(json["days"][0]["weather"]["high_c"], 25);
     let (status, _, body) = get(&app, "/api/v1/report/paper?from=2026-10-05").await;
     assert_eq!(status, 500, "a first day after the last is refused: {body}");
+    // Strategy E's log: its history from the database, day by day.
+    let (status, ctype, body) = get(&app, "/api/v1/strategies/E/log?days=2").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(ctype, "text/plain; charset=utf-8");
+    for needle in [
+        "# Strategy E — Book-confirmed high (`E_book_confirmed_high`)",
+        "## History — 2026-09-29 → 2026-09-30 (database; outcomes judged by the METAR high)",
+        "Totals: 0 signal(s), 1 proposal(s) (1 approved), 1 order(s), settled paper P&L $0.57.",
+        "### 2026-09-30 (in progress) — METAR high –, winner –\n\n- No evaluation of this strategy.",
+        "### 2026-09-29 — METAR high 25 °C",
+        "- Order 17:10 BUY YES",
+        "- Settled paper P&L: $0.57",
+    ] {
+        assert!(body.contains(needle), "missing {needle:?} in\n{body}");
+    }
+    assert!(!body.contains("A 25°C YES"), "only E's lines: {body}");
+    // The newest day first; one day only when asked for one.
+    let (_, _, one) = get(&app, "/api/v1/strategies/e_book_confirmed_high/log?days=1").await;
+    assert!(
+        one.contains("## History — 2026-09-30 → 2026-09-30"),
+        "{one}"
+    );
 
     // A later day with nothing recorded reads as empty, not as an error.
     let plan = target

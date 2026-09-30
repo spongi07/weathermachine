@@ -204,6 +204,35 @@ dl.kv dd { margin: 0; min-width: 0; }
 
 footer { text-align: center; padding: 10px; }
 
+/* Strategies ------------------------------------------------------------------ */
+a.btn { display: inline-block; text-decoration: none; }
+a.btn:hover { text-decoration: none; }
+.btn.small-btn { padding: 4px 8px; font-size: 10.5px; }
+.strategy-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+.strategy-card { background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.strategy-card.off { opacity: 0.62; }
+.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card-letter { font: 700 15px/1 var(--mono); color: #fff; background: rgba(139, 123, 255, 0.2); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
+.card-name { font-weight: 600; color: var(--text); flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.card-status { min-height: 2.8em; overflow-wrap: anywhere; }
+.card-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.copy { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.page-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.page-head h2 { margin: 0; font: 700 15px/1.2 var(--mono); letter-spacing: 0.1em; }
+.summary { margin: 8px 0 10px; max-width: 110ch; }
+.log-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.log-preview { margin: 0; max-height: 560px; overflow: auto; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: #c9d3e2; }
+.slot-today { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 8px; }
+ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+ul.gates { margin: 4px 0 8px 18px; padding: 0; }
+.now-loc { margin-top: 8px; }
+table.reports td { vertical-align: middle; }
+td.text { text-align: left; white-space: normal; overflow-wrap: break-word; }
+.copy-modal { border-color: var(--info); width: min(760px, calc(100vw - 32px)); top: 8vh; }
+.copy-modal h3 { color: #a9cdfa; }
+.copy-modal p { margin: 0; }
+.copy-area { width: 100%; min-height: 50vh; font: 11.5px/1.45 var(--mono); background: var(--bg2); color: var(--text); border: 1px solid var(--line2); border-radius: 6px; padding: 8px; resize: vertical; }
+
 /* Modal ------------------------------------------------------------------------- */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(2, 4, 8, 0.72); z-index: 40; }
 .modal {

@@ -230,7 +230,7 @@ positions.
 | Unavailable | circuit open or half-open, or ≥ 3 consecutive failures |
 | Throttled | a 429 within the last 30 min |
 | Stale | no observation yet, or newest observation older than 45 min |
-| Degraded | any recent failure or malformed payload, or latency EWMA > 5 s |
+| Degraded | any recent failure or malformed payload, or latency > 5 s both on average (EWMA) and on the latest request (one slow response clears on the next normal poll) |
 | Standby | no successful request **of this source** within 45 min: never contacted, or an idle fallback. No evidence either way. |
 | Healthy | otherwise |
 

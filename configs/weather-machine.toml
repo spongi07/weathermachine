@@ -273,7 +273,7 @@ max_polls_per_window = 10
 
 [health]
 stale_after_secs = 2700           # 30-min cadence + 15-min allowance
-degraded_latency_ms = 5000
+degraded_latency_ms = 5000         # average and latest request both slower ⇒ Degraded
 unavailable_after_failures = 3
 throttle_memory_secs = 1800
 

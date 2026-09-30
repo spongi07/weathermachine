@@ -838,6 +838,16 @@ async fn serve(config: Option<PathBuf>, mode: Mode) -> Result<()> {
         ready: Arc::clone(&ready),
         liveness_max_age: std::time::Duration::from_secs(60),
         paper_report,
+        research: cfg
+            .locations
+            .first()
+            .map(|l| {
+                http::ResearchFile::defaults(
+                    std::path::Path::new(&cfg.file.model.auto_train.data_dir),
+                    &l.station.id,
+                )
+            })
+            .unwrap_or_default(),
     });
     let listener = tokio::net::TcpListener::bind(&cfg.file.app.http_bind)
         .await

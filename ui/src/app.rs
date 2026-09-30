@@ -2,6 +2,7 @@
 
 use crate::chart::{distribution_bars, temperature_chart};
 use crate::fmt::{self, DASH};
+use crate::strategies::{ReportsPanel, StrategiesPanel, StrategyPage};
 use leptos::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +11,30 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use wm_dashboard_api::*;
 
-type Snap = RwSignal<Option<Arc<DashboardSnapshot>>>;
+pub(crate) type Snap = RwSignal<Option<Arc<DashboardSnapshot>>>;
+
+/// What the page shows: the dashboard, or one strategy (`#/strategy/<id>`).
+#[derive(Debug, Clone, PartialEq)]
+enum Route {
+    Dashboard,
+    Strategy(String),
+}
+
+fn route_from_hash(hash: &str) -> Route {
+    match hash.strip_prefix("#/strategy/") {
+        Some(id) if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+            Route::Strategy(id.to_owned())
+        }
+        _ => Route::Dashboard,
+    }
+}
+
+fn current_route() -> Route {
+    let hash = web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .unwrap_or_default();
+    route_from_hash(&hash)
+}
 
 /// Live-connection state of the snapshot stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,7 +44,7 @@ enum Link {
     Reconnecting,
 }
 
-fn js_err(e: JsValue) -> String {
+pub(crate) fn js_err(e: JsValue) -> String {
     e.as_string().unwrap_or_else(|| format!("{e:?}"))
 }
 
@@ -129,6 +153,17 @@ pub fn App() -> impl IntoView {
         Duration::from_millis(1000),
     );
     let show_kill = RwSignal::new(false);
+    let route = RwSignal::new(current_route());
+    if let Some(w) = web_sys::window() {
+        let on_hash = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+            route.set(current_route());
+            if let Some(w) = web_sys::window() {
+                w.scroll_to_with_x_and_y(0.0, 0.0);
+            }
+        });
+        let _ = w.add_event_listener_with_callback("hashchange", on_hash.as_ref().unchecked_ref());
+        on_hash.forget();
+    }
 
     let loaded = move || snap.with(Option::is_some);
     view! {
@@ -137,21 +172,10 @@ pub fn App() -> impl IntoView {
             {move || parse_err.get().map(|e| view! { <div class="banner bad">{e}</div> })}
             <Show when=loaded fallback=|| view! { <div class="loading">"Connecting to the Weather Machine engine…"</div> }>
                 <Banners snap=snap />
-                <KpiStrip snap=snap />
-                <Locations snap=snap />
-                <div class="grid-2">
-                    <RiskPanel snap=snap />
-                    <ProvidersPanel snap=snap />
-                </div>
-                <Blotter snap=snap />
-                <div class="grid-2">
-                    <DecisionLog snap=snap />
-                    <AlertsPanel snap=snap />
-                </div>
-                <div class="grid-2">
-                    <EnginePanel snap=snap />
-                    <BreakEvenPanel snap=snap />
-                </div>
+                {move || match route.get() {
+                    Route::Dashboard => view! { <Dashboard snap=snap /> }.into_any(),
+                    Route::Strategy(id) => view! { <StrategyPage snap=snap id=id /> }.into_any(),
+                }}
                 <footer class="muted small">
                     "Weather Machine · Rust end to end (engine, API and this WebAssembly UI) · "
                     <a href="lite">"lite view"</a>" · "<a href="api/v1/snapshot">"snapshot JSON"</a>" · "<a href="metrics">"metrics"</a>
@@ -159,6 +183,29 @@ pub fn App() -> impl IntoView {
             </Show>
             <KillSwitchModal snap=snap open=show_kill />
         </div>
+    }
+}
+
+#[component]
+fn Dashboard(snap: Snap) -> impl IntoView {
+    view! {
+        <KpiStrip snap=snap />
+        <StrategiesPanel snap=snap />
+        <Locations snap=snap />
+        <div class="grid-2">
+            <RiskPanel snap=snap />
+            <ProvidersPanel snap=snap />
+        </div>
+        <Blotter snap=snap />
+        <div class="grid-2">
+            <DecisionLog snap=snap />
+            <AlertsPanel snap=snap />
+        </div>
+        <div class="grid-2">
+            <EnginePanel snap=snap />
+            <BreakEvenPanel snap=snap />
+        </div>
+        <ReportsPanel snap=snap />
     }
 }
 
@@ -1009,5 +1056,23 @@ fn KillSwitchModal(snap: Snap, open: RwSignal<bool>) -> impl IntoView {
                 </div>
             </div>
         </Show>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_come_from_the_hash() {
+        assert_eq!(route_from_hash(""), Route::Dashboard);
+        assert_eq!(route_from_hash("#/"), Route::Dashboard);
+        assert_eq!(
+            route_from_hash("#/strategy/F_peak_slot"),
+            Route::Strategy("F_peak_slot".into())
+        );
+        assert_eq!(route_from_hash("#/strategy/"), Route::Dashboard);
+        assert_eq!(route_from_hash("#/strategy/<b>"), Route::Dashboard);
+        assert_eq!(route_from_hash("#/strategy/a/b"), Route::Dashboard);
     }
 }
