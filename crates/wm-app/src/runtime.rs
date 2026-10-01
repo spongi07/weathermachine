@@ -298,7 +298,64 @@ fn gate_snapshot(gate: &ProviderGate, now: DateTime<Utc>) -> ProviderHealthSnaps
     s
 }
 
-fn review_status_of(s: &str) -> SpecReviewStatus {
+/// How long after a market's local day it is settled (paper/live).
+fn settle_grace() -> Duration {
+    Duration::hours(2)
+}
+
+/// Load earlier runs' paper book into the session and say what came back.
+/// A failure is loud but not fatal: the run then starts flat, as before.
+async fn restore_paper_book(
+    store: &PgStore,
+    cfg: &AppConfig,
+    session: &mut SimulationSession,
+    now: DateTime<Utc>,
+    side: &SharedSide,
+) {
+    match crate::restore::load(store, cfg, now, settle_grace()).await {
+        Ok((state, warnings)) => {
+            for w in &warnings {
+                tracing::warn!(warning = %w, "paper book restore");
+                with_side(side, |st| st.alert("warning", w.clone()));
+            }
+            if state.is_empty() {
+                return;
+            }
+            let summary = session.restore(&state, now);
+            let text = crate::restore::describe(&summary);
+            tracing::info!(
+                positions = summary.open_positions,
+                fills = summary.fills,
+                markets = summary.markets,
+                "{text}"
+            );
+            let level = if summary.rejected.is_empty() {
+                "info"
+            } else {
+                "warning"
+            };
+            with_side(side, |st| st.alert(level, text.clone()));
+            let details = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
+            let store = store.clone();
+            tokio::spawn(async move {
+                let _ = store
+                    .record_system_event(level, "restore", &text, &details)
+                    .await;
+            });
+        }
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "paper book restore failed");
+            with_side(side, |st| {
+                st.alert(
+                    "critical",
+                    format!("could not restore the paper book of earlier runs: {e:#}; this run starts flat"),
+                )
+            });
+        }
+    }
+}
+
+pub(crate) fn review_status_of(s: &str) -> SpecReviewStatus {
     match s {
         "approved" => SpecReviewStatus::Approved,
         "rejected" => SpecReviewStatus::Rejected,
@@ -758,7 +815,9 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             Arc::clone(&clock),
         );
         if let Some(s) = &store {
-            let since = clock.now() - Duration::hours(36);
+            // 60 h covers every local day a restored market can settle on
+            // (its whole day, for the final high), see `crate::restore`.
+            let since = clock.now() - Duration::hours(60);
             let mut obs = s
                 .observations_since(&ids.station, since)
                 .await
@@ -900,7 +959,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     let peak_slot_cfg = cfg.peak_slot();
     let mut peak_times = model.peak_times().cloned();
     let mut session =
-        SimulationSession::new(engine_cfg, SimConfig::default(), Duration::hours(2), model)
+        SimulationSession::new(engine_cfg, SimConfig::default(), settle_grace(), model)
             .with_event_capture(true);
     session.engine_mut().set_storage_ok(store.is_some());
     let mut last_knowledge = DateTime::<Utc>::MIN_UTC;
@@ -918,6 +977,14 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     let warm = session.run_until(clock.now());
     loop_state.absorb(&session, warm, &persist_tx, &storage_ok, &hint_txs, &side);
     last_knowledge = last_knowledge.max(session.last_time().unwrap_or(last_knowledge));
+
+    // -- The paper book of earlier runs (positions, today's limits) -------------------------
+    // After the weather replay, so the replay records no evaluations of the
+    // restored markets; before the first live event, so no strategy trades
+    // without seeing them.
+    if let Some(s) = &store {
+        restore_paper_book(s, &cfg, &mut session, clock.now(), &side).await;
+    }
 
     let gates_for_ui: Vec<Arc<ProviderGate>> = [
         "polymarket_gamma",

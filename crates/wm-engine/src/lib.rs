@@ -14,10 +14,12 @@
 //! The engine never reads a clock: time is the envelope's knowledge time.
 
 mod engine;
+mod restore;
 mod snapshot;
 
 pub use engine::{
     Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, StationHint,
     default_rejection_dedup_secs,
 };
+pub use restore::{RestoreState, RestoreSummary, RestoredFill};
 pub use snapshot::{EngineSnapshot, ForecastSnapshot, LocationSnapshot, ViewSnapshot};

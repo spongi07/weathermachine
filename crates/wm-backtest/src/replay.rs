@@ -15,7 +15,7 @@ use wm_core::ids::{ClientOrderId, EventSlug, StationId, StrategyId};
 use wm_core::market::Side;
 use wm_core::trading::DecisionRecord;
 use wm_core::units::{Rounding, Usd, notional};
-use wm_engine::{Engine, EngineConfig, StationHint};
+use wm_engine::{Engine, EngineConfig, RestoreState, RestoreSummary, StationHint};
 use wm_execution::{SimConfig, SimulatedExchange};
 use wm_risk::ApprovedIntent;
 use wm_strategy::ProbabilityModel;
@@ -309,6 +309,30 @@ impl SimulationSession {
             ));
         }
         self.queue.push(env);
+    }
+
+    /// Rebuild earlier runs' paper book after a restart ([`Engine::restore`])
+    /// and schedule the restored markets' settlement checks, so a finished
+    /// market settles at the next step even without traffic. The checks are
+    /// never queued before `now` or the last processed event.
+    pub fn restore(&mut self, state: &RestoreState, now: DateTime<Utc>) -> RestoreSummary {
+        let summary = self.engine.restore(state, now);
+        let not_before = self.last_time.map_or(now, |t| t.max(now));
+        for m in &state.markets {
+            if self.settlement_timers.insert(m.event_slug.clone()) {
+                let (_, end) = wm_core::time::local_day_bounds(m.local_date, m.timezone);
+                let at = (end + self.settle_grace + Duration::seconds(1)).max(not_before);
+                self.queue.push(EventEnvelope::new(
+                    at,
+                    EventSource::Replay,
+                    WeatherMachineEvent::Timer(TimerEvent {
+                        due_at: at,
+                        kind: TimerKind::Heartbeat,
+                    }),
+                ));
+            }
+        }
+        summary
     }
 
     /// Process every queued event with `available_at ≤ until`.

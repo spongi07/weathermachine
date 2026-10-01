@@ -1,5 +1,6 @@
 //! The kernel implementation.
 
+use crate::restore::{RestoreState, RestoreSummary};
 use crate::snapshot::{EngineSnapshot, ForecastSnapshot, LocationSnapshot, ViewSnapshot};
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
@@ -941,6 +942,73 @@ impl Engine {
             m.closed = true;
         }
         pnl
+    }
+
+    /// Rebuild earlier runs' paper book after a restart (see [`RestoreState`]):
+    /// the markets, the positions with the strategy that opened them, the
+    /// unwind clocks, the realized P&L of today's (UTC) restored sells and
+    /// today's new exposure. Nothing is evaluated or ordered. A finished
+    /// market settles at the next step, as it would have live, so its P&L
+    /// counts toward today's loss limit again.
+    pub fn restore(&mut self, state: &RestoreState, now: DateTime<Utc>) -> RestoreSummary {
+        let mut summary = RestoreSummary {
+            markets: state.markets.len(),
+            fills: state.fills.len(),
+            new_exposure_today: state.new_exposure_today,
+            ..RestoreSummary::default()
+        };
+        for m in &state.markets {
+            for o in &m.outcomes {
+                self.token_index
+                    .insert(o.yes_token.clone(), m.event_slug.clone());
+                self.token_index
+                    .insert(o.no_token.clone(), m.event_slug.clone());
+            }
+            self.markets
+                .entry(m.event_slug.clone())
+                .or_insert_with(|| m.clone());
+        }
+        let today = now.date_naive();
+        for r in &state.fills {
+            let before = self.positions.total_realized_pnl();
+            match self.positions.apply_fill(&r.fill, &r.instrument) {
+                Ok(()) => {
+                    if r.fill.side == wm_core::market::Side::Buy {
+                        self.position_strategy
+                            .entry(r.fill.token.clone())
+                            .or_insert(r.strategy.clone());
+                        self.unwind.note_entry(&r.fill.token, r.fill.ts);
+                    }
+                    let delta = self.positions.total_realized_pnl() - before;
+                    if !delta.is_zero() {
+                        self.risk.record_realized_pnl(delta, r.fill.ts);
+                        if r.fill.ts.date_naive() == today {
+                            self.realized_pnl_total += delta;
+                            summary.realized_today += delta;
+                        }
+                    }
+                    if self
+                        .positions
+                        .get(&r.fill.token)
+                        .is_some_and(|p| p.shares.is_zero())
+                    {
+                        self.unwind.forget(&r.fill.token);
+                    }
+                }
+                Err(e) => summary.rejected.push(format!(
+                    "{} on {}: {e}",
+                    r.fill.client_order_id, r.instrument.event_slug
+                )),
+            }
+        }
+        self.risk
+            .restore_daily_new_exposure(state.new_exposure_today, now);
+        for p in self.positions.open_positions() {
+            summary.open_positions += 1;
+            summary.open_shares += p.shares;
+            summary.open_cost += p.cost_basis;
+        }
+        summary
     }
 
     /// Markets whose local day ended at least `grace` ago and are not settled.

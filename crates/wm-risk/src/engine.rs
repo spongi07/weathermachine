@@ -356,6 +356,15 @@ impl RiskEngine {
         self.daily.new_exposure
     }
 
+    /// After a restart: count the cost of today's (UTC) opening orders of
+    /// earlier runs toward the daily new-exposure limit, as their approval
+    /// did. Rolls the day first, so restored realized P&L of an earlier day
+    /// is dropped.
+    pub fn restore_daily_new_exposure(&mut self, cost: Usd, now: DateTime<Utc>) {
+        self.roll_day(now);
+        self.daily.new_exposure += cost;
+    }
+
     fn roll_day(&mut self, now: DateTime<Utc>) {
         let d = now.date_naive();
         if self.daily.date != Some(d) {

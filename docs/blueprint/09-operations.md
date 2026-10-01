@@ -93,10 +93,11 @@ Provider behaviours required by the brief:
 
 **Crash-only design.** `panic = "abort"` in release: a crash restarts the
 container (restart policy) instead of limping on.
-* **Weather state:** on start, the last 36 h of observations are loaded from
+* **Weather state:** on start, the last 60 h of observations are loaded from
   PostgreSQL. They warm the dedup ledger *and* rebuild the engine's day
-  state. The first AWC poll backfills 26 h, and the ledger turns repeats
-  into duplicates (tested: 0 new, no duplicate rows).
+  state, also for yesterday's market, which a restored position may still
+  have to settle. The first AWC poll backfills 26 h, and the ledger turns
+  repeats into duplicates (tested: 0 new, no duplicate rows).
 * **Journal:** every engine input of a run is stored (`event_journal`), so
   the run can be replayed exactly or backtested with new parameters
   (`backtest --journal <run-id>`). Order-book updates in it are kept for 7
@@ -114,12 +115,27 @@ container (restart policy) instead of limping on.
   (`stop_grace_period: 30s` in the stack).
 * **Fail closed during recovery:** until the day series is complete and
   fresh again, the coverage and freshness gates block new positions.
-* **Open positions (current limitation):** a restart begins a new run with
-  a flat paper book. The previous run's orders, fills and decisions remain in
-  PostgreSQL, and its outcome can be reproduced exactly from its journal.
-  Carrying open paper positions into the new run is a Phase 13 exit
-  criterion. Live position reconciliation against the venue is a Phase 14
-  prerequisite (§42).
+* **Open paper positions are restored.** A restart begins a new run, but
+  before its first live event the runtime rebuilds the paper book of the
+  runs before it from PostgreSQL (`crates/wm-app/src/restore.rs`):
+  * the fills of every market that settles today (UTC) or later, replayed
+    into the position book with the strategy that opened each position, so
+    the per-strategy caps and "one position a day" rules (F) still hold;
+  * those markets, rebuilt from their latest stored Gamma payload with the
+    mapping discovery uses and their stored rules review;
+  * the cost of today's opening orders, which their approvals added to the
+    daily new-exposure limit, and the realized P&L of today's restored
+    sales, which counts toward the daily loss limit.
+
+  A restored market whose settlement time has passed (the previous run
+  settled it, or the restart fell across midnight) settles again at the
+  next step, so its P&L counts toward today's loss limit once. Orders that
+  were still resting when the old run stopped are not restored: the
+  simulated venue lived in that process. The restore is logged as an alert
+  and a `system_events` row (`kind = 'restore'`); a fill the book refuses is
+  named there. If the database cannot be read, the run starts flat and says
+  so in a critical alert. Live position reconciliation against the venue
+  remains a Phase 14 prerequisite (§42).
 
 ## 41. Paper trading
 

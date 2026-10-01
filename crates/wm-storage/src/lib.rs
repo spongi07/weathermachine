@@ -22,11 +22,13 @@ use wm_core::weather::{
 };
 
 pub mod report;
+pub mod restore;
 
 pub use report::{
     ReportBookTop, ReportDecision, ReportFill, ReportHealthChange, ReportObservation, ReportOrder,
     ReportOutcome, ReportRequestDay, ReportRun, ReportSystemEvent,
 };
+pub use restore::RestoreFillRow;
 
 /// Embedded migrations (`/migrations`).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");

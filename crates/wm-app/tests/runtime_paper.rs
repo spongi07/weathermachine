@@ -483,15 +483,90 @@ async fn paper_runtime_with_postgres_persists_and_warm_starts() {
     );
     let observations_before = count(pool, "SELECT count(*) FROM weather_observations").await;
 
-    // Second run: the lease was released, the day is rebuilt from storage, and
-    // the provider's repeated reports are recognised as duplicates.
+    // Strategy F bought 100 × 18 °C YES before the restart: its order and
+    // fill as the engine loop persists them (today, UTC).
+    let midnight = Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 1)
+        .unwrap()
+        .and_utc();
+    let placed = (Utc::now() - Duration::minutes(5)).max(midnight);
+    other
+        .upsert_order(
+            &wm_core::ids::RunId::deterministic(99),
+            &wm_storage::wm_execution_record::OrderRow {
+                client_order_id: "wm-before-restart-1".into(),
+                decision_id: 1,
+                strategy: "F_peak_slot".into(),
+                location: "amsterdam".into(),
+                event_slug: env.today_slug.clone(),
+                token: "1018".into(),
+                condition_id: "0xcond18".into(),
+                outcome_side: "YES".into(),
+                side: "BUY".into(),
+                kind: "open".into(),
+                limit_price_micros: 950_000,
+                shares_micros: 100_000_000,
+                tif: serde_json::json!({ "tif": "fak" }),
+                status: "filled".into(),
+                filled_micros: 100_000_000,
+                avg_price_micros: Some(950_000),
+                fees_micros: 237_500,
+                venue_order_id: None,
+                reason: None,
+                created_at: placed,
+                updated_at: placed,
+            },
+        )
+        .await
+        .unwrap();
+    other
+        .record_fill(&wm_core::trading::Fill {
+            client_order_id: wm_core::ids::ClientOrderId::new("wm-before-restart-1").unwrap(),
+            token: wm_core::ids::TokenId::new("1018").unwrap(),
+            side: wm_core::market::Side::Buy,
+            price: wm_core::units::Price::parse("0.95").unwrap(),
+            shares: wm_core::units::Shares::from_whole(100),
+            fee: wm_core::units::Usd::from_micros(237_500),
+            liquidity: wm_core::trading::Liquidity::Taker,
+            ts: placed,
+        })
+        .await
+        .unwrap();
+
+    // Second run: the lease was released, the day is rebuilt from storage,
+    // the provider's repeated reports are recognised as duplicates, and the
+    // paper book of the first run comes back.
     let mut run = start(env.cfg.clone());
     let snap = run
         .until("warm restart", 40, |s| {
             let c = s.locations.first().and_then(|l| l.collector.as_ref());
-            c.is_some_and(|c| c.polls_total >= 1) && s.storage_ok
+            c.is_some_and(|c| c.polls_total >= 1) && s.storage_ok && !s.positions.is_empty()
         })
         .await;
+    let pos = &snap.snapshot.positions;
+    assert_eq!(pos.len(), 1, "{pos:?}");
+    assert_eq!(
+        (
+            pos[0].event_slug.as_str(),
+            pos[0].bucket.as_str(),
+            pos[0].side.as_str()
+        ),
+        (env.today_slug.as_str(), "18°C", "YES")
+    );
+    assert!((pos[0].shares - 100.0).abs() < 1e-9, "{pos:?}");
+    assert!(
+        (snap.snapshot.risk.daily_new_exposure_usd - 95.0).abs() < 1e-9,
+        "today's new exposure counts the restored order: {:?}",
+        snap.snapshot.risk
+    );
+    assert!(
+        snap.snapshot.alerts.iter().any(|a| a.message.starts_with(
+            "restored the paper book of earlier runs: 1 open position(s) (100 shares"
+        )),
+        "{:?}",
+        snap.snapshot.alerts
+    );
     let c = snap.snapshot.locations[0].collector.as_ref().unwrap();
     assert_eq!(
         c.new_observations_total, 0,
@@ -510,6 +585,15 @@ async fn paper_runtime_with_postgres_persists_and_warm_starts() {
         "no duplicate rows"
     );
     assert_eq!(count(pool, "SELECT count(*) FROM strategy_runs").await, 2);
+    assert_eq!(
+        count(
+            pool,
+            "SELECT count(*) FROM system_events WHERE kind = 'restore'"
+        )
+        .await,
+        1,
+        "the restore is on record"
+    );
 
     other.pool().close().await;
     let admin = wm_storage::PgStore::connect(&admin_url, 2).await.unwrap();

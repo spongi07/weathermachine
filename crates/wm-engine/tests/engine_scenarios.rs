@@ -1213,3 +1213,247 @@ fn strategy_f_buys_100_shares_of_the_high_inside_the_learned_slot() {
             .collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Restart: the paper book of earlier runs (Engine::restore)
+// ---------------------------------------------------------------------------
+
+use wm_core::ids::{ClientOrderId, StrategyId};
+use wm_core::portfolio::InstrumentRef;
+use wm_core::trading::{Fill, Liquidity};
+use wm_engine::{RestoreState, RestoredFill};
+
+fn restored(
+    m: &DailyTemperatureMarket,
+    value: i32,
+    id: &str,
+    side: Side,
+    price: &str,
+    shares: i64,
+    ts: &str,
+) -> RestoredFill {
+    let o = m.outcome_for_value(value).unwrap();
+    RestoredFill {
+        fill: Fill {
+            client_order_id: ClientOrderId::new(id).unwrap(),
+            token: o.yes_token.clone(),
+            side,
+            price: Price::parse(price).unwrap(),
+            shares: Shares::from_whole(shares),
+            fee: Usd::ZERO,
+            liquidity: Liquidity::Taker,
+            ts: utc(ts),
+        },
+        instrument: InstrumentRef {
+            token: o.yes_token.clone(),
+            condition_id: o.condition_id.clone(),
+            event_slug: m.event_slug.clone(),
+            outcome_side: OutcomeSide::Yes,
+            bucket: o.bucket,
+        },
+        strategy: StrategyId::new("F_peak_slot").unwrap(),
+    }
+}
+
+/// The F scenario after a restart. Before it, F bought 100 × 18 °C YES at
+/// 0.94 (15:40 local). Restored, the new run neither buys 18 °C again nor
+/// a second bucket the same day: 19 °C becomes the high in the slot and is
+/// offered at 0.94, but F's market and strategy caps ($110) and the daily
+/// new exposure ($160) count the restored $94. A flat run buys it.
+#[test]
+fn a_restored_book_keeps_f_to_one_position_a_day() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut cfg = config(RunMode::Paper);
+    cfg.buy_yes.enabled = false;
+    cfg.buy_no.enabled = false;
+    cfg.certain.enabled = false;
+    cfg.book_confirmed.enabled = false;
+    cfg.risk = risk_with_f_caps();
+    let model = || {
+        Arc::new(PeakModel {
+            probs: vec![0.985, 0.012, 0.002, 0.001],
+            peaks: summer_peaks(15 * 60 + 25, 17 * 60 + 25),
+        })
+    };
+    let state = RestoreState {
+        markets: vec![m.clone()],
+        fills: vec![restored(
+            &m,
+            18,
+            "wm-old-1",
+            Side::Buy,
+            "0.94",
+            100,
+            "2026-07-01T13:40:00Z",
+        )],
+        new_exposure_today: Usd::from_whole(94),
+    };
+    // The day up to the 13:25Z report; then a book on `value` and the 13:55Z
+    // report at `last` (known 13:58Z, 15:58 local, inside the slot).
+    let day = |value: i32, last: i32| {
+        let mut v = vec![
+            health_event("2026-07-01T06:00:00Z", ProviderHealthState::Healthy),
+            env(
+                "2026-07-01T06:00:01Z",
+                WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+            ),
+        ];
+        v.extend(night_and_morning());
+        for (t, x) in [
+            ("2026-07-01T10:25:00Z", 16),
+            ("2026-07-01T10:55:00Z", 17),
+            ("2026-07-01T11:25:00Z", 17),
+            ("2026-07-01T11:55:00Z", 18),
+            ("2026-07-01T12:25:00Z", 18),
+            ("2026-07-01T12:55:00Z", 17),
+            ("2026-07-01T13:25:00Z", 17),
+        ] {
+            v.push(obs_event(t, x));
+        }
+        let token = m.outcome_for_value(value).unwrap().yes_token.clone();
+        let mut b = synthetic_book(&token, Some("0.92"), None, 200, utc("2026-07-01T13:57:50Z"));
+        b.asks = vec![
+            BookLevel {
+                price: Price::parse("0.93").unwrap(),
+                size: Shares::from_whole(60),
+            },
+            BookLevel {
+                price: Price::parse("0.94").unwrap(),
+                size: Shares::from_whole(100),
+            },
+        ];
+        v.push(env(
+            "2026-07-01T13:57:50Z",
+            WeatherMachineEvent::OrderBookUpdate(OrderBookEvent { book: b }),
+        ));
+        v.push(obs_event("2026-07-01T13:55:00Z", last));
+        v
+    };
+    let now = utc("2026-07-01T13:45:00Z");
+
+    // The book comes back: one position, F's strategy, today's $94.
+    let mut engine = Engine::new(cfg.clone(), model());
+    let s = engine.restore(&state, now);
+    assert_eq!((s.markets, s.fills, s.open_positions), (1, 1, 1));
+    assert_eq!(s.open_shares, Shares::from_whole(100));
+    assert_eq!(s.open_cost, Usd::from_whole(94));
+    assert!(s.rejected.is_empty());
+    let snap = engine.snapshot();
+    assert_eq!(snap.daily_new_exposure, Usd::from_whole(94));
+    assert_eq!(snap.exposure.global_worst_case, Usd::from_whole(94));
+
+    // Same bucket after the restart: already positioned, nothing bought.
+    let outs = run(&mut engine, day(18, 17), m.fees);
+    assert!(approvals(&outs).is_empty(), "{:?}", approvals(&outs));
+    assert!(
+        engine.snapshot().decisions.iter().any(|d| {
+            let o = d.outputs.to_string();
+            d.strategy.as_str() == "evaluation"
+                && o.contains("F 18°C YES")
+                && o.contains("already positioned")
+        }),
+        "F sees the restored position"
+    );
+
+    // Another bucket the same day: F proposes it, the caps refuse it.
+    let mut engine = Engine::new(cfg.clone(), model());
+    engine.restore(&state, now);
+    let outs = run(&mut engine, day(19, 19), m.fees);
+    assert!(approvals(&outs).is_empty(), "{:?}", approvals(&outs));
+    let refused = engine
+        .snapshot()
+        .decisions
+        .into_iter()
+        .find(|d| d.strategy.as_str() == "F_peak_slot" && !d.approved)
+        .expect("F proposed 19 °C and risk refused it");
+    let why = refused.reasons.join("; ");
+    for check in ["MarketExposure", "StrategyExposure", "DailyNewExposure"] {
+        assert!(why.contains(check), "{check} missing in {why}");
+    }
+
+    // A flat run (the old restart) buys the second bucket.
+    let mut flat = Engine::new(cfg, model());
+    let outs = run(&mut flat, day(19, 19), m.fees);
+    let a = approvals(&outs);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert!(a[0].starts_with("19°C Yes"), "{a:?}");
+}
+
+/// Restored sales: only today's (UTC) realized P&L counts toward the daily
+/// loss limit; a sale larger than the holding is refused, not applied.
+#[test]
+fn restored_sales_count_toward_today_only() {
+    let m = market(vec![ObservationFilter::AllRows]);
+    let mut engine = Engine::new(
+        config(RunMode::Paper),
+        Arc::new(FixedModel(vec![0.985, 0.012, 0.002, 0.001])),
+    );
+    let state = RestoreState {
+        markets: vec![m.clone()],
+        fills: vec![
+            // Yesterday (UTC): +$1.00.
+            restored(
+                &m,
+                18,
+                "wm-a",
+                Side::Buy,
+                "0.50",
+                10,
+                "2026-06-30T09:00:00Z",
+            ),
+            restored(
+                &m,
+                18,
+                "wm-b",
+                Side::Sell,
+                "0.60",
+                10,
+                "2026-06-30T10:00:00Z",
+            ),
+            // Today: −$0.50 on half of a new 10 shares, then an oversell.
+            restored(
+                &m,
+                18,
+                "wm-c",
+                Side::Buy,
+                "0.50",
+                10,
+                "2026-07-01T08:00:00Z",
+            ),
+            restored(
+                &m,
+                18,
+                "wm-d",
+                Side::Sell,
+                "0.40",
+                5,
+                "2026-07-01T09:00:00Z",
+            ),
+            restored(
+                &m,
+                18,
+                "wm-e",
+                Side::Sell,
+                "0.40",
+                50,
+                "2026-07-01T09:30:00Z",
+            ),
+        ],
+        new_exposure_today: Usd::from_whole(5),
+    };
+    let s = engine.restore(&state, utc("2026-07-01T12:00:00Z"));
+    let minus_half = Usd::from_micros(-500_000);
+    assert_eq!(s.realized_today, minus_half);
+    assert_eq!(s.open_shares, Shares::from_whole(5));
+    assert_eq!(s.open_cost, Usd::from_micros(2_500_000));
+    assert_eq!(s.rejected.len(), 1, "{:?}", s.rejected);
+    assert!(
+        s.rejected[0].starts_with("wm-e on ") && s.rejected[0].contains("exceeds held"),
+        "{:?}",
+        s.rejected
+    );
+    let snap = engine.snapshot();
+    assert_eq!(snap.daily_realized_pnl, minus_half);
+    assert_eq!(snap.realized_pnl_total, minus_half);
+    assert_eq!(snap.daily_new_exposure, Usd::from_whole(5));
+}
