@@ -29,7 +29,8 @@ pub struct RestoreState {
     pub markets: Vec<DailyTemperatureMarket>,
     /// Their fills, oldest first.
     pub fills: Vec<RestoredFill>,
-    /// Cost at the limit of the opening orders approved today (UTC).
+    /// Cost at the limit of the filled part of the opening orders approved
+    /// today (UTC).
     pub new_exposure_today: Usd,
 }
 

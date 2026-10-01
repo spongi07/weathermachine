@@ -23,6 +23,6 @@ pub use gate::{
     Admission, GateCore, GatePermit, GateStats, GateWait, ProviderGate, RequestOutcome, RetryAfter,
     WaitReason,
 };
-pub use http::{FetchError, FetchRequest, FetchResponse, HttpFetcher, NetError};
+pub use http::{FetchError, FetchRequest, FetchResponse, HttpFetcher, NetError, Secret};
 pub use policy::{PolicyError, ProviderClass, RateLimitPolicy};
 pub use user_agent::build_user_agent;

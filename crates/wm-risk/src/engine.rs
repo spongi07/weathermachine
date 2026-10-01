@@ -68,6 +68,11 @@ pub struct StrategyCaps {
     pub max_market_exposure_usd: Option<Usd>,
     #[serde(with = "decimal_serde::opt_usd", default)]
     pub max_strategy_exposure_usd: Option<Usd>,
+    /// Widest book spread at which the strategy may open a position (the
+    /// default `max_spread` otherwise): a strategy that trades just before
+    /// a report, when makers widen their quotes, may need more room.
+    #[serde(with = "decimal_serde::opt_price", default)]
+    pub max_spread: Option<Price>,
 }
 
 impl Default for RiskConfig {
@@ -160,6 +165,14 @@ impl RiskConfig {
             .get(strategy.as_str())
             .and_then(|c| c.max_strategy_exposure_usd)
             .or(self.max_strategy_exposure_usd)
+    }
+
+    /// The widest spread at which `strategy` may open a position.
+    pub fn max_spread_for(&self, strategy: &StrategyId) -> Price {
+        self.strategy_caps
+            .get(strategy.as_str())
+            .and_then(|c| c.max_spread)
+            .unwrap_or(self.max_spread)
     }
 }
 
@@ -365,6 +378,22 @@ impl RiskEngine {
         self.daily.new_exposure += cost;
     }
 
+    /// An opening buy ended with `cost` (at its limit) unfilled — expired,
+    /// cancelled or rejected: that part never became exposure, so it no
+    /// longer counts toward today's new-exposure limit. Only when the order
+    /// was approved on the counter's (UTC) day; never below zero.
+    pub fn release_daily_new_exposure(
+        &mut self,
+        cost: Usd,
+        approved_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) {
+        self.roll_day(now);
+        if self.daily.date == Some(approved_at.date_naive()) {
+            self.daily.new_exposure = (self.daily.new_exposure - cost).max(Usd::ZERO);
+        }
+    }
+
     fn roll_day(&mut self, now: DateTime<Utc>) {
         let d = now.date_naive();
         if self.daily.date != Some(d) {
@@ -555,10 +584,11 @@ impl RiskEngine {
                     fail(CheckId::MarketData, "book/token mismatch".into());
                 }
                 if opening {
+                    let max_spread = cfg.max_spread_for(&intent.strategy);
                     match b.spread() {
                         None => fail(CheckId::Spread, "one-sided book".into()),
-                        Some(sp) if sp > cfg.max_spread => {
-                            fail(CheckId::Spread, format!("spread {sp} > {}", cfg.max_spread))
+                        Some(sp) if sp > max_spread => {
+                            fail(CheckId::Spread, format!("spread {sp} > {max_spread}"))
                         }
                         _ => {}
                     }

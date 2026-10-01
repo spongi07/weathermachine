@@ -519,6 +519,7 @@ fn with_f_caps() -> RiskConfig {
             position_size_usd: Usd::from_whole(100),
             max_market_exposure_usd: Some(Usd::from_whole(110)),
             max_strategy_exposure_usd: Some(Usd::from_whole(110)),
+            max_spread: None,
         },
     );
     cfg
@@ -573,6 +574,61 @@ fn a_strategy_with_its_own_caps_buys_100_shares_while_the_others_keep_theirs() {
 }
 
 #[test]
+fn unfilled_cost_returns_to_the_daily_new_exposure_of_its_day() {
+    let w = World::new();
+    let ws = weather(ProviderHealthState::Healthy, 5);
+    let mut e = RiskEngine::new(with_f_caps(), &RunId::deterministic(7));
+    let i = f_intent(&w.market, "0.94", 100, 1);
+    let book = book_for(&i.token, "0.93", "0.94");
+    let d = e.evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
+    assert!(d.is_approved(), "{:?}", checks(&d));
+    assert_eq!(e.daily_new_exposure(), Usd::from_whole(94));
+    // 40 of the 100 shares filled; the rest expired: $56.40 comes back.
+    e.release_daily_new_exposure(Usd::from_micros(56_400_000), utc(NOW), utc(NOW));
+    assert_eq!(e.daily_new_exposure(), Usd::from_micros(37_600_000));
+    // Never below zero.
+    e.release_daily_new_exposure(Usd::from_whole(500), utc(NOW), utc(NOW));
+    assert_eq!(e.daily_new_exposure(), Usd::ZERO);
+    // An order approved yesterday (UTC) does not touch today's counter.
+    let mut e = RiskEngine::new(with_f_caps(), &RunId::deterministic(7));
+    let i = f_intent(&w.market, "0.94", 100, 2);
+    assert!(
+        e.evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None))
+            .is_approved()
+    );
+    e.release_daily_new_exposure(Usd::from_whole(94), utc(NOW) - Duration::days(1), utc(NOW));
+    assert_eq!(e.daily_new_exposure(), Usd::from_whole(94));
+}
+
+#[test]
+fn a_strategy_may_have_its_own_spread_limit() {
+    let w = World::new();
+    let ws = weather(ProviderHealthState::Healthy, 5);
+    let i = f_intent(&w.market, "0.94", 100, 1);
+    // A 0.08 spread: above the default 0.05.
+    let book = book_for(&i.token, "0.86", "0.94");
+    let run = |cfg: RiskConfig| {
+        RiskEngine::new(cfg, &RunId::deterministic(7)).evaluate(
+            i.clone(),
+            &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None),
+        )
+    };
+    assert_eq!(checks(&run(with_f_caps())), vec![CheckId::Spread]);
+    let mut wide = with_f_caps();
+    wide.strategy_caps
+        .get_mut("F_peak_slot")
+        .unwrap()
+        .max_spread = Some(Price::parse("0.10").unwrap());
+    let d = run(wide.clone());
+    assert!(d.is_approved(), "{:?}", checks(&d));
+    assert_eq!(
+        wide.max_spread_for(&StrategyId::new("A_buy_yes_final_high").unwrap()),
+        Price::parse("0.05").unwrap(),
+        "the others keep the default"
+    );
+}
+
+#[test]
 fn strategy_caps_parse_and_are_validated() {
     let cfg = with_f_caps();
     cfg.validate().unwrap();
@@ -606,10 +662,12 @@ fn strategy_caps_parse_and_are_validated() {
         [strategy_caps.F_peak_slot]
         position_size_usd = "100.00"
         max_market_exposure_usd = "110.00"
+        max_spread = "0.10"
     "#;
     let parsed: RiskConfig = toml::from_str(toml_text).unwrap();
     let f = &parsed.strategy_caps["F_peak_slot"];
     assert_eq!(f.position_size_usd, Usd::from_whole(100));
+    assert_eq!(f.max_spread, Price::parse("0.10").ok());
     assert_eq!(f.max_market_exposure_usd, Some(Usd::from_whole(110)));
     assert_eq!(
         f.max_strategy_exposure_usd, None,

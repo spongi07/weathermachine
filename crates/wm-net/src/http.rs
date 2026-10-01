@@ -5,8 +5,8 @@ use crate::gate::{GatePermit, GateWait, ProviderGate, RequestOutcome, RetryAfter
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use reqwest::header::{
-    CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH,
-    LAST_MODIFIED, RETRY_AFTER,
+    AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE,
+    IF_NONE_MATCH, LAST_MODIFIED, RETRY_AFTER,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,29 @@ pub struct FetchRequest {
     /// Longest time to wait for the gate before giving up (caller reschedules).
     pub max_gate_wait: Duration,
     pub accept: Option<&'static str>,
+    /// `Authorization` header (an API key). Sent as a sensitive header,
+    /// never in the URL; [`Secret`] keeps it out of `Debug` output.
+    pub authorization: Option<Secret>,
+}
+
+/// A secret header value: never printed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<secret>")
+    }
 }
 
 impl FetchRequest {
@@ -46,7 +69,14 @@ impl FetchRequest {
             conditional: true,
             max_gate_wait: Duration::ZERO,
             accept: None,
+            authorization: None,
         }
+    }
+
+    /// Send an `Authorization` header (marked sensitive).
+    pub fn authorization(mut self, value: Secret) -> Self {
+        self.authorization = Some(value);
+        self
     }
 
     pub fn station(mut self, s: StationId) -> Self {
@@ -258,6 +288,12 @@ impl HttpFetcher {
                 HeaderName::from_static("accept"),
                 HeaderValue::from_static(a),
             );
+        }
+        if let Some(secret) = &req.authorization
+            && let Ok(mut v) = HeaderValue::from_str(secret.expose())
+        {
+            v.set_sensitive(true);
+            headers.insert(AUTHORIZATION, v);
         }
         let cached = if req.conditional {
             self.cache.get(&req.url)

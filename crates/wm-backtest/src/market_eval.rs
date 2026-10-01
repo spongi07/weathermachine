@@ -40,6 +40,7 @@
 //! lower bound on what was offered.
 
 use crate::forecast_eval::{ForecastHistory, ratio_ci};
+use crate::market_gk::{self, GkDay, KnmiAccuracy, KnmiAccuracyRow, KnmiHistory};
 use crate::market_makers::{self, FlowCollector, MakerTakerStudy};
 use crate::market_peak;
 use crate::market_sim::{
@@ -342,6 +343,21 @@ pub struct MarketStudyReport {
     /// second half.
     #[serde(default)]
     pub f_out_of_sample: Option<String>,
+    /// Strategies G–K's rules at traded prices (their own stakes).
+    #[serde(default)]
+    pub gk_strategies: Vec<StrategyRow>,
+    #[serde(default)]
+    pub gk_verdict: Vec<String>,
+    /// Per strategy G–K: the rule best on the first half, on the second.
+    #[serde(default)]
+    pub gk_out_of_sample: Vec<String>,
+    /// How often the next METAR raised the high, by KNMI's ten-minute mean
+    /// before it (strategy K's `p_new_high`).
+    #[serde(default)]
+    pub knmi_accuracy: Vec<KnmiAccuracyRow>,
+    /// Market days with KNMI readings.
+    #[serde(default)]
+    pub knmi_days: u64,
     /// Plain-language conclusions.
     pub verdict: Vec<String>,
 }
@@ -472,9 +488,21 @@ const LATENCY_BINS: [(&str, i64, i64); 6] = [
 
 /// Run the study. `forecasts` (when the live model uses the forecast) must
 /// cover the history as in training; `None` evaluates the model without it.
+/// Strategy K is not replayed (no KNMI readings): see [`market_study_with`].
 pub fn market_study(
     observations: &[Observation],
     forecasts: Option<&ForecastHistory>,
+    days: &[MarketDay],
+    cfg: &MarketStudyConfig,
+) -> MarketStudyReport {
+    market_study_with(observations, forecasts, None, days, cfg)
+}
+
+/// [`market_study`] with KNMI's ten-minute readings for strategy K.
+pub fn market_study_with(
+    observations: &[Observation],
+    forecasts: Option<&ForecastHistory>,
+    knmi: Option<&KnmiHistory>,
     days: &[MarketDay],
     cfg: &MarketStudyConfig,
 ) -> MarketStudyReport {
@@ -555,8 +583,14 @@ pub fn market_study(
         f_strategies: Vec::new(),
         f_verdict: Vec::new(),
         f_out_of_sample: None,
+        gk_strategies: Vec::new(),
+        gk_verdict: Vec::new(),
+        gk_out_of_sample: Vec::new(),
+        knmi_accuracy: Vec::new(),
+        knmi_days: 0,
         verdict: Vec::new(),
     };
+    let mut knmi_accuracy = KnmiAccuracy::default();
     let mut flows = FlowCollector::default();
     let mut points: Vec<Point> = Vec::new();
     let mut scored_dates: Vec<NaiveDate> = Vec::new();
@@ -623,7 +657,16 @@ pub fn market_study(
                 let day_index = scored_dates.len();
                 let before = points.len();
                 let per_bucket = trades_by_bucket(md, cfg.min_trade_shares);
-                let decisions = decisions(&states, [&model, &candidate], &per_bucket, cfg);
+                let decisions = decisions(
+                    &states,
+                    [&model, &candidate],
+                    &per_bucket,
+                    cfg,
+                    cfg.first_decision_minute,
+                );
+                // G–K decide from local midnight (J quotes the morning).
+                let all_day =
+                    decisions_from_midnight(&states, [&model, &candidate], &per_bucket, cfg);
                 score_day(md, day_index, &decisions, cfg, &mut points, &mut report);
                 let mut trades = market_sim::simulate_day(
                     md.date,
@@ -664,6 +707,27 @@ pub fn market_study(
                     &cfg.routine_minutes,
                     cfg.tz,
                 ));
+                let readings = knmi.and_then(|k| k.get(date)).map(Vec::as_slice);
+                let peak_before = peaks.build();
+                trades.extend(market_gk::simulate_gk(
+                    &GkDay {
+                        date: md.date,
+                        buckets: &md.buckets,
+                        labels: &md.labels,
+                        winner: md.winner,
+                        decisions: &all_day,
+                        per_bucket: &per_bucket,
+                        peak: &peak_before,
+                        knmi: readings.filter(|r| !r.is_empty()),
+                        tz: cfg.tz,
+                    },
+                    &cfg.sim,
+                    cfg.taker_fee_rate,
+                    &cfg.routine_minutes,
+                ));
+                if let Some(r) = readings.filter(|r| !r.is_empty()) {
+                    knmi_accuracy.add_day(&all_day, r);
+                }
                 f_days.push(*date);
                 flows.add_day(
                     md.date,
@@ -787,6 +851,23 @@ pub fn market_study(
         cfg.bootstrap_iterations,
         cfg.seed ^ 0x54,
     );
+    report.knmi_days = knmi_accuracy.days;
+    report.knmi_accuracy = knmi_accuracy.rows();
+    report.gk_strategies = market_gk::gk_rows(
+        &report.sim_trades,
+        &cfg.sim,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x55,
+    );
+    report.gk_verdict = market_gk::verdict(&report.gk_strategies, &cfg.sim, report.knmi_days);
+    report.gk_out_of_sample = market_gk::out_of_sample(
+        &report.sim_trades,
+        &cfg.sim,
+        &f_days,
+        report.knmi_days,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x56,
+    );
     report.maker_taker = flows.finish(
         cfg.taker_fee_rate,
         cfg.sim.maker.rebate_share,
@@ -797,7 +878,17 @@ pub fn market_study(
     report
 }
 
-/// Every decision of a market day from the first decision time: each
+/// [`decisions`] from local midnight.
+fn decisions_from_midnight(
+    states: &[(DateTime<Utc>, wm_strategy::PeakFeatures)],
+    models: [&EmpiricalPeakModel; 2],
+    per_bucket: &[Vec<&MarketTrade>],
+    cfg: &MarketStudyConfig,
+) -> Vec<Decision> {
+    decisions(states, models, per_bucket, cfg, 0)
+}
+
+/// Every decision of a market day from local minute `first_minute`: each
 /// structure's distribution (trained on earlier days) and every bucket's
 /// quote at the decision time (observation + knowledge delay).
 fn decisions(
@@ -805,11 +896,12 @@ fn decisions(
     models: [&EmpiricalPeakModel; 2],
     per_bucket: &[Vec<&MarketTrade>],
     cfg: &MarketStudyConfig,
+    first_minute: u16,
 ) -> Vec<Decision> {
     let lookback = Duration::minutes(cfg.sim.e.lookback_minutes.max(1));
     states
         .iter()
-        .filter(|(_, f)| f.local_minute_now >= cfg.first_decision_minute)
+        .filter(|(_, f)| f.local_minute_now >= first_minute)
         .map(|(t, f)| {
             let knowledge = *t + cfg.knowledge_delay;
             Decision {
@@ -1359,6 +1451,7 @@ fn verdict(r: &MarketStudyReport) -> Vec<String> {
     if let Some(line) = &r.f_out_of_sample {
         v.push(line.clone());
     }
+    v.extend(r.gk_out_of_sample.iter().cloned());
     if r.resolution_checked > 0 {
         v.push(format!(
             "The METAR high matched the resolved bucket on {} of {} days.",
@@ -1525,6 +1618,14 @@ impl MarketStudyReport {
             &self.sim,
             &self.f_verdict,
             self.f_out_of_sample.as_deref(),
+        ));
+        s.push_str(&market_gk::markdown(
+            &self.gk_strategies,
+            &self.sim,
+            &self.gk_verdict,
+            &self.gk_out_of_sample,
+            &self.knmi_accuracy,
+            self.knmi_days,
         ));
         s.push_str(&market_makers::maker_taker_markdown(&self.maker_taker));
         for t in &self.timelines {
@@ -2493,6 +2594,37 @@ mod tests {
         assert!(old.peak_times.is_none() && old.f_strategies.is_empty());
         assert!(old.sim_trades.iter().all(|t| t.filled.is_none()));
         assert_eq!(old.sim.f, crate::PeakSlotSim::default());
+
+        // Strategies G–K: every rule has a row, every family a verdict, and
+        // K says it was not replayed without KNMI readings.
+        assert_eq!(
+            r.gk_strategies.len(),
+            crate::market_gk::rules(&r.sim.gk).len()
+        );
+        assert_eq!(r.gk_strategies.iter().filter(|x| x.live).count(), 5);
+        assert_eq!(r.gk_verdict.len(), 5, "{:?}", r.gk_verdict);
+        assert!(r.gk_verdict[4].starts_with("Strategy K: not replayed"));
+        assert_eq!(r.knmi_days, 0);
+        assert!(md.contains("## Strategies G–K at traded prices"), "{md}");
+        assert!(md.contains("| G **live** | YES 0.01–0.08 |"), "{md}");
+        assert!(!md.contains("| K **live**"), "no K rows without readings");
+        assert!(pos("## Strategy F at traded prices") < pos("## Strategies G–K"));
+        // Reports written before G–K still load.
+        let mut older = serde_json::to_value(&r).unwrap();
+        let o = older.as_object_mut().unwrap();
+        for k in [
+            "gk_strategies",
+            "gk_verdict",
+            "gk_out_of_sample",
+            "knmi_accuracy",
+            "knmi_days",
+        ] {
+            o.remove(k);
+        }
+        o["sim"].as_object_mut().unwrap().remove("gk");
+        let older: MarketStudyReport = serde_json::from_value(older).unwrap();
+        assert!(older.gk_strategies.is_empty() && older.knmi_days == 0);
+        assert_eq!(older.sim.gk, crate::market_gk::GkSim::default());
     }
 
     #[test]

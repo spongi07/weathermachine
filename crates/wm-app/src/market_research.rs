@@ -10,7 +10,9 @@
 //!    are used only to count distinct traders.
 //! 4. The METAR history (and the forecast history, when the installed model
 //!    uses the forecast) comes from the training caches, downloaded the same
-//!    way when missing.
+//!    way when missing. With `WM_KNMI_API_KEY` set, KNMI's ten-minute readings
+//!    of the station are downloaded a week at a time (cached once a week is
+//!    more than eight days old: KNMI may fill gaps for seven) for strategy K.
 //! 5. [`wm_backtest::market_study`] replays it all prequentially; the report
 //!    is written as Markdown and JSON.
 //!
@@ -23,16 +25,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 use wm_backtest::{
-    ForecastHistory, MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade, market_study,
+    ForecastHistory, KnmiHistory, MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade,
+    market_study_with,
 };
 use wm_core::ids::ConditionId;
 use wm_core::market::{DailyTemperatureMarket, OutcomeSide, Side};
 use wm_core::time::local_day_bounds;
+use wm_core::weather::TenMinuteObservation;
 use wm_polymarket::{
     DataApiClient, GammaClient, GammaEvent, LocationMarketSpec, build_market, event_slug,
     parse_events,
 };
-use wm_weather::{IemArchive, OpenMeteoPreviousRuns};
+use wm_weather::{IemArchive, KnmiTenMinute, OpenMeteoPreviousRuns};
 
 /// Longest wait for a gate per request.
 const MAX_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -59,6 +63,8 @@ pub struct MarketResearchPlan {
     pub study: MarketStudyConfig,
     /// Evaluate the model with the forecast (as the installed model does).
     pub use_forecast: bool,
+    /// KNMI EDR location of the station (strategy K's replay); `None`: none.
+    pub knmi_location: Option<String>,
     pub cache_dir: PathBuf,
     /// Markdown report; the JSON report is written beside it.
     pub report_out: PathBuf,
@@ -71,6 +77,9 @@ pub struct MarketResearchClients<'a> {
     pub archive: &'a IemArchive,
     /// Required only when the plan uses the forecast.
     pub forecast: Option<&'a OpenMeteoPreviousRuns>,
+    /// KNMI's ten-minute readings (needs `WM_KNMI_API_KEY`); `None`: K is not
+    /// replayed.
+    pub knmi: Option<&'a KnmiTenMinute>,
 }
 
 /// Progress callbacks.
@@ -82,6 +91,11 @@ pub enum ResearchProgress {
         total: u32,
     },
     History(Progress),
+    /// KNMI readings of the week from `from` (cached or downloading).
+    Knmi {
+        from: NaiveDate,
+        to: NaiveDate,
+    },
     Studying {
         market_days: usize,
     },
@@ -382,6 +396,18 @@ pub async fn run(
         }
         _ => None,
     };
+    let knmi = match (clients.knmi, plan.knmi_location.as_deref()) {
+        (Some(client), Some(location)) => {
+            match knmi_history(client, plan, location, now, progress, shutdown).await {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "KNMI readings unavailable: strategy K is not replayed");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     progress(ResearchProgress::Studying {
         market_days: days.len(),
     });
@@ -390,9 +416,10 @@ pub async fn run(
     let study = plan.study.clone();
     let report = tokio::task::spawn_blocking(move || -> Result<MarketStudyReport> {
         let observations = training::import_all(&paths, &station)?;
-        Ok(market_study(
+        Ok(market_study_with(
             &observations,
             forecasts.as_ref(),
+            knmi.as_ref(),
             &days,
             &study,
         ))
@@ -413,8 +440,13 @@ pub async fn run(
         }
     }
     md.push_str(&format!(
-        "\nSources: Polymarket Gamma events (`{}`), Polymarket Data API trades (taker side), IEM METAR archive; generated {}.\n",
+        "\nSources: Polymarket Gamma events (`{}`), Polymarket Data API trades (taker side), IEM METAR archive{}; generated {}.\n",
         plan.spec.slug_template,
+        if report.knmi_days > 0 {
+            ", KNMI Data Platform ten-minute observations (EDR API)"
+        } else {
+            ""
+        },
         now.format("%Y-%m-%d %H:%M UTC")
     ));
     training::write_atomic(&markdown, md.as_bytes())?;
@@ -427,4 +459,74 @@ pub async fn run(
         days_cached: cached,
         days_downloaded: downloaded,
     })
+}
+
+/// Days of readings per download; a week of one station is ~1,000 values.
+const KNMI_CHUNK_DAYS: i64 = 7;
+
+/// A chunk is cached once its last day is this far in the past: KNMI may
+/// add missing observations for seven days.
+const KNMI_FINAL_AFTER_DAYS: i64 = 8;
+
+/// KNMI's ten-minute readings of the plan's days, by local date: a week per
+/// request, cached once final.
+async fn knmi_history(
+    client: &KnmiTenMinute,
+    plan: &MarketResearchPlan,
+    location: &str,
+    now: DateTime<Utc>,
+    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<KnmiHistory> {
+    let tz = plan.spec.timezone;
+    let station = &plan.train.station;
+    let dir = plan
+        .cache_dir
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(|| plan.cache_dir.clone(), Path::to_path_buf)
+        .join("knmi")
+        .join(station.as_str());
+    let today = wm_core::time::local_date(now, tz);
+    let mut history = KnmiHistory::new();
+    let mut start = plan.from;
+    while start <= plan.to {
+        let end = (start + Duration::days(KNMI_CHUNK_DAYS - 1)).min(plan.to);
+        progress(ResearchProgress::Knmi {
+            from: start,
+            to: end,
+        });
+        let path = dir.join(format!("{start}_{end}.json"));
+        let cached: Option<Vec<TenMinuteObservation>> = read_json(&path);
+        let readings = match cached {
+            Some(r) => r,
+            None => {
+                let (from, _) = local_day_bounds(start, tz);
+                let (_, to) = local_day_bounds(end, tz);
+                let r = tokio::select! {
+                    r = client.fetch(station, location, from, to, MAX_GATE_WAIT, 3) => r,
+                    _ = shutdown.changed() => bail!("shutting down"),
+                }
+                .with_context(|| format!("KNMI readings {start} → {end}"))?;
+                if (today - end).num_days() >= KNMI_FINAL_AFTER_DAYS {
+                    std::fs::create_dir_all(&dir)
+                        .with_context(|| format!("creating {}", dir.display()))?;
+                    training::write_atomic(&path, &serde_json::to_vec(&r)?)?;
+                }
+                r
+            }
+        };
+        for r in readings {
+            history
+                .entry(wm_core::time::local_date(r.interval_end, tz))
+                .or_default()
+                .push(r);
+        }
+        start = end + Duration::days(1);
+    }
+    for v in history.values_mut() {
+        v.sort_by_key(|r| r.interval_end);
+        v.dedup_by_key(|r| r.interval_end);
+    }
+    Ok(history)
 }

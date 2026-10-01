@@ -20,6 +20,7 @@
 //! | `WM_FORECAST`       | `false` disables the day-1 forecast (fetch + training) |
 //! | `WM_FORECAST_MODEL` | Open-Meteo model id, e.g. `gfs_global`             |
 //! | `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key (commercial host)  |
+//! | `WM_KNMI_API_KEY`   | KNMI Data Platform key (strategy K's readings)     |
 //! | `WM_LOG_FORMAT`     | `json` \| `pretty`                                   |
 
 use anyhow::{Context, Result, bail};
@@ -28,7 +29,7 @@ use std::path::{Path, PathBuf};
 use wm_core::market::TempUnit;
 use wm_core::resolution::ObservationFilter;
 use wm_core::trading::RunMode;
-use wm_core::units::{Price, decimal_serde};
+use wm_core::units::{Price, Usd, decimal_serde};
 use wm_net::RateLimitPolicy;
 use wm_risk::RiskConfig;
 use wm_strategy::{BuyNoConfig, BuyYesConfig, SplitUnwindConfig, UnwindConfig};
@@ -105,6 +106,67 @@ pub struct ProvidersSection {
     /// Polymarket Data API: public trade history for `research market`.
     #[serde(default = "default_polymarket_data_provider")]
     pub polymarket_data: ProviderSection,
+    /// KNMI Data Platform EDR API: ten-minute station readings (predictive
+    /// input for strategy K; needs `WM_KNMI_API_KEY`).
+    #[serde(default = "default_knmi_provider")]
+    pub knmi: ProviderSection,
+}
+
+/// Two requests a minute live (a station's last 40 minutes) and one per week
+/// of history for `research market`, one at a time and at least 5 s apart
+/// (the public-data floor); KNMI's registered keys allow far more.
+fn default_knmi_provider() -> ProviderSection {
+    ProviderSection {
+        enabled: true,
+        base_url: wm_weather::knmi::DEFAULT_BASE_URL.into(),
+        policy: RateLimitPolicy {
+            min_interval: std::time::Duration::from_secs(5),
+            max_concurrency: 1,
+            timeout: std::time::Duration::from_secs(20),
+            connect_timeout: std::time::Duration::from_secs(10),
+            backoff_base: std::time::Duration::from_secs(30),
+            backoff_max: std::time::Duration::from_secs(1800),
+            throttle_backoff_base: std::time::Duration::from_secs(300),
+            circuit_failure_threshold: 5,
+            circuit_open_base: std::time::Duration::from_secs(300),
+            circuit_open_max: std::time::Duration::from_secs(3600),
+            daily_budget: Some(4_000),
+            max_body_bytes: 2 * 1024 * 1024,
+            ..RateLimitPolicy::public_data_conservative()
+        },
+    }
+}
+
+/// KNMI's ten-minute readings (strategy K and `research market`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KnmiSection {
+    /// Poll the readings while `WM_KNMI_API_KEY` is set.
+    pub enabled: bool,
+    /// CoverageJSON parameter of the ten-minute mean temperature …
+    pub mean_parameter: String,
+    /// … and of its maximum.
+    pub max_parameter: String,
+    /// EDR location id; empty: the WIGOS id of the station's WMO number
+    /// (`0-20000-0-06240` for Schiphol).
+    pub location_id: String,
+    /// Poll interval, seconds.
+    pub poll_seconds: u64,
+    /// Each poll asks for the readings of the last this-many minutes.
+    pub lookback_minutes: i64,
+}
+
+impl Default for KnmiSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mean_parameter: "ta".into(),
+            max_parameter: "tx".into(),
+            location_id: String::new(),
+            poll_seconds: 30,
+            lookback_minutes: 40,
+        }
+    }
 }
 
 /// IEM throttles each IP to one request per second; we space requests 15 s
@@ -224,6 +286,24 @@ pub struct StrategiesSection {
     /// when the section is missing: its 100 shares need their own risk caps.
     #[serde(default = "PeakSlotConfigToml::absent")]
     pub peak_slot: PeakSlotConfigToml,
+    /// Strategy G (resting NO bids on cheap buckets well above the high).
+    /// Each of G–K is off when its section is missing: it needs its own
+    /// risk caps.
+    #[serde(default = "wm_strategy::TailSellerConfig::absent")]
+    pub tail_seller: wm_strategy::TailSellerConfig,
+    /// Strategy H (YES on the bucket one degree above the high).
+    #[serde(default = "wm_strategy::NextDegreeConfig::absent")]
+    pub next_degree: wm_strategy::NextDegreeConfig,
+    /// Strategy I (NO on mid-priced buckets the model rates lower).
+    #[serde(default = "wm_strategy::MiddleFadeConfig::absent")]
+    pub middle_fade: wm_strategy::MiddleFadeConfig,
+    /// Strategy J (two-sided resting quotes in the morning).
+    #[serde(default = "wm_strategy::MorningMakerConfig::absent")]
+    pub morning_maker: wm_strategy::MorningMakerConfig,
+    /// Strategy K (the NO of the high's bucket when KNMI's ten-minute
+    /// reading says the next METAR will beat it).
+    #[serde(default = "wm_strategy::KnmiNowcastConfig::absent")]
+    pub knmi_nowcast: wm_strategy::KnmiNowcastConfig,
     pub unwind: UnwindConfig,
 }
 
@@ -565,6 +645,8 @@ pub struct AppConfigFile {
     pub model: ModelSection,
     #[serde(default)]
     pub forecast: ForecastSection,
+    #[serde(default)]
+    pub knmi: KnmiSection,
 }
 
 /// Per-location file.
@@ -656,6 +738,8 @@ pub struct EnvSettings {
     pub admin_token: Option<String>,
     /// Open-Meteo subscription key (never logged or stored).
     pub open_meteo_api_key: Option<String>,
+    /// KNMI Data Platform API key (never logged or stored).
+    pub knmi_api_key: Option<String>,
 }
 
 /// Secrets (database URL with its password, tokens, keys) are never printed.
@@ -668,6 +752,7 @@ impl std::fmt::Debug for EnvSettings {
             .field("user_agent", &self.user_agent)
             .field("admin_token", &set(&self.admin_token))
             .field("open_meteo_api_key", &set(&self.open_meteo_api_key))
+            .field("knmi_api_key", &set(&self.knmi_api_key))
             .finish()
     }
 }
@@ -804,6 +889,7 @@ impl AppConfig {
             user_agent: env_nonempty("WM_USER_AGENT"),
             admin_token: env_nonempty("WM_ADMIN_TOKEN"),
             open_meteo_api_key: env_nonempty("WM_OPEN_METEO_API_KEY"),
+            knmi_api_key: env_nonempty("WM_KNMI_API_KEY"),
         };
         let cfg = Self {
             file,
@@ -828,6 +914,7 @@ impl AppConfig {
             ("iem", &p.iem),
             ("open_meteo", &p.open_meteo),
             ("polymarket_data", &p.polymarket_data),
+            ("knmi", &p.knmi),
         ] {
             s.policy
                 .validate()
@@ -845,6 +932,16 @@ impl AppConfig {
         }
         if f.min_eval_days < 30 {
             bail!("forecast.min_eval_days must be ≥ 30");
+        }
+        let k = &self.file.knmi;
+        if k.poll_seconds < 20 {
+            bail!("knmi.poll_seconds must be ≥ 20 (the readings change every ten minutes)");
+        }
+        if !(10..=180).contains(&k.lookback_minutes) {
+            bail!("knmi.lookback_minutes must be 10..=180");
+        }
+        if k.mean_parameter.trim().is_empty() || k.max_parameter.trim().is_empty() {
+            bail!("knmi.mean_parameter and knmi.max_parameter must be set");
         }
         if f.model.is_empty()
             || !f
@@ -944,34 +1041,14 @@ impl AppConfig {
                 wm_core::units::Shares::from_whole(i64::from(f.shares)),
                 wm_core::units::Rounding::Up,
             );
-            let risk = &self.file.risk;
-            let id = wm_core::ids::StrategyId::from_static("F_peak_slot");
-            let caps = [
-                ("its position cap", Some(risk.position_size_for(&id))),
-                ("its per-market cap", risk.market_cap_for(&id)),
-                ("its per-strategy cap", risk.strategy_cap_for(&id)),
-                (
-                    "global_max_exposure_usd",
-                    Some(risk.global_max_exposure_usd),
-                ),
-                ("max_location_exposure_usd", risk.max_location_exposure_usd),
-                (
-                    "max_daily_new_exposure_usd",
-                    risk.max_daily_new_exposure_usd,
-                ),
-            ];
-            for (name, cap) in caps {
-                if let Some(cap) = cap
-                    && cost > cap
-                {
-                    bail!(
-                        "strategies.peak_slot: {} shares at up to {} cost {cost}, above {name} {cap}, so F could never trade — see [risk.strategy_caps.F_peak_slot] and the [risk] caps of the shipped configuration",
-                        f.shares,
-                        f.max_price
-                    );
-                }
-            }
+            self.check_caps(
+                "peak_slot",
+                "F_peak_slot",
+                cost,
+                &format!("{} shares at up to {}", f.shares, f.max_price),
+            )?;
         }
+        self.validate_new_strategies()?;
         self.file.risk.validate().context("risk")?;
         if self.locations.is_empty() {
             bail!("no enabled locations configured");
@@ -994,6 +1071,198 @@ impl AppConfig {
         }
         if self.file.app.snapshot_interval_ms < 100 {
             bail!("app.snapshot_interval_ms must be ≥ 100");
+        }
+        Ok(())
+    }
+
+    /// One order of `cost` must fit every pre-trade cap of strategy `id`, or
+    /// the strategy can never trade.
+    fn check_caps(&self, section: &str, id: &str, cost: Usd, what: &str) -> Result<()> {
+        let risk = &self.file.risk;
+        let sid = wm_core::ids::StrategyId::new(id.to_owned())?;
+        let letter = id.split('_').next().unwrap_or(id);
+        let caps = [
+            ("its position cap", Some(risk.position_size_for(&sid))),
+            ("its per-market cap", risk.market_cap_for(&sid)),
+            ("its per-strategy cap", risk.strategy_cap_for(&sid)),
+            (
+                "global_max_exposure_usd",
+                Some(risk.global_max_exposure_usd),
+            ),
+            ("max_location_exposure_usd", risk.max_location_exposure_usd),
+            (
+                "max_daily_new_exposure_usd",
+                risk.max_daily_new_exposure_usd,
+            ),
+        ];
+        for (name, cap) in caps {
+            if let Some(cap) = cap
+                && cost > cap
+            {
+                bail!(
+                    "strategies.{section}: {what} cost {cost}, above {name} {cap}, so {letter} could never trade — see [risk.strategy_caps.{id}] and the [risk] caps of the shipped configuration"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Strategies G–K: ranges, windows, and caps that let them trade.
+    fn validate_new_strategies(&self) -> Result<()> {
+        let st = &self.file.strategies;
+        let window = |name: &str, start: u16, end: u16| -> Result<()> {
+            if start >= end || end > 24 * 60 {
+                bail!(
+                    "strategies.{name}: need start_local_minute < end_local_minute ≤ 1440, got {start} … {end}"
+                );
+            }
+            Ok(())
+        };
+        let price_range = |name: &str, lo: Price, hi: Price| -> Result<()> {
+            if !(Price::ZERO < lo && lo <= hi && hi < Price::ONE) {
+                bail!("strategies.{name}: need 0 < minimum ≤ maximum < 1, got {lo} … {hi}");
+            }
+            Ok(())
+        };
+        let positive = |name: &str, v: Usd| -> Result<()> {
+            if v <= Usd::ZERO {
+                bail!("strategies.{name}.notional must be positive");
+            }
+            Ok(())
+        };
+        let resting = |name: &str, cancel: i64, rest: i64| -> Result<()> {
+            if !(1..=29).contains(&cancel) || !(1..=29).contains(&rest) || cancel + rest >= 30 {
+                bail!(
+                    "strategies.{name}: need 1 ≤ cancel_before_report_minutes, min_rest_minutes and their sum < 30 (reports are half-hourly), got {cancel} + {rest}"
+                );
+            }
+            Ok(())
+        };
+
+        let g = &st.tail_seller;
+        price_range("tail_seller", g.min_yes_price, g.max_yes_price)?;
+        window("tail_seller", g.start_local_minute, g.end_local_minute)?;
+        positive("tail_seller", g.notional)?;
+        resting(
+            "tail_seller",
+            g.cancel_before_report_minutes,
+            g.min_rest_minutes,
+        )?;
+        if g.min_distance < 1 {
+            bail!("strategies.tail_seller.min_distance must be ≥ 1 (a bucket above the high)");
+        }
+        if !(g.max_model_ratio >= 0.0 && g.max_model_ratio.is_finite()) {
+            bail!("strategies.tail_seller.max_model_ratio must be ≥ 0");
+        }
+        if g.enabled {
+            self.check_caps(
+                "tail_seller",
+                wm_strategy::tail_seller::ID,
+                g.notional,
+                "one order",
+            )?;
+            let highest_bid = g.min_yes_price.complement();
+            if highest_bid > self.file.risk.max_price {
+                bail!(
+                    "strategies.tail_seller: a YES offered at {} is a NO bid at {highest_bid}, above risk.max_price {}; raise min_yes_price",
+                    g.min_yes_price,
+                    self.file.risk.max_price
+                );
+            }
+        }
+
+        let h = &st.next_degree;
+        price_range("next_degree", h.min_price, h.max_price)?;
+        positive("next_degree", h.notional)?;
+        if !(h.until_quantile > 0.0 && h.until_quantile <= 1.0) {
+            bail!("strategies.next_degree.until_quantile must be in (0, 1]");
+        }
+        window(
+            "next_degree",
+            h.start_local_minute,
+            h.fallback_end_local_minute,
+        )?;
+        if h.max_drop_tenths < 0 || !(h.min_model_ratio >= 0.0 && h.min_model_ratio.is_finite()) {
+            bail!("strategies.next_degree: max_drop_tenths and min_model_ratio must be ≥ 0");
+        }
+        if h.enabled {
+            self.check_caps(
+                "next_degree",
+                wm_strategy::next_degree::ID,
+                h.notional,
+                "one trade",
+            )?;
+        }
+
+        let i = &st.middle_fade;
+        if !(0.0 < i.min_mid && i.min_mid < i.max_mid && i.max_mid < 1.0) {
+            bail!(
+                "strategies.middle_fade: need 0 < min_mid < max_mid < 1, got {} … {}",
+                i.min_mid,
+                i.max_mid
+            );
+        }
+        if !(0.0..=0.2).contains(&i.calibration_bias) || !(0.0..1.0).contains(&i.min_model_gap) {
+            bail!(
+                "strategies.middle_fade: calibration_bias must be in [0, 0.2] and min_model_gap in [0, 1)"
+            );
+        }
+        window("middle_fade", i.start_local_minute, i.end_local_minute)?;
+        positive("middle_fade", i.notional)?;
+        if i.enabled {
+            self.check_caps(
+                "middle_fade",
+                wm_strategy::middle_fade::ID,
+                i.notional,
+                "one trade",
+            )?;
+        }
+
+        let j = &st.morning_maker;
+        if !(0.0 < j.min_mid && j.min_mid < j.max_mid && j.max_mid < 1.0) {
+            bail!(
+                "strategies.morning_maker: need 0 < min_mid < max_mid < 1, got {} … {}",
+                j.min_mid,
+                j.max_mid
+            );
+        }
+        if j.min_spread > j.max_spread {
+            bail!("strategies.morning_maker: min_spread above max_spread");
+        }
+        window("morning_maker", j.start_local_minute, j.end_local_minute)?;
+        positive("morning_maker", j.notional)?;
+        resting(
+            "morning_maker",
+            j.cancel_before_report_minutes,
+            j.min_rest_minutes,
+        )?;
+        if j.enabled {
+            self.check_caps(
+                "morning_maker",
+                wm_strategy::morning_maker::ID,
+                j.notional,
+                "one order",
+            )?;
+        }
+
+        let k = &st.knmi_nowcast;
+        price_range("knmi_nowcast", k.min_price, k.max_price)?;
+        positive("knmi_nowcast", k.notional)?;
+        if k.mean_margin_tenths < 0 || k.max_age_minutes < 1 || k.max_lead_minutes < 1 {
+            bail!(
+                "strategies.knmi_nowcast: mean_margin_tenths ≥ 0, max_age_minutes ≥ 1 and max_lead_minutes ≥ 1 required"
+            );
+        }
+        if !(k.p_new_high > 0.0 && k.p_new_high < 1.0) {
+            bail!("strategies.knmi_nowcast.p_new_high must be in (0, 1)");
+        }
+        if k.enabled {
+            self.check_caps(
+                "knmi_nowcast",
+                wm_strategy::knmi_nowcast::ID,
+                k.notional,
+                "one trade",
+            )?;
         }
         Ok(())
     }
@@ -1170,21 +1439,57 @@ mod tests {
             cfg.file.risk.position_size_usd,
             wm_core::units::Usd::from_whole(10)
         );
-        // $100 for the $10 strategies plus one $100 position of strategy F,
-        // which alone may exceed the $10 per position.
+        // F and G–K at once: $420 of capital at most, $400 of worst case.
         let usd = wm_core::units::Usd::from_whole;
-        assert_eq!(cfg.file.risk.global_max_exposure_usd, usd(200));
-        let f_id = wm_core::ids::StrategyId::from_static("F_peak_slot");
-        assert_eq!(cfg.file.risk.position_size_for(&f_id), usd(100));
+        let risk = &cfg.file.risk;
+        assert_eq!(risk.global_max_exposure_usd, usd(400));
+        let id = |s: &'static str| wm_core::ids::StrategyId::from_static(s);
+        assert_eq!(risk.position_size_for(&id("F_peak_slot")), usd(100));
         assert_eq!(
-            cfg.file
-                .risk
-                .position_size_for(&wm_core::ids::StrategyId::from_static(
-                    "E_book_confirmed_high"
-                )),
+            risk.position_size_for(&id("E_book_confirmed_high")),
             usd(10)
         );
-        assert_eq!(cfg.file.risk.max_daily_loss_usd, Some(usd(30)));
+        for (s, position, capital) in [
+            ("G_tail_seller", 30, 120),
+            ("H_next_degree", 10, 30),
+            ("I_middle_fade", 10, 30),
+            ("J_morning_maker", 10, 80),
+            ("K_knmi_nowcast", 25, 50),
+        ] {
+            assert_eq!(risk.position_size_for(&id(s)), usd(position), "{s}");
+            assert_eq!(risk.strategy_cap_for(&id(s)), Some(usd(capital)), "{s}");
+            assert_eq!(risk.market_cap_for(&id(s)), Some(usd(400)), "{s}");
+        }
+        assert_eq!(risk.market_cap_for(&id("F_peak_slot")), Some(usd(400)));
+        assert_eq!(
+            risk.max_spread_for(&id("K_knmi_nowcast")),
+            Price::saturating_from_micros(100_000)
+        );
+        assert_eq!(risk.max_daily_loss_usd, Some(usd(100)));
+        assert_eq!(risk.max_daily_new_exposure_usd, Some(usd(600)));
+        // A–E are off; G–K run with the documented defaults.
+        let st = &cfg.file.strategies;
+        assert!(
+            !st.buy_yes.enabled
+                && !st.buy_no.enabled
+                && !st.split_unwind.enabled
+                && !st.certain.enabled
+                && !st.book_confirmed.enabled
+        );
+        assert_eq!(st.tail_seller, wm_strategy::TailSellerConfig::default());
+        assert_eq!(st.next_degree, wm_strategy::NextDegreeConfig::default());
+        assert_eq!(st.middle_fade, wm_strategy::MiddleFadeConfig::default());
+        assert_eq!(st.morning_maker, wm_strategy::MorningMakerConfig::default());
+        assert_eq!(st.knmi_nowcast, wm_strategy::KnmiNowcastConfig::default());
+        assert_eq!(
+            st.unwind.exempt_strategies,
+            wm_strategy::default_exempt_strategies()
+        );
+        assert_eq!(cfg.file.knmi, KnmiSection::default());
+        assert_eq!(
+            cfg.file.providers.knmi.base_url,
+            wm_weather::knmi::DEFAULT_BASE_URL
+        );
         // The operator moved F's slot to 75 % → 95 % after the replay; the
         // rest of the section states the documented defaults.
         let f = cfg.peak_slot();
@@ -1266,13 +1571,26 @@ mod tests {
         let text = shipped_without(
             &[
                 "providers.polymarket_data",
+                "providers.knmi",
+                "providers.knmi.policy",
+                "knmi",
                 "strategies.certain",
                 "strategies.book_confirmed",
                 "strategies.peak_slot",
                 "strategies.peak_slot.fallback_slots",
+                "strategies.tail_seller",
+                "strategies.next_degree",
+                "strategies.middle_fade",
+                "strategies.morning_maker",
+                "strategies.knmi_nowcast",
                 "risk.strategy_caps.F_peak_slot",
+                "risk.strategy_caps.G_tail_seller",
+                "risk.strategy_caps.H_next_degree",
+                "risk.strategy_caps.I_middle_fade",
+                "risk.strategy_caps.J_morning_maker",
+                "risk.strategy_caps.K_knmi_nowcast",
             ],
-            &["market_weight", "max_market_spread"],
+            &["market_weight", "max_market_spread", "exempt_strategies"],
         );
         assert!(
             text.lines()
@@ -1290,9 +1608,27 @@ mod tests {
         }
         assert!(st.certain.enabled);
         assert_eq!(st.book_confirmed, BookConfirmedConfigToml::default());
-        // F needs its own risk caps: without its section it is off.
+        // F and G–K need their own risk caps: without a section each is off.
         assert!(!st.peak_slot.enabled);
+        assert!(
+            !st.tail_seller.enabled
+                && !st.next_degree.enabled
+                && !st.middle_fade.enabled
+                && !st.morning_maker.enabled
+                && !st.knmi_nowcast.enabled
+        );
         assert!(file.risk.strategy_caps.is_empty());
+        // Unwind leaves G–K alone even in an older file.
+        assert_eq!(
+            st.unwind.exempt_strategies,
+            wm_strategy::default_exempt_strategies()
+        );
+        assert_eq!(file.knmi, KnmiSection::default());
+        assert_eq!(
+            file.providers.knmi.base_url,
+            wm_weather::knmi::DEFAULT_BASE_URL
+        );
+        assert!(file.providers.knmi.policy.validate().is_ok());
         let data = &file.providers.polymarket_data;
         assert!(data.enabled);
         assert_eq!(data.base_url, "https://data-api.polymarket.com");
@@ -1333,12 +1669,7 @@ mod tests {
         assert!(err.contains("[risk.strategy_caps.F_peak_slot]"), "{err}");
         // … and room under every other cap an order of F meets.
         let short: [fn(&mut wm_risk::RiskConfig); 5] = [
-            |r| {
-                r.strategy_caps
-                    .get_mut("F_peak_slot")
-                    .unwrap()
-                    .max_market_exposure_usd = None;
-            },
+            |r| r.max_market_exposure_usd = Some(wm_core::units::Usd::from_whole(50)),
             |r| {
                 r.strategy_caps
                     .get_mut("F_peak_slot")
@@ -1356,7 +1687,7 @@ mod tests {
             assert!(err.contains("so F could never trade"), "case {i}: {err}");
         }
         // A disabled F needs none of it.
-        cfg.file.risk.strategy_caps.clear();
+        cfg.file.risk.strategy_caps.remove("F_peak_slot");
         cfg.file.strategies.peak_slot.enabled = false;
         cfg.validate().unwrap();
         cfg.file.risk = risk;
@@ -1379,6 +1710,71 @@ mod tests {
             );
             assert!(toml::from_str::<SeasonSlotsToml>(&text).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn g_to_k_settings_are_validated_and_need_their_caps() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        let ok = cfg.file.strategies.clone();
+        let bad: [fn(&mut StrategiesSection); 14] = [
+            |s| s.tail_seller.min_yes_price = Price::ZERO,
+            |s| s.tail_seller.max_yes_price = Price::saturating_from_micros(5_000),
+            |s| s.tail_seller.min_distance = 0,
+            |s| s.tail_seller.cancel_before_report_minutes = 0,
+            |s| {
+                (
+                    s.tail_seller.cancel_before_report_minutes,
+                    s.tail_seller.min_rest_minutes,
+                ) = (20, 10)
+            },
+            |s| s.next_degree.until_quantile = 0.0,
+            |s| s.next_degree.max_price = Price::ONE,
+            |s| (s.middle_fade.min_mid, s.middle_fade.max_mid) = (0.7, 0.3),
+            |s| s.middle_fade.calibration_bias = 0.5,
+            |s| s.morning_maker.end_local_minute = 0,
+            |s| s.morning_maker.min_spread = Price::saturating_from_micros(90_000),
+            |s| s.knmi_nowcast.p_new_high = 1.0,
+            |s| s.knmi_nowcast.max_lead_minutes = 0,
+            |s| s.knmi_nowcast.notional = wm_core::units::Usd::ZERO,
+        ];
+        for (i, f) in bad.into_iter().enumerate() {
+            cfg.file.strategies = ok.clone();
+            f(&mut cfg.file.strategies);
+            assert!(cfg.validate().is_err(), "case {i} must be refused");
+        }
+        cfg.file.strategies = ok.clone();
+        cfg.validate().unwrap();
+        // G offering YES at 0.005 would bid 0.995 for the NO, above the
+        // risk engine's 0.99 price limit: refused at start.
+        cfg.file.strategies.tail_seller.min_yes_price = Price::saturating_from_micros(5_000);
+        let err = format!("{:#}", cfg.validate().unwrap_err());
+        assert!(err.contains("above risk.max_price 0.99"), "{err}");
+        cfg.file.strategies = ok.clone();
+        // Each needs its own caps: without them G's $30 order breaks the $10
+        // default, and the error says where to look.
+        let risk = cfg.file.risk.clone();
+        for (section, id) in [
+            ("tail_seller", "G_tail_seller"),
+            ("knmi_nowcast", "K_knmi_nowcast"),
+        ] {
+            cfg.file.risk = risk.clone();
+            cfg.file.risk.strategy_caps.remove(id);
+            let err = format!("{:#}", cfg.validate().unwrap_err());
+            assert!(err.contains(&format!("strategies.{section}")), "{err}");
+            assert!(err.contains(&format!("[risk.strategy_caps.{id}]")), "{err}");
+        }
+        // H, I and J fit the $10 default; switched off, none needs anything.
+        cfg.file.risk = risk;
+        for id in ["H_next_degree", "I_middle_fade", "J_morning_maker"] {
+            cfg.file.risk.strategy_caps.remove(id);
+        }
+        cfg.validate().unwrap();
+        cfg.file.risk.strategy_caps.clear();
+        cfg.file.strategies.peak_slot.enabled = false;
+        cfg.file.strategies.tail_seller.enabled = false;
+        cfg.file.strategies.knmi_nowcast.enabled = false;
+        cfg.validate().unwrap();
     }
 
     #[test]
@@ -1448,9 +1844,10 @@ mod tests {
             user_agent: None,
             admin_token: Some("tok-secret".into()),
             open_meteo_api_key: Some("key-secret".into()),
+            knmi_api_key: Some("knmi-secret".into()),
         };
         let text = format!("{env:?}");
-        for secret in ["hunter2", "tok-secret", "key-secret"] {
+        for secret in ["hunter2", "tok-secret", "key-secret", "knmi-secret"] {
             assert!(!text.contains(secret), "{text}");
         }
         assert!(text.contains("ops@example.org"));

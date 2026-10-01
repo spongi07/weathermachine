@@ -10,7 +10,7 @@ use crate::ids::{LocationId, ProviderId};
 use crate::market::{DailyTemperatureMarket, OrderBook, TradePrint};
 use crate::trading::{Fill, OrderUpdate};
 use crate::units::TempC;
-use crate::weather::{DedupClass, Observation};
+use crate::weather::{DedupClass, Observation, TenMinuteObservation};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +61,8 @@ pub enum WeatherMachineEvent {
     WeatherObservation(ObservationEvent),
     WeatherCorrection(CorrectionEvent),
     ForecastUpdate(ForecastEvent),
+    /// A station's latest ten-minute reading (predictive input only).
+    NowcastUpdate(NowcastEvent),
     MarketSnapshot(MarketSnapshotEvent),
     OrderBookUpdate(OrderBookEvent),
     MarketTrade(MarketTradeEvent),
@@ -77,6 +79,7 @@ impl WeatherMachineEvent {
             WeatherMachineEvent::WeatherObservation(_) => "weather_observation",
             WeatherMachineEvent::WeatherCorrection(_) => "weather_correction",
             WeatherMachineEvent::ForecastUpdate(_) => "forecast_update",
+            WeatherMachineEvent::NowcastUpdate(_) => "nowcast_update",
             WeatherMachineEvent::MarketSnapshot(_) => "market_snapshot",
             WeatherMachineEvent::OrderBookUpdate(_) => "order_book_update",
             WeatherMachineEvent::MarketTrade(_) => "market_trade",
@@ -122,6 +125,14 @@ pub struct ForecastEvent {
     /// same product in training and live). `None`: a single model run.
     #[serde(default)]
     pub lead_days: Option<u8>,
+}
+
+/// A station's latest ten-minute reading from a faster source than its
+/// METAR. It never touches the observed high, the views or settlement; the
+/// engine keeps the latest per station for the strategies that read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NowcastEvent {
+    pub observation: TenMinuteObservation,
 }
 
 /// The live market feed answered a heartbeat: every book it delivered on the

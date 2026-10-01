@@ -123,9 +123,13 @@ container (restart policy) instead of limping on.
     the per-strategy caps and "one position a day" rules (F) still hold;
   * those markets, rebuilt from their latest stored Gamma payload with the
     mapping discovery uses and their stored rules review;
-  * the cost of today's opening orders, which their approvals added to the
-    daily new-exposure limit, and the realized P&L of today's restored
-    sales, which counts toward the daily loss limit.
+  * the filled cost (at the limit) of today's opening orders, which counts
+    toward the daily new-exposure limit, and the realized P&L of today's
+    restored sales, which counts toward the daily loss limit. (An opening
+    order that ends unfilled — a resting order that expires, a
+    fill-and-kill that finds no liquidity — gives its unfilled cost back to
+    the daily limit; one still resting when the old run stopped ended with
+    it.)
 
   A restored market whose settlement time has passed (the previous run
   settled it, or the restart fell across midnight) settles again at the

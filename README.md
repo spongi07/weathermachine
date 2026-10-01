@@ -21,7 +21,9 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   politeness after throttling. Polling is scheduled around the expected
   HH:25/HH:55 reports: quick polls first, slower ones until the arrival
   window closes, and the standby source (TGFTP) is asked too while a report
-  is missing. It never speeds up to chase limits.
+  is missing. It never speeds up to chase limits. With a free KNMI key it
+  also reads the airport's ten-minute readings (KNMI EDR API) — strategy
+  K's input, never the observed high or settlement.
 * **Keeps everything.** Raw payloads, every request, observation versions
   and corrections, verbatim market rules (SHA-256), every decision with its
   inputs, orders and fills, and a replayable journal of every engine input.
@@ -29,19 +31,29 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   paper. The chain is: temperature state → peak detection per resolution view
   → probability model trained on real EHAM history (downloaded from IEM and
   trained automatically on first start, retrained every 30 days in the
-  background and swapped in without a restart) → strategies (A: buy YES of
-  the final-high bucket, B: buy NO above it, C: split/unwind research, D:
-  outcomes the observations have already decided, bought on the report
-  itself, E: YES on the high's bucket at 0.90–0.99 once the clock, a
-  cooling temperature and a shrinking order book agree (switched off in the
-  shipped configuration: it lost money in the replay), F: 100 shares of YES
-  on the high's bucket inside the season's *peak slot* — in the shipped
-  configuration from the 75th to the 95th percentile of the local time at
-  which the station's history first reported its day's high — once that
-  bucket is offered above 0.90, at most 0.95) → risk engine → simulated
-  venue. A and B pool the model with the
-  market's price: the book can veto a trade, never create one, and a book
-  too wide to check the model blocks the trade.
+  background and swapped in without a restart) → strategies → risk engine
+  → simulated venue. Switched on in the shipped configuration (1 October
+  2026; each one a hypothesis that `research market` judges out of sample):
+  * **F** peak slot: 100 shares of YES on the high's bucket inside the
+    season's peak slot (the 75th to 95th percentile of the local time at
+    which the station's history first reported its day's high), once that
+    bucket is offered above 0.90, at most 0.95;
+  * **G** tail seller: resting NO bids (the YES offered at 1–8¢) on buckets
+    two or more degrees above the high, withdrawn before each report;
+  * **H** next degree: the cheap YES of high + 1 while the day can still
+    warm and the model rates it at least its price;
+  * **I** middle fade: the NO of buckets priced 0.30–0.70 that the model
+    also rates lower — the middle of the ladder is overpriced;
+  * **J** morning maker: YES and NO bids inside the spread from midnight to
+    11:00, when resting orders were paid, withdrawn before each report;
+  * **K** KNMI nowcast: the NO of the high's bucket when KNMI's ten-minute
+    mean is already above the next degree, before the METAR is published.
+
+  Switched off, code kept as research baselines (`enabled = true` brings one
+  back): A (YES of the final-high bucket), B (NO above it), C (split and
+  unwind), D (outcomes the observations have already decided), E (YES of
+  the high's bucket once the book confirms it). A and B pool the model with
+  the market's price: the book can veto a trade, never create one.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:
@@ -99,7 +111,7 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
 | `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train both model structures, evaluate the forecast and pick the structure, and learn per season when the day's high is first reported (strategy F's slots); `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
-| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices and as limit orders, when each season's high is first reported and strategy F with its variants at traded prices (one chosen out of sample), what makers earned on the other side of every trade, a report-by-report replay of each `--day`, resolution check |
+| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices and as limit orders, when each season's high is first reported and strategy F with its variants at traded prices (one chosen out of sample), what makers earned on the other side of every trade, strategies G–K with their variants at traded prices (the best of each judged out of sample), with a KNMI key how often the next METAR followed KNMI's ten-minute mean, a report-by-report replay of each `--day`, resolution check |
 | `weather-machine report paper [--from --to --print]` | The paper run day by day, from the database: METAR high, report delays and which source delivered first, the day-1 forecast's error, every evaluation's blockers per strategy, the closest calls and how they ended, model against market on the winning bucket, proposals, orders, fills, P&L, provider health. The running service also serves it at `/api/v1/report/paper` |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules, and any liquidity-reward pools (read-only) |
@@ -124,6 +136,7 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_FORECAST` | `false` never fetches or evaluates the day-1 forecast (default `true`) |
 | `WM_FORECAST_MODEL` | Open-Meteo model id for the day-1 forecast (default `gfs_global`) |
 | `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key; the free tier is for non-commercial use |
+| `WM_KNMI_API_KEY` | Free KNMI Data Platform key ([developer portal](https://developer.dataplatform.knmi.nl/)) for the ten-minute readings; sent only in the `Authorization` header. Without it strategy K does nothing |
 | `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
 | `WM_JOURNAL_RETENTION_DAYS` | Days of order-book updates kept in the replay journal (default 7; 0 = keep) |
 | `WM_BACKUP_JOURNAL` | Stack only: include the replay journal in nightly backups (default `false`) |
@@ -157,4 +170,5 @@ to GHCR.
 * [Where the edge is — and where it is not](docs/research/edge-research.md):
   the market versus models, decided outcomes (strategy D), pooling with the
   book, the evidence behind strategies E and F, providing liquidity instead
-  of taking it, and how to measure it on EHAM's settled markets.
+  of taking it, how to measure it on EHAM's settled markets, and the
+  research and data behind strategies G–K (§9).

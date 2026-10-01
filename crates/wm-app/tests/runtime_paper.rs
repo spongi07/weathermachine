@@ -534,6 +534,38 @@ async fn paper_runtime_with_postgres_persists_and_warm_starts() {
         .await
         .unwrap();
 
+    // A resting bid of strategy G that expired unfilled: its approval
+    // counted toward the daily new exposure, its expiry gave it back.
+    other
+        .upsert_order(
+            &wm_core::ids::RunId::deterministic(99),
+            &wm_storage::wm_execution_record::OrderRow {
+                client_order_id: "wm-before-restart-2".into(),
+                decision_id: 2,
+                strategy: "G_tail_seller".into(),
+                location: "amsterdam".into(),
+                event_slug: env.today_slug.clone(),
+                token: "2021".into(),
+                condition_id: "0xcond21".into(),
+                outcome_side: "NO".into(),
+                side: "BUY".into(),
+                kind: "open".into(),
+                limit_price_micros: 970_000,
+                shares_micros: 30_000_000,
+                tif: serde_json::json!({ "tif": "gtd", "expires_at": placed }),
+                status: "expired".into(),
+                filled_micros: 0,
+                avg_price_micros: None,
+                fees_micros: 0,
+                venue_order_id: None,
+                reason: Some("expired".into()),
+                created_at: placed,
+                updated_at: placed,
+            },
+        )
+        .await
+        .unwrap();
+
     // Second run: the lease was released, the day is rebuilt from storage,
     // the provider's repeated reports are recognised as duplicates, and the
     // paper book of the first run comes back.
@@ -557,7 +589,7 @@ async fn paper_runtime_with_postgres_persists_and_warm_starts() {
     assert!((pos[0].shares - 100.0).abs() < 1e-9, "{pos:?}");
     assert!(
         (snap.snapshot.risk.daily_new_exposure_usd - 95.0).abs() < 1e-9,
-        "today's new exposure counts the restored order: {:?}",
+        "today's new exposure counts the filled order, not the expired one: {:?}",
         snap.snapshot.risk
     );
     assert!(

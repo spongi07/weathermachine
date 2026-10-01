@@ -59,6 +59,8 @@ pub struct MarketSimConfig {
     pub f: PeakSlotSim,
     /// The live rules replayed as limit orders.
     pub maker: MakerSim,
+    /// Strategies G–K (and their variants).
+    pub gk: crate::market_gk::GkSim,
 }
 
 impl Default for MarketSimConfig {
@@ -76,6 +78,7 @@ impl Default for MarketSimConfig {
             e: BookConfirmedSim::default(),
             f: PeakSlotSim::default(),
             maker: MakerSim::default(),
+            gk: crate::market_gk::GkSim::default(),
         }
     }
 }
@@ -969,12 +972,13 @@ pub(crate) fn losses_markdown(trades: &[SimTrade], letter: char, title: &str) ->
             .join(", ");
         let _ = writeln!(
             s,
-            "| {} | {}{} | YES {} | {:.3} | {} | {taken} |",
+            "| {} | {}{} | {} {} | {:.3} | {} | {taken} |",
             t.date,
             t.report,
             t.filled
                 .as_ref()
                 .map_or_else(String::new, |f| format!(" (filled {f})")),
+            t.side,
             t.bucket,
             t.price,
             t.resolved

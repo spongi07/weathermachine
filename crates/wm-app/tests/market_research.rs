@@ -19,7 +19,7 @@ use wm_core::time::{SystemClock, local_date};
 use wm_net::{HttpFetcher, ProviderGate, RateLimitPolicy};
 use wm_polymarket::{DataApiClient, GammaClient, LocationMarketSpec, event_slug};
 use wm_strategy::PeakConfig;
-use wm_weather::IemArchive;
+use wm_weather::{IemArchive, KnmiTenMinute};
 
 const TZ: chrono_tz::Tz = chrono_tz::Europe::Amsterdam;
 const TEMPLATE: &str = "highest-temperature-in-amsterdam-on-{month}-{day}-{year}";
@@ -254,6 +254,7 @@ fn plan(dir: &Path) -> MarketResearchPlan {
             ..MarketStudyConfig::new(eham(), TZ, PeakConfig::default())
         },
         use_forecast: false,
+        knmi_location: None,
         cache_dir: dir.join("research/polymarket/EHAM"),
         report_out: dir.join("research/eham-market.md"),
     }
@@ -273,6 +274,7 @@ async fn scores_settled_days_and_serves_a_rerun_from_the_cache() {
         data: &data,
         archive: &archive,
         forecast: None,
+        knmi: None,
     };
     let (_stop, mut stop_rx) = watch::channel(false);
     let now = at(d(2025, 4, 19), 12, 0);
@@ -406,6 +408,7 @@ async fn no_settled_market_is_an_error() {
         data: &data,
         archive: &archive,
         forecast: None,
+        knmi: None,
     };
     let (_stop, mut stop_rx) = watch::channel(false);
     let err = market_research::run(&clients, &plan, Utc::now(), &|_| {}, &mut stop_rx)
@@ -450,6 +453,7 @@ async fn a_day_whose_trades_keep_failing_is_skipped_and_the_rest_studied() {
         data: &data,
         archive: &archive,
         forecast: None,
+        knmi: None,
     };
     let (_stop, mut stop_rx) = watch::channel(false);
     let now = at(d(2025, 4, 19), 12, 0);
@@ -510,6 +514,7 @@ async fn downloads_stop_after_three_failed_days_in_a_row() {
         data: &data,
         archive: &archive,
         forecast: None,
+        knmi: None,
     };
     let (_stop, mut stop_rx) = watch::channel(false);
     let err = market_research::run(
@@ -549,4 +554,97 @@ async fn downloads_stop_after_three_failed_days_in_a_row() {
     let trade_calls = s.data.received_requests().await.unwrap().len();
     assert_eq!(trade_calls, 3 * wm_polymarket::data::PAGE_ATTEMPTS as usize);
     assert!(s.iem.received_requests().await.unwrap().is_empty());
+}
+
+/// KNMI's EDR API for one station: a reading every ten minutes of the
+/// requested window, the mean 15.4 °C and the maximum 15.6 °C.
+async fn knmi_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06240"))
+        .respond_with(|req: &Request| {
+            let q: BTreeMap<String, String> = req.url.query_pairs().into_owned().collect();
+            let (from, to) = q["datetime"].split_once('/').unwrap();
+            let parse = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+            let (mut t, to) = (parse(from), parse(to));
+            let mut times = Vec::new();
+            while t <= to {
+                times.push(format!("\"{}\"", t.format("%Y-%m-%dT%H:%M:%SZ")));
+                t += Duration::minutes(10);
+            }
+            let n = times.len();
+            let values = |v: &str| vec![v; n].join(",");
+            ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"type":"CoverageCollection","coverages":[{{"type":"Coverage","domain":{{"axes":{{"t":{{"values":[{}]}}}}}},"ranges":{{"ta":{{"values":[{}]}},"tx":{{"values":[{}]}}}}}}]}}"#,
+                times.join(","),
+                values("15.4"),
+                values("15.6")
+            ))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    let knmi_srv = knmi_server().await;
+    let dir = tempdir("knmi");
+    let mut plan = plan(&dir);
+    plan.knmi_location = Some("0-20000-0-06240".into());
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let data = DataApiClient::new(fetcher(ProviderId::polymarket_data(), 2), s.data.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let knmi = KnmiTenMinute::new(
+        fetcher(ProviderId::knmi(), 4),
+        knmi_srv.uri(),
+        "test-key",
+        "ta",
+        "tx",
+    );
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+        knmi: Some(&knmi),
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let now = at(d(2025, 4, 19), 12, 0);
+    let o = market_research::run(&clients, &plan, now, &|_| {}, &mut stop_rx)
+        .await
+        .unwrap();
+    assert_eq!(o.report.knmi_days, 3, "the three settled days");
+    let reports: u64 = o.report.knmi_accuracy.iter().map(|r| r.reports).sum();
+    assert!(reports > 0, "{:?}", o.report.knmi_accuracy);
+    assert!(
+        !o.report
+            .gk_verdict
+            .iter()
+            .any(|v| v.contains("not replayed")),
+        "{:?}",
+        o.report.gk_verdict
+    );
+    let md = std::fs::read_to_string(&o.markdown).unwrap();
+    assert!(
+        md.contains("### KNMI's ten-minute mean before the METAR (3 days)"),
+        "{md}"
+    );
+    assert!(md.contains("| K **live** |"), "{md}");
+    assert!(md.contains("KNMI Data Platform ten-minute observations"));
+    // 10–14 April is one chunk. On 19 April its last day is five days old
+    // and KNMI may still fill gaps, so it is not cached; on 30 April it is.
+    let cached = dir.join("research/knmi/EHAM/2025-04-10_2025-04-14.json");
+    assert!(!cached.exists(), "a week KNMI may still fill is not cached");
+    let later = at(d(2025, 4, 30), 12, 0);
+    market_research::run(&clients, &plan, later, &|_| {}, &mut stop_rx)
+        .await
+        .unwrap();
+    assert!(cached.exists(), "a final week is cached");
+    let rows: Vec<wm_core::weather::TenMinuteObservation> =
+        serde_json::from_slice(&std::fs::read(&cached).unwrap()).unwrap();
+    assert!(rows.len() > 5 * 144 - 10, "{}", rows.len());
+    assert_eq!(rows[0].mean, Some(wm_core::units::TempC::from_tenths(154)));
 }

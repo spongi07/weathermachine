@@ -28,8 +28,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use wm_backtest::{SessionOutput, SimulationSession};
 use wm_core::event::{
-    EventEnvelope, EventSource, MarketSnapshotEvent, ObservationEvent, OperatorCommand,
-    OrderBookEvent, TimerEvent, TimerKind, WeatherMachineEvent,
+    EventEnvelope, EventSource, MarketSnapshotEvent, NowcastEvent, ObservationEvent,
+    OperatorCommand, OrderBookEvent, TimerEvent, TimerKind, WeatherMachineEvent,
 };
 use wm_core::forecast::ForecastProduct;
 use wm_core::health::{CircuitState, ProviderHealthSnapshot, ProviderHealthState};
@@ -51,8 +51,8 @@ use wm_storage::wm_execution_record::OrderRow;
 use wm_strategy::{EmpiricalPeakModel, NoEdgeModel, ProbabilityModel};
 use wm_weather::forecast::{ForecastProvider, ForecastQuery};
 use wm_weather::{
-    CollectorConfig, CollectorRegistry, CollectorStatus, IemArchive, OpenMeteoPreviousRuns,
-    PollingHints, StationCollector,
+    CollectorConfig, CollectorRegistry, CollectorStatus, IemArchive, KnmiTenMinute,
+    OpenMeteoPreviousRuns, PollingHints, StationCollector,
 };
 
 type SharedModel = Arc<Mutex<ModelDto>>;
@@ -871,6 +871,41 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         )));
     }
 
+    // -- KNMI ten-minute readings (predictive input for strategy K) ----------------------
+    match setup::knmi_client(&cfg, &providers) {
+        Some(client) => {
+            let targets: Vec<KnmiTarget> = cfg
+                .locations
+                .iter()
+                .filter_map(|l| {
+                    Some(KnmiTarget {
+                        station: setup::location_ids(l).ok()?.station,
+                        location: setup::knmi_location(&cfg, l)?,
+                    })
+                })
+                .collect();
+            if !targets.is_empty() {
+                tasks.push(tokio::spawn(knmi_loop(
+                    client,
+                    targets,
+                    std::time::Duration::from_secs(cfg.file.knmi.poll_seconds.max(20)),
+                    Duration::minutes(cfg.file.knmi.lookback_minutes),
+                    events_tx.clone(),
+                    Arc::clone(&side),
+                    Arc::clone(&clock),
+                    shutdown.clone(),
+                )));
+            }
+        }
+        None if cfg.file.strategies.knmi_nowcast.enabled => with_side(&side, |s| {
+            s.alert(
+                "warning",
+                "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then K stays idle",
+            )
+        }),
+        None => {}
+    }
+
     // -- Markets: discovery, stream, REST fallback --------------------------------------
     let (assets_tx, assets_rx) = watch::channel(Vec::<TokenId>::new());
     let (today_tx, today_rx) = watch::channel(Vec::<TokenId>::new());
@@ -1376,6 +1411,98 @@ async fn model_maintenance_loop(
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+        }
+    }
+}
+
+/// A station whose KNMI ten-minute readings are polled.
+#[derive(Debug, Clone)]
+struct KnmiTarget {
+    station: StationId,
+    /// EDR location id (WIGOS).
+    location: String,
+}
+
+/// Polls each station's latest KNMI ten-minute readings every `poll` and
+/// hands the newest to the engine when it is newer than the last one sent.
+/// Predictive input only: failures mean strategy K waits; they are alerted
+/// once until recovery.
+#[allow(clippy::too_many_arguments)]
+async fn knmi_loop(
+    client: KnmiTenMinute,
+    targets: Vec<KnmiTarget>,
+    poll: std::time::Duration,
+    lookback: Duration,
+    events: mpsc::Sender<EventEnvelope>,
+    side: SharedSide,
+    clock: Arc<dyn Clock>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut failing = false;
+    let mut last_sent: HashMap<StationId, DateTime<Utc>> = HashMap::new();
+    loop {
+        for t in &targets {
+            let now = clock.now();
+            let fetched = tokio::select! {
+                r = client.fetch(&t.station, &t.location, now - lookback, now, std::time::Duration::from_secs(20), 1) => r,
+                _ = shutdown.changed() => return,
+            };
+            match fetched {
+                Ok(readings) => {
+                    if failing {
+                        failing = false;
+                        with_side(&side, |s| {
+                            s.alert("info", "KNMI ten-minute readings available again")
+                        });
+                    }
+                    let Some(newest) = readings.into_iter().rev().find(|r| r.mean.is_some()) else {
+                        continue;
+                    };
+                    if last_sent
+                        .get(&t.station)
+                        .is_some_and(|x| *x >= newest.interval_end)
+                    {
+                        continue;
+                    }
+                    last_sent.insert(t.station.clone(), newest.interval_end);
+                    tracing::info!(
+                        station = %t.station,
+                        interval_end = %newest.interval_end,
+                        mean = ?newest.mean,
+                        max = ?newest.max,
+                        delay_minutes = newest.delay_minutes(),
+                        "KNMI ten-minute reading"
+                    );
+                    let env = EventEnvelope::new(
+                        clock.now(),
+                        EventSource::Live,
+                        WeatherMachineEvent::NowcastUpdate(NowcastEvent {
+                            observation: newest,
+                        }),
+                    );
+                    if events.send(env).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(station = %t.station, error = %e, "KNMI ten-minute readings unavailable");
+                    if !failing {
+                        failing = true;
+                        with_side(&side, |s| {
+                            s.alert(
+                                "warning",
+                                format!(
+                                    "KNMI ten-minute readings unavailable ({e}); strategy K waits"
+                                ),
+                            )
+                        });
+                    }
+                }
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(poll) => {}
+            _ = shutdown.changed() => return,
         }
     }
 }

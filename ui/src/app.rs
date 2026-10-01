@@ -495,7 +495,29 @@ fn PeakPanel(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                     </div>
                 }
             });
-            Some(view! { <div class="peak">{views}{forecast}</div> })
+            let nowcast = l.nowcast.as_ref().map(|n| {
+                let c = |v: Option<f64>| v.map_or_else(|| DASH.to_owned(), |t| format!("{t:.1} °C"));
+                let start = n.interval_end_ms - 10 * 60 * 1000;
+                let title = if n.provider == "knmi" {
+                    "KNMI 10-minute".to_owned()
+                } else {
+                    format!("10-minute · {}", n.provider)
+                };
+                view! {
+                    <div class="fc-box" title="Ten-minute readings of the airport's weather station (KNMI), minutes before the METAR. Strategy K's input — predictive only: never the observed high or settlement.">
+                        <div class="view-head">
+                            <b>{title}</b>
+                            <span class="pill">"strategy K"</span>
+                        </div>
+                        <div class="muted small">{format!("{}–{} · arrived {:.1} min after the interval", fmt::utc_time(start), fmt::utc_time(n.interval_end_ms), n.delay_min)}</div>
+                        <div class="stats">
+                            <div><label>"Mean"</label><b>{c(n.mean_c)}</b><small>"over ten minutes"</small></div>
+                            <div><label>"Maximum"</label><b>{c(n.max_c)}</b><small>"in the interval"</small></div>
+                        </div>
+                    </div>
+                }
+            });
+            Some(view! { <div class="peak">{views}{forecast}{nowcast}</div> })
         })
     }
 }

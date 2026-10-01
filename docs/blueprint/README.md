@@ -47,9 +47,14 @@ of three labels:
 | 27b | Market pooling (A and B) | [06-strategy.md](06-strategy.md#27b-the-book-as-information--market-pooling-a-and-b) |
 | 27c | BOOK-CONFIRMED HIGH (strategy E) | [06-strategy.md](06-strategy.md#27c-book-confirmed-high--strategy-e) |
 | 27d | PEAK SLOT (strategy F) | [06-strategy.md](06-strategy.md#27d-peak-slot--strategy-f) |
+| 27e | TAIL SELLER (strategy G) | [06-strategy.md](06-strategy.md#27e-tail-seller--strategy-g) |
+| 27f | NEXT DEGREE (strategy H) | [06-strategy.md](06-strategy.md#27f-next-degree--strategy-h) |
+| 27g | MIDDLE FADE (strategy I) | [06-strategy.md](06-strategy.md#27g-middle-fade--strategy-i) |
+| 27h | MORNING MAKER (strategy J) | [06-strategy.md](06-strategy.md#27h-morning-maker--strategy-j) |
+| 27i | KNMI NOWCAST (strategy K) | [06-strategy.md](06-strategy.md#27i-knmi-nowcast--strategy-k) |
 | 28 | UnwindEngine | [06-strategy.md](06-strategy.md#28-unwindengine) |
 | 29 | RiskEngine | [07-risk-storage.md](07-risk-storage.md#29-riskengine) |
-| 30 | $10 / $100 exposure model | [07-risk-storage.md](07-risk-storage.md#30-10--100-exposure-model) |
+| 30 | Exposure model: shared limits and per-strategy caps | [07-risk-storage.md](07-risk-storage.md#30-exposure-model-shared-limits-and-per-strategy-caps) |
 | 31 | PostgreSQL schema | [07-risk-storage.md](07-risk-storage.md#31-postgresql-schema) |
 | 32 | Historical-data audit | [08-research.md](08-research.md#32-historical-data-audit) |
 | 33 | ReplayEngine | [08-research.md](08-research.md#33-replayengine) |

@@ -10,7 +10,9 @@ use wm_core::ids::{ProviderId, StationId};
 use wm_core::rng::SplitMix64;
 use wm_core::time::local_day_bounds;
 use wm_core::units::TempC;
-use wm_core::weather::{Observation, ObservationKey, QualityFlags, ReportType, TempPrecision};
+use wm_core::weather::{
+    Observation, ObservationKey, QualityFlags, ReportType, TempPrecision, TenMinuteObservation,
+};
 
 /// Parameters of a synthetic day.
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +80,50 @@ impl SyntheticDay {
                 out.push(make_obs(station, t, whole, &provider, publication_delay));
             }
             t = next_slot(t);
+        }
+        out
+    }
+
+    /// Ten-minute readings of the same signal, as an automatic weather
+    /// station publishes them (KNMI-style): the mean and the maximum of the
+    /// interval's one-minute values, to a tenth, one per interval ending on
+    /// the local day's tens of minutes, known `delay` after the interval.
+    /// Labelled synthetic.
+    pub fn ten_minute_readings(
+        &self,
+        station: &StationId,
+        delay: Duration,
+    ) -> Vec<TenMinuteObservation> {
+        let (start, end) = local_day_bounds(self.date, self.tz);
+        let mut rng =
+            SplitMix64::new(self.seed.wrapping_mul(0x2545_F491) ^ u64::from(self.date.ordinal()));
+        let hour = |t: DateTime<Utc>| {
+            let local = t.with_timezone(&self.tz);
+            f64::from(local.hour()) + f64::from(local.minute()) / 60.0
+        };
+        let mut out = Vec::new();
+        let mut t = start + Duration::minutes(10);
+        while t < end {
+            let minutes: Vec<f64> = (0..10)
+                .map(|m| self.signal(hour(t - Duration::minutes(9 - m))))
+                .collect();
+            let mean = minutes.iter().sum::<f64>() / 10.0;
+            let max = minutes.iter().copied().fold(f64::MIN, f64::max);
+            // An average of ten values: less noise than a METAR's single
+            // reading; the maximum a little above the smooth curve.
+            let noise = (rng.next_f64() - 0.5) * 2.0;
+            let gust = rng.next_f64() * 3.0;
+            let mean = TempC::from_tenths((mean + noise).round() as i32);
+            let max = TempC::from_tenths((max + noise + gust).round() as i32).max(mean);
+            out.push(TenMinuteObservation {
+                station: station.clone(),
+                provider: ProviderId::synthetic(),
+                interval_end: t,
+                mean: Some(mean),
+                max: Some(max),
+                received_at: t + delay,
+            });
+            t += Duration::minutes(10);
         }
         out
     }
@@ -287,6 +333,33 @@ mod tests {
                 o.raw_text
             );
         }
+    }
+
+    #[test]
+    fn ten_minute_readings_follow_the_reported_curve() {
+        let st = StationId::new("EHAM").unwrap();
+        let d = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let day = SyntheticDay::amsterdam(d, 7);
+        let r = day.ten_minute_readings(&st, Duration::minutes(5));
+        assert_eq!(r, day.ten_minute_readings(&st, Duration::minutes(5)));
+        assert_eq!(r.len(), 24 * 6 - 1, "every ten minutes, midnight excluded");
+        assert!(r.iter().all(|o| o.interval_end.minute() % 10 == 0
+            && o.received_at == o.interval_end + Duration::minutes(5)
+            && o.max >= o.mean
+            && o.provider == ProviderId::synthetic()));
+        // The day's highest ten-minute mean is the METARs' high within the
+        // METAR's noise and rounding.
+        let mean_high = r.iter().filter_map(|o| o.mean).max().unwrap();
+        let metar_high = day
+            .observations(&st, Duration::minutes(3))
+            .iter()
+            .filter_map(|o| o.temperature)
+            .max()
+            .unwrap();
+        assert!(
+            (mean_high.tenths() - metar_high.tenths()).abs() <= 10,
+            "{mean_high:?} vs {metar_high:?}"
+        );
     }
 
     #[test]

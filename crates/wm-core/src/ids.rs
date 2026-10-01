@@ -161,6 +161,12 @@ impl ProviderId {
     pub fn open_meteo() -> Self {
         Self("open_meteo".to_owned())
     }
+    /// KNMI Data Platform EDR API: the 10-minute readings of Dutch automatic
+    /// weather stations (predictive input only — the METAR stays the
+    /// observation and resolution source).
+    pub fn knmi() -> Self {
+        Self("knmi".to_owned())
+    }
     /// NWS Telecommunication Gateway file server (official product files).
     pub fn tgftp() -> Self {
         Self("tgftp".to_owned())

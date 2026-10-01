@@ -20,6 +20,7 @@ use wm_core::market::{
 use wm_core::portfolio::PositionBook;
 use wm_core::trading::{IntentKind, RunMode, TimeInForce};
 use wm_core::units::{Price, Rounding, Shares, Usd, round_shares_to_lot, shares_for_notional};
+use wm_core::weather::TenMinuteObservation;
 
 /// Assessment and model output for one resolution view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +45,12 @@ pub struct StrategyContext<'a> {
     /// When the day's high is usually first reported, per season (the
     /// installed model's history); `None` without such a model.
     pub peak_times: Option<&'a PeakTimes>,
+    /// Minutes past each UTC hour of the station's routine reports (empty:
+    /// unknown). Resting orders expire before the next one.
+    pub routine_minutes: &'a [u8],
+    /// The station's latest ten-minute reading from a faster source than
+    /// its METAR (KNMI), if one arrived.
+    pub nowcast: Option<&'a TenMinuteObservation>,
 }
 
 /// A strategy's trade proposal (becomes a `TradeIntent` after id assignment).

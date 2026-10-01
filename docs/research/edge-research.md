@@ -389,7 +389,8 @@ orders, not money.
 
 ## 8. Next levers (not built)
 
-* **Faster observations.** Most stale-quote profit is taken before the
+* **Faster observations** (built in October 2026 as strategy K, §9). Most
+  stale-quote profit is taken before the
   report: $3,209 in the ten minutes before, $138 in the minute after
   (1 June – 28 September 2026). Whoever takes it anticipates the METAR, so
   only a faster source can compete for it. KNMI publishes
@@ -397,10 +398,102 @@ orders, not money.
   a few minutes after each interval, through the
   [EDR API](https://developer.dataplatform.knmi.nl/edr-api) and the
   notification service (API key required).
-* **Live maker orders.** If §7 finds a maker edge: resting GTD orders in
+* **Live maker orders** (built in October 2026 for strategies G and J,
+  §9). If §7 finds a maker edge: resting GTD orders in
   paper mode, filled by the trade feed and cancelled before each report.
   This is order management that live execution (Phase 14) needs anyway.
 * **A spread limit for D.** The risk engine's spread ≤ 0.05 and "no
   one-sided book" gates apply to D too. If §4 shows stale quotes mostly in
   wide books, a separate limit for decided outcomes can be justified with
   data.
+
+## 9. October 2026: five new strategies
+
+*Question (1 October 2026).* Build five new weather strategies that are
+worth the time, with the best configuration the evidence supports, and
+remove the strategies that did not trade in the last two days.
+
+**Short answer.** Five strategies, G–K, each aimed at one mispricing that
+the settled Amsterdam markets show at traded prices *and* the literature
+explains. Three of them earn as makers or fade a bias (G, I, J), one buys the
+cheap next degree (H), one is faster than the METAR (K). None is proven: each
+is a hypothesis with replay evidence, judged out of sample by `research
+market`, to run in paper first. A, B and D (no trade on 30 September – 1
+October) are switched off, C and E were already off.
+
+### 9.1 What others found
+
+| Source | Finding | Used in |
+|---|---|---|
+| [Bürgi, Deng & Whelan, *Makers and Takers* (Kalshi)](https://www.karlwhelan.com/Papers/Kalshi.pdf) | 300,000+ contracts: a clear favourite–longshot bias; contracts under 10¢ lose over 60 % of the stake, those above 50¢ earn a small positive return. Makers earn more than takers at every price; the bias is much stronger for takers. | G, J |
+| [Cardozo & Rivero-Wildemauwe, arXiv:2609.12878](https://arxiv.org/abs/2609.12878) (Polymarket) | Purchases under 10¢ lose 19.3¢ per dollar, purchases at 90¢ or more earn 0.83¢; calibration slopes 1.01–1.13 (favourites win more often than priced). Grouped by parent event, longshots *gain* 4.1¢ — the bias depends on how contracts are counted. | G (only far tails our own data confirm), F |
+| [Becker, prediction-market microstructure](https://www.jbecker.dev/research/prediction-market-microstructure); [Akey et al. 2026](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6443103) | Takers −1.12 %, makers +1.12 % over 72.1 M Kalshi trades; on Polymarket the maker share of volume is the strongest predictor of a profitable account (§7). | J, G |
+| [Polymarket fees](https://docs.polymarket.com/trading/fees), [maker rebates](https://docs.polymarket.com/market-makers/maker-rebates), [liquidity rewards](https://docs.polymarket.com/market-makers/liquidity-rewards) | Weather takers pay 0.05 × p × (1 − p) a share; makers pay nothing and share 25 % of the fees as daily rebates; resting orders within a market's maximum spread of the midpoint can also earn liquidity rewards. | G, J (rebates not counted in the replay) |
+| [Saguillo, Ghafouri, Kiffer & Suarez-Tangil, arXiv:2508.03474](https://arxiv.org/abs/2508.03474) | About $40 M taken on Polymarket by arbitrage: within one event (prices of exclusive outcomes not summing to 1) and across related markets. | not built (below) |
+| [KNMI: new EDR collection](https://english.knmidata.nl/latest/news/2025/07/03/edr-api-new-10-minute-in-situ-meteorological-observations-collection), [dataset](https://dataplatform.knmi.nl/dataset/10-minute-in-situ-meteorological-observations-1-0), [EDR API](https://developer.dataplatform.knmi.nl/edr-api) | Ten-minute readings of every Dutch automatic station, "available a few minutes" after each interval, free API key; replaces `Actuele10mindataKNMIstations` (deprecated 1 July 2025, no updates after 29 September 2025). | K |
+| [Weather Lock-In Desk spec](https://edge-assist.duckdns.org/data-status/docs/weather/strategy) (public strategy write-up) | After a city's typical peak time, a drop of 4 °F or more below the running high leaves it final in about 92–99 % of cases: sell the brackets above it. A design, not a measured result. | F, G (as a maker) |
+| GitHub bots: [watkast/kalshi-weather-bot](https://github.com/watkast/kalshi-weather-bot), [suislanchez/polymarket-kalshi-weather-bot](https://github.com/suislanchez/polymarket-kalshi-weather-bot), [tobiasbischoff/polymarket-weather-bot](https://github.com/tobiasbischoff/polymarket-weather-bot), [myfirstcodeo/kalshi-weather-fair-value](https://github.com/myfirstcodeo/kalshi-weather-fair-value) | Almost all compare a forecast with the price and take liquidity. The published results are short (one: 8 days) or come with the author's warning: "Do not run this as a mechanical strategy; it loses." | why G–K do not trade forecast vs price |
+| Trading guides ([tradetheoutcome](https://www.tradetheoutcome.com/polymarket-weather-strategy/)) | "Cluster betting": buy several adjacent buckets for well under $1 in total. | not built: it buys the middle that our data find overpriced (I fades it) |
+
+### 9.2 What our own data say
+
+122 settled EHAM markets (June–September 2026), 191,660 traded prints,
+every decision point at the price actually traded after the bot could know
+it (`research market`):
+
+| Finding | Number | Strategy |
+|---|---|---|
+| YES at 0.00–0.02 | won 0.1 % at a mean price of 0.4 %; the makers who sold it earned +0.34¢ a share net (95 % CI +0.26 … +0.41) | G |
+| Makers by bucket against the high | +2 above +1.04¢ (−0.06 … +2.27); +3 or more +0.41¢; +1 above **−0.68¢** (−1.27 … −0.10) | G sells from +2 only |
+| Strategy B (taker NO above the high) | −$92.74 over 129 trades | B off |
+| YES at 0.02–0.10 | 5.6 % won at 5.0 %: about fair | G's 8¢ cap |
+| YES at 0.10–0.30 | 21.0 % won at 18.7 % (18.6 … 23.6); the takers on the +1 bucket gained +0.78¢ a share before fees | H |
+| YES at 0.30–0.70 | 45.4 % won at 48.5 % (42.8 … 48.0); with the model ≥ 5 points below the price 51.1 % at 53.6 % | I |
+| Makers by local time | evening before +0.71¢, 00–09 +0.61¢, 09–12 +0.47¢, 12–15 **−0.59¢** | J quotes until 11:00 |
+| Makers before a report | the high's bucket 0–5 min before: **−1.34¢** (−2.05 … −0.66) | G, J cancel 10 min before |
+| New highs | 58 reports raised the high; takers took $3,330 in the ten minutes before the observation; the first stale trade came a median 39 s after it | K is earlier; D off (too late) |
+
+### 9.3 The five strategies
+
+Full rules, risks and tests: [strategy blueprint §27e–§27i](../blueprint/06-strategy.md#27e-tail-seller--strategy-g).
+
+| | Rule (shipped values) | Size, caps | Edge it takes |
+|---|---|---|---|
+| **G** tail seller | NO bid one tick inside the book on buckets ≥ high + 2, YES offered 1–8¢, model veto; good till 10 min before the next report; 10:00–21:00 | $30 an order, $120 | longshot bias, as the maker |
+| **H** next degree | YES of high + 1 at 0.05–0.35 when the model rates it at least the ask, until the season's 75 % peak time; FAK | $10, $30 | cheap next degree while the day can warm |
+| **I** middle fade | NO of buckets with a YES midpoint of 0.30–0.70, spread ≤ 4¢, the model ≥ 5 points below; p = 1 − (mid − 0.03); FAK | $10, $30 | overpriced middle of the ladder |
+| **J** morning maker | YES and NO bids inside the spread, 00:00–11:00, midpoint 0.10–0.90, spread 2–5¢; good till 10 min before each report; no model | $10 a side, $80 | spread capture when makers are paid |
+| **K** KNMI nowcast | NO of the high's bucket when KNMI's ten-minute mean is ≥ high + 0.8 °C (maximum ≥ high + 0.5 °C) before the METAR is published; NO ask 0.02–0.75, EV at p = 0.80 ≥ 0.05; FAK | $25, $50; spread ≤ 0.10 | minutes ahead of the report |
+
+**How the configuration was chosen.** Each threshold sits where the replay
+tables change sign (G's distance 2 and its 8¢ cap, J's 11:00 end, the
+cancel 10 minutes before a report); sizes keep every strategy's worst case
+inside the shared limits ($400 global, market and location; $600 new a day;
+$100 daily loss). `research market` replays each strategy with variants (G
+≤ 3¢, ≥ 3 above, no model, from 14:00; H no model, until 90 %, maker; I no
+model, no bias, maker; J YES or NO bids only, until 09:00; K margins 0.1
+and 0.5 °C, the YES above, the reading known after 2 or 8 minutes), picks
+the best variant of each family on the first half of the days and judges it
+on the second half. Change the shipped values only when that out-of-sample
+line agrees.
+
+**Not built.** Arbitrage across the ladder (the outcome prices of one event
+not summing to 1) needs every leg filled at once: up to twelve legs, each
+paying the taker fee, from book snapshots that do not arrive together.
+Forecast-versus-price taking is the crowded trade the bots above make and
+the earlier attempts lost on (§2).
+
+### 9.4 Caveats
+
+* All evidence is in sample: one city, one summer, 122 days, correlated
+  within each day.
+* G earns fractions of a cent per dollar; one winning tail costs 12 to 100
+  times the premium. H and I take edges about the size of the taker fee plus
+  half the spread.
+* J's and G's fills come from the public tape; queue position is not
+  known, so real fills will be fewer.
+* K's `p_new_high` = 0.80 is an assumption and the KNMI delay (5 minutes)
+  is assumed: run `research market` with `WM_KNMI_API_KEY` and read *KNMI's
+  ten-minute mean before the METAR* before relying on it. Without the key K
+  does nothing.
+* Paper first: `weather-machine report paper` per strategy before any money.

@@ -467,3 +467,26 @@ async fn retrying_stops_after_its_attempts_and_never_repeats_client_errors() {
         .await;
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn an_api_key_goes_in_the_authorization_header_and_is_never_printed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/edr"))
+        .and(header("authorization", "key-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let r = req(&server, "/edr").authorization(wm_net::Secret::new("key-123"));
+    let printed = format!("{r:?}");
+    assert!(!printed.contains("key-123"), "{printed}");
+    assert!(printed.contains("<secret>"));
+    let resp = f.get(&r).await.unwrap();
+    assert_eq!(resp.status, 200);
+    assert_eq!(
+        resp.record.endpoint, "/edr",
+        "the audit label carries no key"
+    );
+}

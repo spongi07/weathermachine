@@ -124,7 +124,8 @@ fn priority(e: &WeatherMachineEvent) -> u8 {
         | WeatherMachineEvent::MarketStreamHeartbeat(_) => 3,
         WeatherMachineEvent::WeatherObservation(_)
         | WeatherMachineEvent::WeatherCorrection(_)
-        | WeatherMachineEvent::ForecastUpdate(_) => 4,
+        | WeatherMachineEvent::ForecastUpdate(_)
+        | WeatherMachineEvent::NowcastUpdate(_) => 4,
         WeatherMachineEvent::Timer(_) => 5,
     }
 }

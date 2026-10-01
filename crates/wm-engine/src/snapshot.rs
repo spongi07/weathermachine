@@ -58,6 +58,9 @@ pub struct LocationSnapshot {
     pub hint: StationHint,
     #[serde(default)]
     pub forecast: Option<ForecastSnapshot>,
+    /// The station's latest ten-minute reading (KNMI), if one arrived.
+    #[serde(default)]
+    pub nowcast: Option<wm_core::weather::TenMinuteObservation>,
 }
 
 /// Full engine snapshot.

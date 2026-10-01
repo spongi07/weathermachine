@@ -444,6 +444,14 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                     .collect()
             },
         }),
+        nowcast: l.nowcast.as_ref().map(|n| NowcastDto {
+            provider: n.provider.to_string(),
+            interval_end_ms: ms(n.interval_end),
+            mean_c: n.mean.map(wm_core::units::TempC::as_f64),
+            max_c: n.max.map(wm_core::units::TempC::as_f64),
+            received_ms: ms(n.received_at),
+            delay_min: n.delay_minutes(),
+        }),
         evaluations: l.evaluations.iter().map(evaluation_dto).collect(),
     }
 }

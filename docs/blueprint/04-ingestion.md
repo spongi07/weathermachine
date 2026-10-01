@@ -50,6 +50,22 @@ never start closer than the class floor, never start inside a `Retry-After`
 window, and never exceed the daily budget. `run_loop_request_budget_over_six_virtual_hours`
 checks the real collector loop makes 12–120 requests in six virtual hours.
 
+**KNMI ten-minute readings (strategy K's input, `[knmi]`).** With
+`WM_KNMI_API_KEY` set (and `[knmi] enabled`), one loop per station asks the
+KNMI EDR API (`10-minute-in-situ-meteorological-observations`, the station
+by its WIGOS id, `0-20000-0-06240` for Schiphol) every `poll_seconds` (30)
+for the last `lookback_minutes` (40) of `ta` (ten-minute mean) and `tx`
+(maximum), through its own gate (`[providers.knmi]`: ≥ 5 s spacing, one
+request at a time, `Retry-After` honoured, a daily budget). The key goes
+only in the `Authorization` header — never in a URL, a log line or an audit
+record. A reading newer than the last one becomes a `NowcastUpdate`; the
+log records how many minutes after its interval it arrived. It is
+predictive input only: it never changes the observed high, the views or
+settlement. Failures raise one alert, recovery another; K then does
+nothing (fail closed). K enabled without a key raises a warning and stays
+idle. At 30 s the loop makes about 2,900 requests a day, under the budget
+of 4,000.
+
 ## 10. Adaptive PollingPolicy
 
 **PURPOSE.** Decide *when* to ask, from what is expected, not from what is possible.

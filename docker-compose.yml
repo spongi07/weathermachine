@@ -79,6 +79,9 @@ services:
       WM_FORECAST_MODEL: ${WM_FORECAST_MODEL:-gfs_global}
       # Open-Meteo subscription key (commercial use). Empty = free tier.
       WM_OPEN_METEO_API_KEY: ${WM_OPEN_METEO_API_KEY:-}
+      # Free KNMI Data Platform key: ten-minute readings for strategy K. Empty =
+      # K does nothing. Sent only in the Authorization header, never logged.
+      WM_KNMI_API_KEY: ${WM_KNMI_API_KEY:-}
       # Days of order-book updates kept in the replay journal (bounds disk use).
       WM_JOURNAL_RETENTION_DAYS: ${WM_JOURNAL_RETENTION_DAYS:-7}
       WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}

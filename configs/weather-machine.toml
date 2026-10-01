@@ -239,6 +239,33 @@ politeness_factor = 2
 politeness_decay_secs = 3600.0
 max_body_bytes = 8388608
 
+# KNMI Data Platform EDR API: the ten-minute readings of the airport's
+# automatic weather station (predictive input for strategy K, never
+# observation or resolution data). Needs WM_KNMI_API_KEY — a free key from
+# the KNMI Developer Portal, sent in the Authorization header, never logged.
+# Live: two requests a minute; `research market`: one per week of history.
+[providers.knmi]
+enabled = true
+base_url = "https://api.dataplatform.knmi.nl/edr/v1/collections/10-minute-in-situ-meteorological-observations"
+[providers.knmi.policy]
+class = "public_data"
+min_interval_secs = 5.0
+max_concurrency = 1
+timeout_secs = 20.0
+connect_timeout_secs = 10.0
+backoff_base_secs = 30.0
+backoff_max_secs = 1800.0
+throttle_backoff_base_secs = 300.0
+respect_retry_after = true
+max_retry_after_secs = 3600.0
+circuit_failure_threshold = 5
+circuit_open_base_secs = 300.0
+circuit_open_max_secs = 3600.0
+daily_budget = 4000
+politeness_factor = 2
+politeness_decay_secs = 3600.0
+max_body_bytes = 2097152
+
 # ---------------------------------------------------------------------------
 # Adaptive polling (engineering starting points — NOT optimized parameters).
 # Fast intervals apply only inside the arrival window after an expected report:
@@ -278,32 +305,58 @@ unavailable_after_failures = 3
 throttle_memory_secs = 1800
 
 # ---------------------------------------------------------------------------
-# Risk ($10 per position, $100 global worst-case exposure). FAIL CLOSED.
+# Risk (paper money). FAIL CLOSED. The strategies that run — F and G–K —
+# each have their own position and capital caps at the end of [risk]; the
+# portfolio-wide caps fit all of them at once.
 # ---------------------------------------------------------------------------
 [risk]
-position_size_usd = "10.00"
-# The portfolio-wide caps below are the $10-per-position limits (100 / 50 /
-# 60) plus one position of strategy F (its own caps at the end of [risk]).
-global_max_exposure_usd = "200.00"
-max_market_exposure_usd = "30.00"
-max_location_exposure_usd = "150.00"
+position_size_usd = "10.00"          # any strategy without its own caps
+# F ≤ $110 + G $120 + H $30 + I $30 + J $80 + K $50 = $420 of capital at
+# most. The worst-case loss counts the worst outcome of each market, where
+# legs of different buckets hedge each other, so it stays below that.
+global_max_exposure_usd = "400.00"
+max_market_exposure_usd = "400.00"   # one market a day: the same as the location
+max_location_exposure_usd = "400.00"
 max_strategy_exposure_usd = "60.00"
-max_daily_new_exposure_usd = "160.00"
-max_daily_loss_usd = "30.00"
+# Filled opening orders and live ones count; an order that ends unfilled (a
+# resting quote that expires, a fill-and-kill that finds nothing) gives its
+# unfilled cost back.
+max_daily_new_exposure_usd = "600.00"
+max_daily_loss_usd = "100.00"
 max_spread = "0.05"
 max_price = "0.99"
 min_price = "0.01"
 max_weather_age_minutes = 40
 max_book_age_ms = 15000
 correction_cooldown_minutes = 10
-max_orders_per_minute = 6
+max_orders_per_minute = 20           # G and J post several quotes after a report
 require_approved_resolution_spec = false   # set true before any live consideration
-# Strategy F buys a fixed 100 shares (at most 0.95 each): its own position,
-# market and strategy caps. Every other strategy keeps the defaults above.
+# F buys a fixed 100 shares (at most 0.95 each).
 [risk.strategy_caps.F_peak_slot]
 position_size_usd = "100.00"
-max_market_exposure_usd = "110.00"
 max_strategy_exposure_usd = "110.00"
+# G: $30 a resting NO bid, at most four buckets at a time.
+[risk.strategy_caps.G_tail_seller]
+position_size_usd = "30.00"
+max_strategy_exposure_usd = "120.00"
+# H: $10 a trade, at most three positions.
+[risk.strategy_caps.H_next_degree]
+position_size_usd = "10.00"
+max_strategy_exposure_usd = "30.00"
+# I: $10 a trade, at most three positions.
+[risk.strategy_caps.I_middle_fade]
+position_size_usd = "10.00"
+max_strategy_exposure_usd = "30.00"
+# J: $10 a quote, both sides of up to four buckets.
+[risk.strategy_caps.J_morning_maker]
+position_size_usd = "10.00"
+max_strategy_exposure_usd = "80.00"
+# K: $25 a trade. It trades in the minutes before a report, when makers
+# widen their quotes, so its books may be up to 0.10 wide.
+[risk.strategy_caps.K_knmi_nowcast]
+position_size_usd = "25.00"
+max_strategy_exposure_usd = "50.00"
+max_spread = "0.10"
 
 # ---------------------------------------------------------------------------
 # Strategies (research parameters; see docs/blueprint/14-research-methodology.md)
@@ -316,8 +369,13 @@ max_strategy_exposure_usd = "110.00"
 # midpoint blocks the trade: nothing checks the model then.
 # market_weight: 0 = model only, 1 = market only. `weather-machine research
 # market` estimates the best weight from settled markets.
+# A, B and D are switched off since 1 October 2026: none of them traded on
+# 30 September or 1 October, and in the 122-day replay at traded prices the
+# live A/B rule made 6 trades for −$5.95 (B at every setting lost). Their
+# code stays: `research market` replays A and B as baselines, and setting
+# `enabled = true` brings one back (on the dashboard too).
 [strategies.buy_yes]
-enabled = true
+enabled = false
 min_price = "0.90"
 max_price = "0.99"
 min_confirmation_minutes = 60
@@ -330,7 +388,7 @@ market_weight = 0.5
 max_market_spread = "0.10"
 
 [strategies.buy_no]
-enabled = true
+enabled = false
 distances = [1, 2, 3]
 min_price = "0.90"
 max_price = "0.99"
@@ -348,9 +406,11 @@ max_market_spread = "0.10"
 # an open-ended top bucket "≥ L" with L ≤ H wins (buy its YES) — no model.
 # The edge is speed: quotes on the bucket that just died can be stale for a
 # moment after the report. A high more than max_jump_tenths above the report
-# before it waits for a second report.
+# before it waits for a second report. Off since 1 October 2026: dead
+# buckets reprice within a median 39 s of the observation, before the bot
+# knows the report (observation + 2–5 min), so D never traded.
 [strategies.certain]
-enabled = true
+enabled = false
 max_price = "0.99"
 min_edge = 0.02                   # profit per share after fee and slippage; skips 0.98–0.99 asks
                                   # on long-dead buckets (settlement discount, not a stale quote)
@@ -425,9 +485,122 @@ min_combined_p = 0.90
 max_combined_price = "0.95"
 max_data_age_minutes = 40
 
+# ---------------------------------------------------------------------------
+# Strategies G–K (1 October 2026), chosen from the 122-day replay of the
+# settled Amsterdam markets at traded prices (June–September 2026) and the
+# prediction-market literature. Every one is a HYPOTHESIS: `research market`
+# replays G–J at traded prices (K with WM_KNMI_API_KEY) and judges each on
+# the second half of the days (docs/blueprint/06-strategy.md §27e–§27i).
+# Each needs its own risk caps (above) and is off when its section is
+# missing. Their positions are held to settlement: the unwind engine leaves
+# them alone (exempt_strategies below).
+# ---------------------------------------------------------------------------
+
+# G — tail seller: rest a NO bid (an offer of the YES) on cheap buckets two
+# or more degrees above the day's high. Longshots are overpriced: YES at
+# 0.00–0.02 won 0.1 % at a mean price of 0.4 %, and the makers facing the
+# takers who bought them earned +0.34¢ a share (95 % CI +0.26 … +0.41),
+# +1.04¢ on buckets two above the high (−0.06 … +2.27).
+[strategies.tail_seller]
+enabled = true
+min_distance = 2                  # every value of the bucket ≥ high + 2
+min_yes_price = "0.01"            # the YES offered (1 − the NO bid) …
+max_yes_price = "0.08"            # … in this range
+max_model_ratio = 1.0             # the model's probability ≤ 1.0 × that price
+start_local_minute = 600          # 10:00 local
+end_local_minute = 1260           # 21:00 local (exclusive)
+notional = "30.00"                # per order, at the NO price
+cancel_before_report_minutes = 10 # orders expire 10′ before each routine report
+min_rest_minutes = 3              # … and are not posted with less time left
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+
+# H — next degree: YES on the bucket one degree above the high while the day
+# can still warm. On that bucket takers gained +0.78¢ a share and the makers
+# against them lost 0.68¢ (95 % CI −1.27 … −0.10); B, buying the NO above the
+# high, lost at every setting; YES at 0.10–0.30 won 21.0 % at 18.7 %.
+[strategies.next_degree]
+enabled = true
+min_price = "0.05"                # the ask of the next degree …
+max_price = "0.35"                # … and the whole size at or below this
+start_local_minute = 600          # 10:00 local …
+until_quantile = 0.75             # … until 75 % of the season's days had reported their high
+fallback_end_local_minute = 930   # 15:30 local, until the model carries peak times
+max_drop_tenths = 10              # the latest report within 1.0 °C of the high
+min_model_ratio = 1.0             # the model's probability ≥ 1.0 × the ask
+notional = "10.00"
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.005"      # for the EV shown (not a gate)
+
+# I — middle fade: NO on buckets whose YES trades at 0.30–0.70 when the model
+# rates them lower. They won 45.4 % at a mean price of 48.5 % (95 % CI
+# 42.8 … 48.0 %); with the model ≥ 5 points below, 51.1 % at 53.6 %. The
+# three-point edge is about what the fee and half the spread cost, so I
+# trades only on tight books.
+[strategies.middle_fade]
+enabled = true
+min_mid = 0.30
+max_mid = 0.70
+max_spread = "0.04"               # widest YES spread whose midpoint counts
+min_model_gap = 0.05              # the model ≥ 5 points below the midpoint
+calibration_bias = 0.03           # the measured overpricing, taken off the midpoint
+min_edge = 0.0                    # EV per NO share after the fee and slippage
+start_local_minute = 540          # 09:00 local
+end_local_minute = 1080           # 18:00 local (exclusive)
+notional = "10.00"
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.005"
+
+# J — morning maker: a YES bid and a NO bid one tick inside the spread on
+# mid-priced buckets before 11:00. Makers earned +0.71¢ a share the evening
+# before, +0.61¢ from 00:00 to 09:00 and +0.47¢ from 09:00 to 12:00 (each
+# interval spans zero) and lost in the afternoon and before reports, so the
+# quotes stop at 11:00 and expire 10′ before each report.
+[strategies.morning_maker]
+enabled = true
+start_local_minute = 0
+end_local_minute = 660            # 11:00 local (exclusive)
+min_mid = 0.10
+max_mid = 0.90
+min_spread = "0.02"               # room to bid a tick inside
+max_spread = "0.05"
+notional = "10.00"                # per quote
+cancel_before_report_minutes = 10
+min_rest_minutes = 3
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+
+# K — KNMI nowcast: when KNMI's ten-minute reading just before the next
+# METAR is 0.8 °C above the high (the rounding edge plus 0.3), buy the NO of
+# the high's bucket before the METAR reports the new high. In the replay,
+# takers sold soon-dead buckets for $3,330 of profit in the ten minutes
+# before such reports. p_new_high is an assumption until `research market`
+# (with the key) measures how often the METAR followed. Needs
+# WM_KNMI_API_KEY; idle without it.
+[strategies.knmi_nowcast]
+enabled = true
+mean_margin_tenths = 3            # ten-minute mean ≥ high + 0.5 + 0.3 °C
+require_max_at_edge = true        # and the ten-minute maximum ≥ high + 0.5 °C
+max_age_minutes = 12              # the reading's interval ended ≤ 12′ ago …
+max_lead_minutes = 16             # … and ≤ 16′ before the report it anticipates
+min_price = "0.02"                # the NO of the high's bucket …
+max_price = "0.75"                # … at most this
+p_new_high = 0.80                 # ASSUMPTION until research market measures it
+min_edge = 0.05                   # EV per share at p_new_high, after fee and slippage
+notional = "25.00"
+max_data_age_minutes = 40
+max_book_age_ms = 15000
+slippage_allowance = "0.01"
+
 [strategies.unwind]
 enabled = true
 exit_below_probability = 0.5
+# Strategies that hold to settlement by design: their positions start below
+# the exit probability (a cheap YES, the NO of a middle bucket, a quote's
+# inventory), so the unwind engine leaves them alone.
+exempt_strategies = ["G_tail_seller", "H_next_degree", "I_middle_fade", "J_morning_maker", "K_knmi_nowcast"]
 [strategies.unwind.style]
 style = "best_bid"
 
@@ -466,3 +639,13 @@ ready_local_minute = 480          # a day's series is used from 08:00 local (kno
 refresh_minutes = 60
 history_from = "2021-03-01"
 min_eval_days = 365               # the test needs at least a year of scored days
+
+# KNMI's ten-minute readings (strategy K and `research market`). Polled only
+# while WM_KNMI_API_KEY is set.
+[knmi]
+enabled = true
+mean_parameter = "ta"             # mean 1.5 m air temperature over the ten minutes
+max_parameter = "tx"              # its maximum
+location_id = ""                  # empty: the WIGOS id of the station's WMO number (0-20000-0-06240)
+poll_seconds = 30
+lookback_minutes = 40

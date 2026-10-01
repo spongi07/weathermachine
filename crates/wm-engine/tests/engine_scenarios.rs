@@ -64,6 +64,7 @@ fn config(mode: RunMode) -> EngineConfig {
             timezone: chrono_tz::Europe::Amsterdam,
             peak: PeakConfig::default(),
             confirmed_filter: None,
+            routine_minutes: vec![25, 55],
         }],
         risk: RiskConfig::default(),
         buy_yes: BuyYesConfig::default(),
@@ -72,6 +73,11 @@ fn config(mode: RunMode) -> EngineConfig {
         certain: wm_strategy::CertainConfig::default(),
         book_confirmed: wm_strategy::BookConfirmedConfig::default(),
         peak_slot: wm_strategy::PeakSlotConfig::default(),
+        tail_seller: wm_strategy::TailSellerConfig::absent(),
+        next_degree: wm_strategy::NextDegreeConfig::absent(),
+        middle_fade: wm_strategy::MiddleFadeConfig::absent(),
+        morning_maker: wm_strategy::MorningMakerConfig::absent(),
+        knmi_nowcast: wm_strategy::KnmiNowcastConfig::absent(),
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: false,
         decision_log_capacity: 500,
@@ -1100,6 +1106,7 @@ fn risk_with_f_caps() -> RiskConfig {
             position_size_usd: Usd::from_whole(100),
             max_market_exposure_usd: Some(Usd::from_whole(110)),
             max_strategy_exposure_usd: Some(Usd::from_whole(110)),
+            max_spread: None,
         },
     );
     r

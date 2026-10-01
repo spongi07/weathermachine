@@ -105,6 +105,34 @@ For a contract bought at price *P* with win probability *p*, per share:
 shows it permanently.) Performance is judged on EV, drawdown and confidence
 intervals, never on win rate.
 
+## Which strategies run (1 October 2026)
+
+| | strategy | live | why |
+|---|---|---|---|
+| A | BUY YES on the final high (§25) | off | no trade on 30 Sep–1 Oct; the live A/B rule made 6 trades, −$5.95, in the 122-day replay |
+| B | BUY NO above the high (§26) | off | as A; buying NO above the high lost at every replayed setting |
+| C | split + unwind (§27) | off | research only |
+| D | decided outcomes (§27a) | off | dead buckets reprice a median 39 s after the observation, before the bot knows the report |
+| E | book-confirmed high (§27c) | off | −$7.18 over 80 replayed trades |
+| F | peak slot (§27d) | **on** | traded; slot 75 % → 95 % since 1 Oct |
+| G | tail seller (§27e) | **on** | new |
+| H | next degree (§27f) | **on** | new |
+| I | middle fade (§27g) | **on** | new |
+| J | morning maker (§27h) | **on** | new |
+| K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | new |
+| U | unwind (§28) | **on** | the exit engine; leaves G–K alone |
+
+A strategy switched off is not shown on the dashboard; its code stays,
+because `research market` replays A, B, E and F as baselines, and
+`enabled = true` brings it back. G–K were chosen on 1 October 2026 from the
+122-day replay of the settled Amsterdam markets at traded prices
+(June–September 2026; the tables are in `research market`'s report) and the
+prediction-market literature ([edge research
+§9](../research/edge-research.md#9-october-2026-five-new-strategies)). Every
+one is a **HYPOTHESIS TO BACKTEST**: `research market` replays each with
+variants and judges the best variant of each on the second half of the
+days, out of sample.
+
 ## 25. BUY YES — strategy A
 
 **PURPOSE.** Buy YES of the bucket containing the observed high when the
@@ -496,6 +524,183 @@ maker version at traded prices, and picks among them out of sample
 * The retrain-once test.
 * The replay tests (§36a).
 
+## 27e. TAIL SELLER — strategy G
+
+**PURPOSE.** Sell the overpriced far tails to the takers who buy them:
+rest a NO bid (an offer of the YES) on buckets two or more degrees above the
+day's high.
+
+**EVIDENCE.**
+* **LITERATURE.** Prediction markets show a favourite–longshot bias: on
+  Kalshi contracts under 10¢ lose over 60 % of the stake, and makers earn
+  more than takers at every price (Bürgi, Deng & Whelan, *Makers and
+  Takers*, 2025/26); on Polymarket buys under 10¢ lose about 19¢ per
+  dollar.
+* **REPLAY (122 days).** YES priced 0.00–0.02 won 0.1 % of the time at a
+  mean price of 0.4 %. The resting orders filled by takers who paid
+  0.00–0.02 earned +0.34¢ a share net (95 % CI +0.26 … +0.41); on buckets
+  two above the high +1.04¢ (−0.06 … +2.27), three or more above +0.41¢.
+  YES at 0.02–0.10 was about fair (5.6 % won at 5.0 %), hence the 8¢ cap.
+
+**RULE** (`[strategies.tail_seller]`). For every bucket whose lowest value is
+≥ high + `min_distance` (2), between 10:00 and 21:00 local:
+* the order is a NO bid one tick above the best NO bid (at it when the
+  spread is one tick): the YES offered is one minus that bid and must lie in
+  [`min_yes_price`, `max_yes_price`] = [0.01, 0.08];
+* the model's upper-bound probability for the bucket is at most
+  `max_model_ratio` (1.0) × that YES price; no model, no order;
+* $30 an order (`notional`), good till 10 minutes before the next routine
+  report (`cancel_before_report_minutes`), not posted with less than 3
+  minutes left; posted again after the report;
+* one position per bucket and day, held to settlement.
+
+**RISK.** A bucket that wins costs the whole NO price (12–100 × the
+premium). The edge is a fraction of a cent per dollar a day: a small, steady
+earner whose result rests on the rare loss. Caps: $30 an order, $120 in
+all.
+
+## 27f. NEXT DEGREE — strategy H
+
+**PURPOSE.** Buy YES on the bucket one degree above the high while the day
+can still warm.
+
+**EVIDENCE (replay).** On the bucket one above the high, takers gained
++0.78¢ a share before fees and the resting orders against them lost 0.68¢
+(95 % CI −1.27 … −0.10). Strategy B, which bought the NO of the buckets above
+the high, lost at every replayed setting (−$92.74 over 129 trades at NO
+asks 0.70–0.99). YES at 0.10–0.30 won 21.0 % at a mean price of 18.7 %; when
+the model was ≥ 5 points above the market, 13.8 % at 11.9 % (95 % CI
+12.3 … 15.5 %).
+
+**RULE** (`[strategies.next_degree]`). From 10:00 local until the season's
+75 % peak time (`until_quantile`; 15:30 until the model carries peak
+times), while the latest report is within 1.0 °C of the high: the YES of the
+bucket holding high + 1 (not the high's own bucket), ask in [0.05, 0.35],
+the model's probability ≥ `min_model_ratio` (1.0) × the ask, $10 at the
+price that fills the whole size (never more than $10), fill-and-kill, held
+to settlement.
+
+**RISK.** It loses its stake whenever the day does not warm one more degree
+— most of the time. A few 3–20× winners must pay for many small losses.
+
+## 27g. MIDDLE FADE — strategy I
+
+**PURPOSE.** Buy NO on the overpriced middle of the ladder.
+
+**EVIDENCE (replay).** Buckets whose YES traded at 0.30–0.70 won 45.4 % at a
+mean price of 48.5 % (95 % CI 42.8 … 48.0 %, 1,392 decision points). With
+the model ≥ 5 points below the market: 51.1 % at 53.6 % (49.0 … 53.3 %). The
+prices are trade midpoints (latest taker buy and sell within 60 min), which
+can be stale on a falling bucket; the replay of I therefore uses quotes at
+most 10 minutes old.
+
+**RULE** (`[strategies.middle_fade]`). From 09:00 to 18:00 local, for every
+live bucket whose fresh YES book (spread ≤ 0.04) has its midpoint in [0.30,
+0.70] and whose upper-bound model probability is ≥ 0.05 below that
+midpoint: buy the NO when its EV is ≥ `min_edge` (0), with p(NO) = 1 −
+(midpoint − `calibration_bias` 0.03), never above the model's own NO
+probability; $10, fill-and-kill, held to settlement.
+
+**RISK.** Three points is about what the fee (≈ 1.25¢ at 0.50), half the
+spread and slippage cost: I trades only on tight books, and each trade is a
+coin flip with a slight tilt.
+
+## 27h. MORNING MAKER — strategy J
+
+**PURPOSE.** Provide liquidity in the low-information morning hours and
+earn the spread.
+
+**EVIDENCE (replay).** Resting orders earned +0.71¢ a share net in the
+evening before the day, +0.61¢ from 00:00 to 09:00 and +0.47¢ from 09:00 to
+12:00 (each interval spans zero; together about $14,300 for the market's
+makers over 122 days). They lost 0.59¢ from 12:00 to 15:00, 0.49¢ in the
+last five minutes before a report and 1.34¢ on the high's bucket then
+(−2.05 … −0.66).
+
+**RULE** (`[strategies.morning_maker]`). From 00:00 to 11:00 local, for every
+bucket whose fresh YES book has its midpoint in [0.10, 0.90] and a spread of
+0.02–0.05: a YES bid and a NO bid, each one tick above the best bid on its
+own book (at it when there is no room), $10 each, good till 10 minutes before
+the next routine report and posted again after it. A filled side is held to
+settlement; both sides filled pay $1 a pair whatever the weather, so J keeps
+the spread. No model needed.
+
+**RISK.** Inventory: a side that fills alone is a directional position at
+the market's own price a moment ago. Caps: $10 a quote, $80 in all.
+
+## 27i. KNMI NOWCAST — strategy K
+
+**PURPOSE.** Be early to a new high with faster data than the METAR.
+
+The market resolves on the METAR: a whole-degree reading every half hour
+(EHAM: HH:25 and HH:55 UTC) that reaches the public feeds two to five
+minutes later. KNMI publishes the same airport's automatic weather station
+every ten minutes, to a tenth of a degree, a few minutes after each interval
+— the reading of HH:10–HH:20 is out before the HH:25 METAR is observed. The
+EDR API's `10-minute-in-situ-meteorological-observations` collection serves
+it as CoverageJSON (`ta`: 10-minute mean, `tx`: maximum; Schiphol's WIGOS id
+`0-20000-0-06240`) with a free API key in the `Authorization` header.
+
+**EVIDENCE (replay).** 58 reports raised the high while the dead buckets
+were still priced. In the ten minutes *before* those reports' observation
+times takers sold the soon-dead buckets' YES for $3,330 of profit; on the
+high's bucket in the last five minutes before any report takers gained
++1.39¢ a share before fees while the resting orders against them lost 1.34¢
+(95 % CI −2.05 … −0.66). Someone trades on the weather before the METAR
+shows it.
+
+**RULE** (`[strategies.knmi_nowcast]`). When the latest ten-minute reading is
+newer than the last METAR, at most 12 minutes old and ended at most 16
+minutes before the report it anticipates — the first routine report after
+its interval, so the 11:10–11:20 reading, arriving about when the 11:25
+METAR is taken, still counts until that METAR is published — its mean is
+≥ high + 0.5 + 0.3 °C (the
+rounding edge plus `mean_margin_tenths`) and its maximum ≥ high + 0.5 °C:
+buy the NO of the bucket holding the high (it dies the moment a report beats
+it) when the NO ask is in [0.02, 0.75] and the EV at `p_new_high` (0.80) is
+≥ 0.05 after fee and slippage; $25, fill-and-kill, held to settlement. A
+bucket that also holds high + 1 is skipped. Its books may be up to 0.10 wide
+(`[risk.strategy_caps.K_knmi_nowcast].max_spread`): makers widen their quotes
+before a report.
+
+**ASSUMPTION.** `p_new_high` = 0.80 until `research market` (run with the
+key) measures how often the next METAR raised the high, by the ten-minute
+mean before it — the table *KNMI's ten-minute mean before the METAR*. The
+replay assumes a reading is known 5 minutes after its interval (variants: 2
+and 8); the live logs (`KNMI ten-minute reading … delay_minutes`) and the
+dashboard's *KNMI 10-minute* box measure the real delay.
+
+**FAIL CLOSED.** No key, an API error or a stale reading: K does nothing,
+and the dashboard says why. The readings never change the observed high,
+the views or settlement.
+
+**TESTING (G–K).**
+* `wm-strategy/tests/new_strategies.rs`: each strategy's signal, the order
+  it proposes (price, size, time in force) and its blockers; H never pays
+  more than its notional; the unwind engine exits F's position but not
+  G–K's.
+* `wm-strategy/src/quoting.rs`: the report schedule, the quote expiry, the
+  passive bid.
+* `wm-backtest/tests/maker_session.rs`: J in the shared session loop —
+  quotes, expiry, the daily new exposure given back, quotes again after the
+  report, a maker fill from a trade print, no second bid on a held side.
+* `wm-backtest/tests/nowcast_session.rs`: K in the shared session loop — a
+  reading older than the last METAR does nothing; one that arrives as the
+  next METAR is taken buys the high's NO, which fills; a late, older
+  reading neither replaces the newer one nor buys again.
+* The demo (`weather-machine demo`) feeds synthetic ten-minute readings of
+  its own temperature curve, labelled *synthetic*, so K and its dashboard
+  box can be watched without a key.
+* `wm-backtest/src/market_gk.rs`: the replay of each strategy at traded
+  prices and K's accuracy table; the market report's G–K section and its
+  JSON compatibility.
+* `wm-weather` (`knmi.rs`, `tests/knmi.rs`): CoverageJSON parsing, the
+  request (path, period, parameters, key in the header) and a refused key;
+  `wm-net`: the key is sent as a header and never printed.
+* `wm-app`: configuration validation of G–K (ranges, windows, caps each
+  order must fit), the shipped values, `research market` with a KNMI mock
+  (download, weekly cache, report section).
+
 ## 28. UnwindEngine
 
 **PURPOSE.** Exit positions the evidence has turned against, with explicit
@@ -514,6 +719,9 @@ pub struct UnwindConfig { enabled, style, exit_below_probability /*0.50*/, max_h
 * Signal-based: exit when the position's p_win drops below
   `exit_below_probability`. Time-based: `max_hold_minutes`.
   Probability-based: the same p_win as entry, across views.
+* `exempt_strategies` (default: G–K) are left alone: they buy outcomes the
+  model rates below the exit level by design — a cheap YES, the NO of a
+  middle bucket, a quote's inventory — and hold them to settlement.
 * Unwinds are *reduce* intents. They are allowed even when weather data is
   unhealthy, because reducing risk is never blocked by the weather gates.
 * Never assumes a mid-price fill: fills come from the book (§35).

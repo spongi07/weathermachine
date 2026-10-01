@@ -61,6 +61,7 @@ shown. Optional variables: `WM_DEMO_SPEED` (default 60 = one day in 24 min),
 | `WM_FORECAST` | no | `true` (default): fetch the day-1 forecast and evaluate it at every training (§4). `false`: never fetched or evaluated. |
 | `WM_FORECAST_MODEL` | no | Open-Meteo model id (default `gfs_global`, the longest archive). Changing it triggers a retraining. |
 | `WM_OPEN_METEO_API_KEY` | no | Open-Meteo subscription key. The free tier is for **non-commercial** use; for real-money trading use a subscription. |
+| `WM_KNMI_API_KEY` | for strategy K | Free key from the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*). The airport's ten-minute readings, strategy K's input; without it K does nothing and the dashboard says so. Sent only in the `Authorization` header, never logged. |
 
 Optionally enable **GitOps updates** (polling, or the webhook Portainer shows
 after creation; store it as the repository secret `PORTAINER_WEBHOOK_URL` and
@@ -247,10 +248,35 @@ In short:
   for "1 °C below", `max_price = "0.99"`, or other slot quantiles. With an
   interval that includes zero, keep F in paper and collect more days.
 
+**Strategies G–K** (since 1 October 2026) have their own section, *Strategies
+G–K at traded prices*: each as configured plus variants (G only up to 3¢,
+three or more above the high, without the model, from 14:00; H without the
+model, until the 90 % peak time, as a resting bid; I without the model or
+the measured bias, as a resting bid; J YES or NO bids only, until 09:00;
+K with a 0.5 °C or 0.1 °C margin, buying the YES above instead, the reading
+known after 2 or 8 minutes). Makers fill only when a later trade goes
+through their price, takers pay the fee. Read the lines **Strategy G out
+of sample** … **Strategy K out of sample** in the verdict first: the best
+variant of each strategy on the first half of the days, scored on the
+second half (with its 95 % interval). A negative one means
+`enabled = false` in that strategy's section; a better variant can be
+switched to in the same section.
+
+Strategy K needs KNMI's readings: run the study with the key
+(`-e WM_KNMI_API_KEY=…`). It then downloads the airport's ten-minute
+readings for the period (a week per request; a week that ended at least
+eight days ago is cached in `/data/research/knmi/EHAM/`, since KNMI fills
+gaps for up to seven days) and adds the table
+*KNMI's ten-minute mean before the METAR*: how often the next METAR raised
+the high, by how far the last mean before it stood above the high's rounding
+edge. Set K's `p_new_high` from the row of its margin (shipped: +0.3 °C,
+assumed 0.80). Without the key, K is listed as not replayed.
+
 ### Strategy pages and logs to paste
 
-The dashboard's **Strategies** panel has a card per strategy (A–F and the
-unwind exits). Each card shows what the strategy is doing now, for example
+The dashboard's **Strategies** panel has a card per strategy that is
+switched on (F–K and the unwind exits; a strategy with `enabled = false` is
+not shown). Each card shows what the strategy is doing now, for example
 "autumn slot 13:25–15:26: before the slot: it starts in 2 h 13 min", or the
 blocker on the high's bucket. It also shows this run's proposals and orders,
 with two buttons:
@@ -371,6 +397,8 @@ path prefix.
 | **forecast not used** | The evaluation did not show a clear improvement from the forecast (hover for the numbers; details in the report). Nothing to fix — the model trades without it. |
 | **FORECAST WAITING** | The forecast is adopted, but today's series is not usable yet: before 08:00 local, or Open-Meteo unreachable (alert "day-1 forecast unavailable"). The model trades without it meanwhile. |
 | Alert "day-1 forecast unavailable (HTTP status 429 …)" | Open-Meteo's free daily limit (shared by every client on your IP) was reached. The service backs off; consider `WM_OPEN_METEO_API_KEY`. |
+| Alert "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY …" | K is switched on without a key. Request a free key at the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*), set `WM_KNMI_API_KEY` and redeploy — or set `enabled = false` in `[strategies.knmi_nowcast]`. |
+| Alert "KNMI ten-minute readings unavailable (…); strategy K waits" | The KNMI API refused or did not answer (HTTP 401/403: wrong or expired key; otherwise an outage). K does nothing meanwhile; "KNMI ten-minute readings available again" follows on recovery. |
 | Report says "not evaluated: …" | The forecast history could not be downloaded (e.g. `previous-runs-api.open-meteo.com` blocked); training is retried after 6 h. A "rejected by Open-Meteo" reason naming the model means `WM_FORECAST_MODEL` is not a valid model id. |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |

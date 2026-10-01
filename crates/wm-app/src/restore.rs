@@ -10,8 +10,10 @@
 //!   local day ends at most `grace` before today's UTC midnight;
 //! * those markets, rebuilt from their latest stored Gamma payload with the
 //!   mapping discovery uses (and the stored review of their rules);
-//! * the cost of today's (UTC) opening orders, which their approvals added
-//!   to the daily new exposure.
+//! * the filled cost (at the limit) of today's (UTC) opening orders: what
+//!   their approvals left in the daily new exposure once the unfilled parts
+//!   ended — an order still resting when the earlier run stopped ended with
+//!   it.
 //!
 //! The engine replays the fills into its position book. A market whose
 //! settlement time has passed (the previous run settled it today, or missed
@@ -109,9 +111,9 @@ pub async fn load(
         .await
         .context("loading today's orders")?
         .into_iter()
-        .filter_map(|(price, shares)| {
+        .filter_map(|(price, filled)| {
             let p = Price::from_micros(u32::try_from(price).ok()?).ok()?;
-            Some(notional(p, Shares::from_micros(shares), Rounding::Up))
+            Some(notional(p, Shares::from_micros(filled), Rounding::Up))
         })
         .sum();
     Ok((state, warnings))

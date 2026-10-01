@@ -21,9 +21,24 @@ const SEASONS: [Season; 4] = [
     Season::Autumn,
 ];
 
-/// Every strategy of the engine, in the order the engine evaluates them,
-/// plus the unwind engine (its exits are orders too).
+/// Engine id of the unwind engine (always listed: its exits are orders too).
+pub const UNWIND_ID: &str = "U_unwind";
+
+/// The strategies the dashboard shows: those switched on, in the order the
+/// engine evaluates them, plus the unwind engine. A strategy switched off in
+/// the configuration is not shown: A–E were taken out of the live bot on
+/// 1 October 2026 after two days without a trade (E already earlier). Their
+/// code stays, because `research market` replays A, B and E as baselines,
+/// and switching one on again brings it back here.
 pub fn catalog(cfg: &AppConfig) -> Vec<StrategyDto> {
+    every_strategy(cfg)
+        .into_iter()
+        .filter(|s| s.enabled || s.id == UNWIND_ID)
+        .collect()
+}
+
+/// Every strategy of the engine, switched on or off.
+pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
     let st = &cfg.file.strategies;
     vec![
         entry(
@@ -69,10 +84,45 @@ pub fn catalog(cfg: &AppConfig) -> Vec<StrategyDto> {
             &st.peak_slot,
         ),
         entry(
-            "U_unwind",
+            wm_strategy::tail_seller::ID,
+            "Tail seller",
+            st.tail_seller.enabled,
+            "Sells the far tails: rests a NO bid, one tick inside the spread, on every bucket two or more degrees above the day's high whose YES is offered cheaply — an offer of that longshot to the takers who buy it — when the model rates the bucket no higher than that price. Orders expire ten minutes before each report; a filled order is held to settlement.",
+            &st.tail_seller,
+        ),
+        entry(
+            wm_strategy::next_degree::ID,
+            "Next degree",
+            st.next_degree.enabled,
+            "Buys YES on the bucket one degree above the day's high while the day can still warm (until the season's late peak time, the temperature near the high) when it is offered cheaply and the model rates it at least at the ask. Held to settlement.",
+            &st.next_degree,
+        ),
+        entry(
+            wm_strategy::middle_fade::ID,
+            "Middle fade",
+            st.middle_fade.enabled,
+            "Buys NO on buckets whose YES trades in the middle of the range (0.30–0.70) when the model rates them lower, if the NO is cheap enough after the measured overpricing of the middle, the fee and slippage. Held to settlement.",
+            &st.middle_fade,
+        ),
+        entry(
+            wm_strategy::morning_maker::ID,
+            "Morning maker",
+            st.morning_maker.enabled,
+            "In the morning, rests a YES bid and a NO bid one tick inside the spread on every bucket priced in the middle; orders expire ten minutes before each report. When both sides fill the spread is earned whatever the weather; a side that fills alone is held to settlement.",
+            &st.morning_maker,
+        ),
+        entry(
+            wm_strategy::knmi_nowcast::ID,
+            "KNMI nowcast",
+            st.knmi_nowcast.enabled,
+            "Reads KNMI's ten-minute observations at the airport. When the reading just before the next METAR is already well above the high's rounding edge, buys the NO of the high's bucket before the METAR reports the new high. Needs WM_KNMI_API_KEY; without it K stays idle.",
+            &st.knmi_nowcast,
+        ),
+        entry(
+            UNWIND_ID,
             "Unwind (exits)",
             st.unwind.enabled,
-            "Sells positions the evidence has turned against (the win probability fell below the exit level, or the holding time ran out).",
+            "Sells positions the evidence has turned against (the win probability fell below the exit level, or the holding time ran out). Positions of the strategies that hold to settlement by design (G–K) are left alone.",
             &st.unwind,
         ),
     ]
@@ -265,23 +315,42 @@ mod tests {
     }
 
     #[test]
-    fn every_engine_strategy_is_listed_with_its_settings() {
-        let c = catalog(&shipped());
+    fn the_strategies_switched_on_are_listed_with_their_settings() {
+        let cfg = shipped();
+        let c = catalog(&cfg);
         let ids: Vec<&str> = c.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
             [
-                "A_buy_yes_final_high",
-                "B_buy_no_above_high",
-                "C_split_unwind",
-                "D_certain_outcome",
-                "E_book_confirmed_high",
                 "F_peak_slot",
+                "G_tail_seller",
+                "H_next_degree",
+                "I_middle_fade",
+                "J_morning_maker",
+                "K_knmi_nowcast",
                 "U_unwind"
             ]
         );
         let letters: String = c.iter().map(|s| s.letter.as_str()).collect();
-        assert_eq!(letters, "ABCDEFU");
+        assert_eq!(letters, "FGHIJKU");
+        // A–E are off and not shown; switched on again they come back.
+        let all: String = every_strategy(&cfg)
+            .iter()
+            .map(|s| s.letter.as_str())
+            .collect();
+        assert_eq!(all, "ABCDEFGHIJKU");
+        let mut again = cfg.clone();
+        again.file.strategies.buy_yes.enabled = true;
+        assert_eq!(catalog(&again)[0].id, "A_buy_yes_final_high");
+        let g = c.iter().find(|s| s.letter == "G").unwrap();
+        let get_g = |k: &str| {
+            g.settings
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get_g("max_yes_price"), Some("0.08"));
+        assert_eq!(get_g("notional"), Some("30.00"));
         let f = c.iter().find(|s| s.id == PEAK_SLOT_ID).unwrap();
         assert!(f.enabled);
         let get = |k: &str| {
@@ -294,10 +363,10 @@ mod tests {
         assert_eq!(get("shares"), Some("100"));
         assert_eq!(get("fallback_slots.summer"), Some("15:00-18:00"));
         assert_eq!(get("enabled"), None, "shown as a pill, not a setting");
-        let c_split = c.iter().find(|s| s.letter == "C").unwrap();
-        assert!(!c_split.enabled);
+        assert!(c.iter().all(|s| s.enabled), "only strategies that run");
         assert!(
-            c.iter()
+            every_strategy(&cfg)
+                .iter()
                 .all(|s| !s.summary.is_empty() && !s.settings.is_empty())
         );
     }

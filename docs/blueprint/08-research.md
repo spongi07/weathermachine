@@ -247,6 +247,26 @@ the days downloaded so far are studied.
   report). **Out of sample:** the rule with the best P&L on the first half
   of the replayed market days is judged on the second half (at least 20
   days); that line, not the best row, is the result.
+* **Strategies G–K at traded prices (`wm-backtest::market_gk`).** The same
+  decision points, from local midnight (J quotes in the morning), with the
+  models as trained on the days before. *Takers* (H, I, K) pay the latest
+  taker trade of the kind they need when it is at most 10 minutes old, else
+  the first such trade after the decision while the report stands (YES at a
+  taker's buy price, NO at one minus a taker's sell price of YES), plus
+  slippage and the fee; I needs a midpoint, so it trades only on a fresh
+  two-sided quote. *Makers* (G, J and the maker variants) rest one tick
+  better than the latest trade on their side and fill only when a later
+  trade goes through that price before the order expires, 10 minutes before
+  the next routine report; no fee, the rebate earned. *K* uses KNMI's
+  ten-minute readings for the day (downloaded with `WM_KNMI_API_KEY`), each
+  known 5 minutes after its interval (an assumption; variants 2 and 8), and
+  a price at most a minute old. At most one trade per rule, day and bucket
+  (J: per side). Each strategy is replayed as configured and with variants;
+  **out of sample**, the best rule of each family on the first half of the
+  days is judged on the second half. *KNMI's ten-minute mean before the
+  METAR* counts, per bin of the last mean's distance above the high's
+  rounding edge (high + 0.5 °C), how often the next routine METAR raised the
+  high — the table that sets K's `p_new_high`.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 
@@ -280,6 +300,10 @@ the days downloaded so far are studied.
   rules at **100 shares a trade** (apart from the $10 rows), its verdict
   line, the out-of-sample line (also in the main verdict) and its losing
   trades, with the time of fills from the tape;
+* strategies G–K: each family's rows (configured rule first), a verdict
+  line per family, the out-of-sample lines (also in the main verdict) and,
+  with the KNMI key, the KNMI accuracy table; without it, "Strategy K: not
+  replayed";
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
   both clocks, the forecast rise and headroom, both structures' cells and
   P(high stays), the market and ask of the high's bucket, its taker flow
@@ -297,8 +321,10 @@ whereas live E is evaluated on every book update. Maker fills from the
 public tape are estimates: it shows no queue positions, and in fast markets
 maker replays have flipped sign with 150 ms of latency. F's replay fills
 100 shares at a traded price where fewer may have been offered, and its
-taker buys stand for an ask it cannot see. The study is read-only and
-changes nothing.
+taker buys stand for an ask it cannot see. G–K's fills assume the whole
+stake at the traded price; their makers ignore queue position, and K's
+reading delay is assumed until the live logs measure it. The study is
+read-only and changes nothing.
 **TESTING.** Unit tests on synthetic history:
 
 * an oracle market beats the model;
@@ -331,6 +357,14 @@ changes nothing.
   limit, the fallback slot, the drop variant, the maker's bid, cancel and
   rebate, the out-of-sample choice (ties keep the configured rule) and the
   variant list.
+
+* strategies G–K (`market_gk` unit tests): G sells a far tail when a later
+  buyer pays through its offer; H buys the next degree from the tape and I
+  needs a fresh midpoint; J earns the spread when both sides fill; K buys
+  the high's NO before the METAR, also on the reading known as its report
+  is taken, and the accuracy table counts it; the configured rules come
+  first and duplicates are dropped. `with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached`
+  runs the study end to end with a mock KNMI server.
 
 Data API paging, the offset cap, window splitting, dedup and the request
 budget are tested against a mock server. An end-to-end run against mock

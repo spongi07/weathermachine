@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
-    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, MakerSim, MarketSimConfig,
+    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, GkSim, MakerSim, MarketSimConfig,
     MarketStudyConfig, PeakSlotSim, StudyConfig, import_iem_csv, run_backtest, study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
@@ -658,6 +658,13 @@ async fn research_market(
             e: BookConfirmedSim::from_live(&cfg.book_confirmed()),
             f: PeakSlotSim::from_live(&cfg.peak_slot()),
             maker: MakerSim::default(),
+            gk: GkSim::from_live(
+                &cfg.file.strategies.tail_seller,
+                &cfg.file.strategies.next_degree,
+                &cfg.file.strategies.middle_fade,
+                &cfg.file.strategies.morning_maker,
+                &cfg.file.strategies.knmi_nowcast,
+            ),
         },
         routine_minutes: loc.station.routine_minutes.clone(),
         timeline_days: days,
@@ -678,6 +685,7 @@ async fn research_market(
         to,
         study,
         use_forecast,
+        knmi_location: setup::knmi_location(&cfg, loc),
     };
     println!(
         "model versus market for {} → {} (decision = observation + {} s)",
@@ -702,16 +710,24 @@ async fn research_market(
             println!("forecast history {year}: cached or downloading from Open-Meteo");
         }
         ResearchProgress::History(Progress::Training { .. }) => {}
+        ResearchProgress::Knmi { from, to } => {
+            println!("KNMI ten-minute readings {from} → {to}: cached or downloading");
+        }
         ResearchProgress::Studying { market_days } => {
             println!("replaying the history and scoring {market_days} settled market days…");
         }
     };
     let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let knmi = setup::knmi_client(&cfg, &providers);
+    if knmi.is_none() {
+        println!("no KNMI readings (set WM_KNMI_API_KEY to replay strategy K): K is not replayed");
+    }
     let clients = MarketResearchClients {
         gamma: &gamma,
         data: &data,
         archive: &archive,
         forecast: forecast.as_ref(),
+        knmi: knmi.as_ref(),
     };
     let o = market_research::run(&clients, &plan, clock.now(), &progress, &mut stop_rx).await?;
     println!(
@@ -727,6 +743,7 @@ async fn research_market(
         .iter()
         .chain(&o.report.strategy_verdict)
         .chain(&o.report.f_verdict)
+        .chain(&o.report.gk_verdict)
     {
         println!("• {line}");
     }

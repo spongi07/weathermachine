@@ -159,6 +159,8 @@ fn ctx<'a>(
         positions,
         pending_tokens: pending,
         peak_times: None,
+        routine_minutes: &[25, 55],
+        nowcast: None,
     }
 }
 
@@ -465,7 +467,7 @@ fn unwind_exits_yes_when_high_breaks_and_holds_certain_no() {
         synthetic_book(&yes18, Some("0.01"), Some("0.02"), 200, utc(NOW)),
     );
     let mut u = UnwindEngine::new(UnwindConfig::default());
-    let props = u.evaluate(&m, &pos, &b, &v, &HashSet::new(), utc(NOW));
+    let props = u.evaluate(&m, &pos, &b, &v, &HashSet::new(), &HashMap::new(), utc(NOW));
     assert_eq!(props.len(), 1);
     assert_eq!(props[0].token, yes18);
     assert_eq!(
@@ -504,7 +506,7 @@ fn progressive_unwind_steps_toward_bid() {
         ..UnwindConfig::default()
     };
     let mut u = UnwindEngine::new(cfg);
-    let p0 = u.evaluate(&m, &pos, &b, &v, &HashSet::new(), utc(NOW));
+    let p0 = u.evaluate(&m, &pos, &b, &v, &HashSet::new(), &HashMap::new(), utc(NOW));
     assert_eq!(p0[0].limit_price, Price::parse("0.35").unwrap());
     assert_eq!(p0[0].tif, TimeInForce::Gtc);
     let p2 = u.evaluate(
@@ -513,6 +515,7 @@ fn progressive_unwind_steps_toward_bid() {
         &b,
         &v,
         &HashSet::new(),
+        &HashMap::new(),
         utc("2026-07-01T13:34:00Z"),
     );
     assert_eq!(p2[0].limit_price, Price::parse("0.31").unwrap());
@@ -522,6 +525,7 @@ fn progressive_unwind_steps_toward_bid() {
         &b,
         &v,
         &HashSet::new(),
+        &HashMap::new(),
         utc("2026-07-01T13:37:00Z"),
     );
     assert_eq!(p5[0].limit_price, Price::parse("0.30").unwrap());

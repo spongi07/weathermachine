@@ -15,8 +15,8 @@ use wm_net::{HttpFetcher, ProviderGate};
 use wm_polymarket::LocationMarketSpec;
 use wm_strategy::{EmpiricalPeakModel, NoEdgeModel, PeakConfig, ProbabilityModel};
 use wm_weather::{
-    AwcMetarSource, CadenceModel, NwsApiSource, ObservationSource, OpenMeteoPreviousRuns,
-    PollingPolicy, TgftpMetarSource,
+    AwcMetarSource, CadenceModel, KnmiTenMinute, NwsApiSource, ObservationSource,
+    OpenMeteoPreviousRuns, PollingPolicy, TgftpMetarSource,
 };
 
 /// Resolved identifiers of one configured location.
@@ -84,6 +84,7 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
             timezone: ids.timezone,
             peak: peak_config(l),
             confirmed_filter: l.market.confirmed_filter.map(|f| f.filter()),
+            routine_minutes: l.station.routine_minutes.clone(),
         });
     }
     Ok(EngineConfig {
@@ -97,6 +98,11 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
         certain: cfg.certain(),
         book_confirmed: cfg.book_confirmed(),
         peak_slot: cfg.peak_slot(),
+        tail_seller: cfg.file.strategies.tail_seller.clone(),
+        next_degree: cfg.file.strategies.next_degree.clone(),
+        middle_fade: cfg.file.strategies.middle_fade.clone(),
+        morning_maker: cfg.file.strategies.morning_maker.clone(),
+        knmi_nowcast: cfg.file.strategies.knmi_nowcast.clone(),
         unwind: cfg.file.strategies.unwind.clone(),
         evaluate_on_book_updates: true,
         decision_log_capacity: 2_000,
@@ -207,6 +213,37 @@ pub fn forecast_client(cfg: &AppConfig, providers: &Providers) -> Option<OpenMet
     ))
 }
 
+/// Client for KNMI's ten-minute readings: `None` without `WM_KNMI_API_KEY`,
+/// or when `[knmi]` or the provider is off.
+pub fn knmi_client(cfg: &AppConfig, providers: &Providers) -> Option<KnmiTenMinute> {
+    if !cfg.file.knmi.enabled {
+        return None;
+    }
+    let key = cfg.env.knmi_api_key.clone()?;
+    let fetcher = providers.fetcher("knmi")?;
+    Some(KnmiTenMinute::new(
+        Arc::clone(fetcher),
+        cfg.file.providers.knmi.base_url.clone(),
+        key,
+        cfg.file.knmi.mean_parameter.clone(),
+        cfg.file.knmi.max_parameter.clone(),
+    ))
+}
+
+/// The EDR location id of a location's station: configured, else the WIGOS
+/// id of its WMO number. `None` without either.
+pub fn knmi_location(cfg: &AppConfig, l: &LocationFile) -> Option<String> {
+    let configured = cfg.file.knmi.location_id.trim();
+    if !configured.is_empty() {
+        return Some(configured.to_owned());
+    }
+    l.station
+        .wmo_id
+        .as_deref()
+        .filter(|w| !w.trim().is_empty())
+        .map(wm_weather::knmi::wigos_id)
+}
+
 /// One rate-limit gate and fetcher per provider, shared by every station.
 pub struct Providers {
     pub fetchers: HashMap<&'static str, Arc<HttpFetcher>>,
@@ -223,6 +260,7 @@ fn provider_id(name: &str) -> ProviderId {
         "iem" => ProviderId::iem(),
         "open_meteo" => ProviderId::open_meteo(),
         "polymarket_data" => ProviderId::polymarket_data(),
+        "knmi" => ProviderId::knmi(),
         _ => ProviderId::polymarket_ws(),
     }
 }
@@ -230,7 +268,7 @@ fn provider_id(name: &str) -> ProviderId {
 impl Providers {
     pub fn build(cfg: &AppConfig, clock: Arc<dyn Clock>, user_agent: &str) -> Result<Self> {
         let p = &cfg.file.providers;
-        let sections: [(&'static str, &ProviderSection); 9] = [
+        let sections: [(&'static str, &ProviderSection); 10] = [
             ("awc", &p.awc),
             ("tgftp", &p.tgftp),
             ("nws_api", &p.nws_api),
@@ -240,6 +278,7 @@ impl Providers {
             ("iem", &p.iem),
             ("open_meteo", &p.open_meteo),
             ("polymarket_data", &p.polymarket_data),
+            ("knmi", &p.knmi),
         ];
         let mut fetchers = HashMap::new();
         let mut gates = HashMap::new();

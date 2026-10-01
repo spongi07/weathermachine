@@ -152,3 +152,28 @@ impl DedupClass {
         }
     }
 }
+
+/// A ten-minute reading of a station's automatic weather station from a
+/// faster source than its METAR — KNMI's 10-minute in-situ observations at
+/// Schiphol (WMO 06240). A predictive input only: it never changes the
+/// observed high, the resolution views or settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenMinuteObservation {
+    pub station: StationId,
+    pub provider: ProviderId,
+    /// End of the ten-minute interval (UTC): KNMI stamps its data so.
+    pub interval_end: DateTime<Utc>,
+    /// Mean 1.5 m air temperature over the interval.
+    pub mean: Option<TempC>,
+    /// Highest 1.5 m air temperature in the interval.
+    pub max: Option<TempC>,
+    /// When the bot received it.
+    pub received_at: DateTime<Utc>,
+}
+
+impl TenMinuteObservation {
+    /// Minutes between the end of the interval and its arrival.
+    pub fn delay_minutes(&self) -> f64 {
+        (self.received_at - self.interval_end).num_seconds() as f64 / 60.0
+    }
+}

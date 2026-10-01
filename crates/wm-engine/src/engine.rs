@@ -18,18 +18,21 @@ use wm_core::market::{DailyTemperatureMarket, OrderBook, TradePrint};
 use wm_core::portfolio::PositionBook;
 use wm_core::resolution::ObservationFilter;
 use wm_core::time::local_date;
-use wm_core::trading::{DecisionRecord, RunMode, TradeIntent};
+use wm_core::trading::{DecisionRecord, IntentKind, OrderStatus, RunMode, TradeIntent};
 use wm_core::units::{Probability, Rounding, Usd, notional};
+use wm_core::weather::TenMinuteObservation;
 use wm_execution::{Applied, OrderManager};
 use wm_risk::{
     ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus,
 };
 use wm_strategy::{
     BookConfirmedConfig, BookConfirmedHigh, BucketEvaluation, BuyNoAboveHigh, BuyNoConfig,
-    BuyYesConfig, BuyYesFinalHigh, CertainConfig, CertainOutcomes, ForecastDay, PeakConfig,
-    PeakDetectionEngine, PeakSlotConfig, PeakSlotHigh, ProbabilityModel, Proposal, SplitUnwind,
-    SplitUnwindConfig, Strategy, StrategyContext, TemperatureStateEngine, UnwindConfig,
-    UnwindEngine, ViewEvaluation, ViewKind,
+    BuyYesConfig, BuyYesFinalHigh, CertainConfig, CertainOutcomes, ForecastDay, KnmiNowcast,
+    KnmiNowcastConfig, MiddleFade, MiddleFadeConfig, MorningMaker, MorningMakerConfig, NextDegree,
+    NextDegreeConfig, PeakConfig, PeakDetectionEngine, PeakSlotConfig, PeakSlotHigh,
+    ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig, Strategy, StrategyContext,
+    TailSeller, TailSellerConfig, TemperatureStateEngine, UnwindConfig, UnwindEngine,
+    ViewEvaluation, ViewKind,
 };
 
 /// A location the engine trades.
@@ -42,6 +45,10 @@ pub struct EngineLocation {
     /// Verified observation filter (after Phase 0). `None` ⇒ evaluate every
     /// candidate view from the market rules and act only if all agree.
     pub confirmed_filter: Option<ObservationFilter>,
+    /// Minutes past each UTC hour of the station's routine reports (resting
+    /// orders expire before them). Empty: unknown.
+    #[serde(default)]
+    pub routine_minutes: Vec<u8>,
 }
 
 /// Engine configuration.
@@ -64,6 +71,22 @@ pub struct EngineConfig {
     /// Strategy F: the high's bucket inside the season's peak slot.
     #[serde(default)]
     pub peak_slot: PeakSlotConfig,
+    /// Strategy G: resting NO bids on cheap buckets well above the high.
+    #[serde(default = "TailSellerConfig::absent")]
+    pub tail_seller: TailSellerConfig,
+    /// Strategy H: YES on the bucket one degree above the high.
+    #[serde(default = "NextDegreeConfig::absent")]
+    pub next_degree: NextDegreeConfig,
+    /// Strategy I: NO on mid-priced buckets the model rates lower.
+    #[serde(default = "MiddleFadeConfig::absent")]
+    pub middle_fade: MiddleFadeConfig,
+    /// Strategy J: two-sided resting quotes in the morning.
+    #[serde(default = "MorningMakerConfig::absent")]
+    pub morning_maker: MorningMakerConfig,
+    /// Strategy K: the NO of the high's bucket when KNMI's ten-minute
+    /// reading says the next METAR will beat it.
+    #[serde(default = "KnmiNowcastConfig::absent")]
+    pub knmi_nowcast: KnmiNowcastConfig,
     pub unwind: UnwindConfig,
     pub evaluate_on_book_updates: bool,
     pub decision_log_capacity: usize,
@@ -176,6 +199,8 @@ pub struct Engine {
     realized_pnl_total: Usd,
     recent_rejections: HashMap<String, DateTime<Utc>>,
     forecasts: HashMap<ForecastKey, StoredForecast>,
+    /// The latest ten-minute reading per station (predictive input only).
+    nowcasts: HashMap<StationId, TenMinuteObservation>,
 }
 
 /// Largest hole (minutes) in a day series, counting local midnight → first
@@ -214,6 +239,11 @@ impl Engine {
             Box::new(SplitUnwind::new(cfg.split_unwind.clone())),
             Box::new(BookConfirmedHigh::new(cfg.book_confirmed.clone())),
             Box::new(PeakSlotHigh::new(cfg.peak_slot.clone())),
+            Box::new(TailSeller::new(cfg.tail_seller.clone())),
+            Box::new(NextDegree::new(cfg.next_degree.clone())),
+            Box::new(MiddleFade::new(cfg.middle_fade.clone())),
+            Box::new(MorningMaker::new(cfg.morning_maker.clone())),
+            Box::new(KnmiNowcast::new(cfg.knmi_nowcast.clone())),
         ];
         let risk = RiskEngine::new(cfg.risk.clone(), &cfg.run_id);
         let unwind = UnwindEngine::new(cfg.unwind.clone());
@@ -247,6 +277,7 @@ impl Engine {
             realized_pnl_total: Usd::ZERO,
             recent_rejections: HashMap::new(),
             forecasts: HashMap::new(),
+            nowcasts: HashMap::new(),
             cfg,
         }
     }
@@ -388,6 +419,21 @@ impl Engine {
                     }
                 }
             }
+            WeatherMachineEvent::NowcastUpdate(n) => {
+                // Predictive input only: the latest reading per station. It
+                // never touches the observed high, the views or settlement.
+                let o = &n.observation;
+                let newer = self
+                    .nowcasts
+                    .get(&o.station)
+                    .is_none_or(|x| x.interval_end < o.interval_end);
+                if newer {
+                    self.nowcasts.insert(o.station.clone(), o.clone());
+                    if let Some(i) = self.location_index_for_station(&o.station) {
+                        self.evaluate_location(i, false, &mut out);
+                    }
+                }
+            }
             WeatherMachineEvent::MarketSnapshot(m) => {
                 let m = m.market.clone();
                 for o in &m.outcomes {
@@ -466,7 +512,11 @@ impl Engine {
 
     fn apply_order_update(&mut self, ev: &OrderUpdateEvent, out: &mut EngineOutput) {
         match self.orders.apply(&ev.update) {
-            Ok(Applied::Changed { newly_filled, .. }) => {
+            Ok(Applied::Changed {
+                previous,
+                newly_filled,
+            }) => {
+                self.release_unfilled(&ev.update.client_order_id, previous);
                 if newly_filled.micros() > 0
                     && let Some(fill) = &ev.fill
                     && let Some(rec) = self.orders.get(&ev.update.client_order_id).cloned()
@@ -500,6 +550,28 @@ impl Engine {
             }
             Ok(Applied::Unchanged) => {}
             Err(e) => out.alerts.push(format!("order update rejected: {e}")),
+        }
+    }
+
+    /// An opening buy that just ended (expired, cancelled, rejected) with
+    /// shares unfilled: their cost at the limit leaves today's new-exposure
+    /// counter, which counted the whole order at its approval. Resting
+    /// orders that expire unfilled would otherwise use up the daily limit.
+    fn release_unfilled(&mut self, id: &wm_core::ids::ClientOrderId, previous: OrderStatus) {
+        let Some(rec) = self.orders.get(id) else {
+            return;
+        };
+        let ended_unfilled = !previous.is_terminal()
+            && rec.status.is_terminal()
+            && rec.status != OrderStatus::Filled;
+        if ended_unfilled
+            && rec.kind == IntentKind::Open
+            && rec.side == wm_core::market::Side::Buy
+            && rec.remaining().micros() > 0
+        {
+            let cost = notional(rec.limit_price, rec.remaining(), Rounding::Up);
+            self.risk
+                .release_daily_new_exposure(cost, rec.created_at, self.now);
         }
     }
 
@@ -709,6 +781,8 @@ impl Engine {
                 positions: &self.positions,
                 pending_tokens: &pending,
                 peak_times: model.peak_times(),
+                routine_minutes: &loc.routine_minutes,
+                nowcast: self.nowcasts.get(&loc.station),
             };
             for s in self.strategies.iter_mut() {
                 if !s.enabled() {
@@ -731,6 +805,7 @@ impl Engine {
             &self.books,
             &unwind_views,
             &pending,
+            &self.position_strategy,
             self.now,
         ));
         self.evaluations
@@ -1044,6 +1119,11 @@ impl Engine {
         s.high.map(|h| h.value.round_half_up_whole())
     }
 
+    /// The latest ten-minute reading of `station`, if one arrived.
+    pub fn nowcast(&self, station: &StationId) -> Option<&TenMinuteObservation> {
+        self.nowcasts.get(station)
+    }
+
     pub fn hints(&self) -> &HashMap<StationId, StationHint> {
         &self.hints
     }
@@ -1086,6 +1166,7 @@ impl Engine {
                 evaluations,
                 hint: self.hints.get(&loc.station).copied().unwrap_or_default(),
                 forecast: self.forecast_snapshot(loc, today),
+                nowcast: self.nowcasts.get(&loc.station).cloned(),
             });
         }
         let open = self.orders.open_views();

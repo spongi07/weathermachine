@@ -439,9 +439,26 @@ pub struct LocationDto {
     pub market: Option<MarketDto>,
     #[serde(default)]
     pub forecast: Option<ForecastDto>,
+    /// The station's latest KNMI ten-minute reading (strategy K's input).
+    #[serde(default)]
+    pub nowcast: Option<NowcastDto>,
     /// Every strategy's latest evaluation of today's buckets.
     #[serde(default)]
     pub evaluations: Vec<EvaluationDto>,
+}
+
+/// A ten-minute station reading from a faster source than the METAR
+/// (KNMI): a predictive input only, never the observed high.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NowcastDto {
+    pub provider: String,
+    /// End of the ten-minute interval.
+    pub interval_end_ms: i64,
+    pub mean_c: Option<f64>,
+    pub max_c: Option<f64>,
+    pub received_ms: i64,
+    /// Minutes from the interval's end to its arrival.
+    pub delay_min: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

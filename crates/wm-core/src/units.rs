@@ -684,6 +684,21 @@ pub mod decimal_serde {
         }
     }
 
+    pub mod opt_price {
+        use super::*;
+        pub fn serialize<S: Serializer>(v: &Option<Price>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(p) => s.serialize_str(&p.to_string()),
+                None => s.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Price>, D::Error> {
+            #[derive(Deserialize)]
+            struct W(#[serde(with = "super::price")] Price);
+            Option::<W>::deserialize(d).map(|o| o.map(|w| w.0))
+        }
+    }
+
     pub mod shares {
         use super::*;
         pub fn serialize<S: Serializer>(v: &Shares, s: S) -> Result<S::Ok, S::Error> {

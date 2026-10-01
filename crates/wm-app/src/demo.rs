@@ -25,8 +25,8 @@ use wm_backtest::{
     SimulationSession, StudyConfig, SyntheticDay, study, synthetic_history, synthetic_trading_day,
 };
 use wm_core::event::{
-    CorrectionEvent, EventEnvelope, EventSource, ForecastEvent, OperatorCommand,
-    ProviderHealthEvent, TimerEvent, TimerKind, WeatherMachineEvent,
+    CorrectionEvent, EventEnvelope, EventSource, ForecastEvent, NowcastEvent, OperatorCommand,
+    ProviderHealthEvent, StreamHeartbeatEvent, TimerEvent, TimerKind, WeatherMachineEvent,
 };
 use wm_core::health::{CircuitState, ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{ProviderId, RunId};
@@ -66,6 +66,8 @@ impl Default for DemoOptions {
 }
 
 const PUBLICATION_DELAY_MIN: i64 = 4;
+/// Minutes from the end of a ten-minute interval to its synthetic reading.
+const TEN_MINUTE_DELAY_MIN: i64 = 5;
 const HEARTBEAT_MIN: i64 = 5;
 
 fn health_event(
@@ -184,6 +186,24 @@ pub fn day_events(
         }
     }
     events.extend(correction);
+    // Ten-minute readings of the same curve (strategy K's input, KNMI-style),
+    // each with a market-feed heartbeat: live, the heartbeat keeps quiet books
+    // current; here it lets the books quoted after the last report count.
+    for o in day.ten_minute_readings(&ids.station, Duration::minutes(TEN_MINUTE_DELAY_MIN)) {
+        let at = o.received_at;
+        events.push(EventEnvelope::new(
+            at,
+            EventSource::Synthetic,
+            WeatherMachineEvent::MarketStreamHeartbeat(StreamHeartbeatEvent {
+                connected_since: start,
+            }),
+        ));
+        events.push(EventEnvelope::new(
+            at,
+            EventSource::Synthetic,
+            WeatherMachineEvent::NowcastUpdate(NowcastEvent { observation: o }),
+        ));
+    }
     // Synthetic day-1 forecast: the day's underlying curve with a day-specific
     // error, known from 08:05 local (like the live product's ready time).
     let bias = (seed.wrapping_add(day_index) % 21) as f64 - 10.0;
@@ -581,6 +601,20 @@ mod tests {
                 && e.available_at >= from
                 && e.available_at < to
         ));
+        // A ten-minute reading every ten minutes, each with a market-feed
+        // heartbeat at the same instant.
+        let at = |heartbeat: bool| {
+            ev.iter()
+                .filter(|e| match &e.event {
+                    WeatherMachineEvent::NowcastUpdate(_) => !heartbeat,
+                    WeatherMachineEvent::MarketStreamHeartbeat(_) => heartbeat,
+                    _ => false,
+                })
+                .map(|e| e.available_at)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at(false).len(), 24 * 6 - 1);
+        assert_eq!(at(false), at(true));
         // Deterministic.
         assert_eq!(ev, day_events(&ids(), d, 7, 0));
     }
@@ -619,5 +653,7 @@ mod tests {
         );
         // No approval while the provider is throttled.
         assert!(!all.iter().any(|x| x.approved && x.at >= from && x.at < to));
+        // The ten-minute readings reach the engine (strategy K's input).
+        assert!(s.engine().nowcast(&ids().station).is_some());
     }
 }

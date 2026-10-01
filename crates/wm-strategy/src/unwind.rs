@@ -40,6 +40,26 @@ pub struct UnwindConfig {
     pub exit_below_probability: f64,
     /// Exit after holding this long (None = hold to settlement).
     pub max_hold_minutes: Option<i64>,
+    /// Strategies whose positions the unwind engine leaves alone: they buy
+    /// outcomes the model rates below the exit level by design (a cheap
+    /// YES, the NO of a mid-priced bucket, the inventory of a resting
+    /// order) and hold them to settlement.
+    #[serde(default = "default_exempt_strategies")]
+    pub exempt_strategies: Vec<String>,
+}
+
+/// Strategies G–K: the price- and speed-based strategies of October 2026.
+pub fn default_exempt_strategies() -> Vec<String> {
+    [
+        crate::tail_seller::ID,
+        crate::next_degree::ID,
+        crate::middle_fade::ID,
+        crate::morning_maker::ID,
+        crate::knmi_nowcast::ID,
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect()
 }
 
 impl Default for UnwindConfig {
@@ -49,6 +69,7 @@ impl Default for UnwindConfig {
             style: UnwindStyle::BestBid,
             exit_below_probability: 0.50,
             max_hold_minutes: None,
+            exempt_strategies: default_exempt_strategies(),
         }
     }
 }
@@ -151,7 +172,10 @@ impl UnwindEngine {
         }
     }
 
-    /// Propose exits for positions in `market`.
+    /// Propose exits for positions in `market`, except those of exempt
+    /// strategies (`position_strategy` names the strategy of each held
+    /// token).
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &mut self,
         market: &DailyTemperatureMarket,
@@ -159,6 +183,7 @@ impl UnwindEngine {
         books: &HashMap<TokenId, OrderBook>,
         views: &[ViewEvaluation],
         pending_tokens: &HashSet<TokenId>,
+        position_strategy: &HashMap<TokenId, StrategyId>,
         now: DateTime<Utc>,
     ) -> Vec<Proposal> {
         let mut out = Vec::new();
@@ -172,6 +197,14 @@ impl UnwindEngine {
         for pos in held {
             let token = &pos.instrument.token;
             if pending_tokens.contains(token) {
+                continue;
+            }
+            if position_strategy.get(token).is_some_and(|s| {
+                self.config
+                    .exempt_strategies
+                    .iter()
+                    .any(|x| x == s.as_str())
+            }) {
                 continue;
             }
             let p = Self::p_win(
