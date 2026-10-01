@@ -1185,10 +1185,18 @@ mod tests {
             usd(10)
         );
         assert_eq!(cfg.file.risk.max_daily_loss_usd, Some(usd(30)));
+        // The operator moved F's slot to 75 % → 95 % after the replay; the
+        // rest of the section states the documented defaults.
+        let f = cfg.peak_slot();
+        assert_eq!((f.slot_from_quantile, f.slot_to_quantile), (0.75, 0.95));
         assert_eq!(
-            cfg.peak_slot(),
+            wm_strategy::PeakSlotConfig {
+                slot_from_quantile: 0.5,
+                slot_to_quantile: 0.9,
+                ..f
+            },
             wm_strategy::PeakSlotConfig::default(),
-            "the shipped [strategies.peak_slot] and the documented defaults must agree"
+            "apart from the slot, the shipped [strategies.peak_slot] and the documented defaults must agree"
         );
         assert_eq!(cfg.file.app.mode, RunMode::Paper);
         assert!(cfg.file.providers.awc.policy.min_interval >= std::time::Duration::from_secs(30));

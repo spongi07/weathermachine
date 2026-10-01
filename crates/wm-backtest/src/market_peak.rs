@@ -99,6 +99,11 @@ impl PeakSlotSim {
                 ..variant("F · earlier slot")
             },
             FRule {
+                from_q: 0.50,
+                to_q: 0.90,
+                ..variant("F · median slot")
+            },
+            FRule {
                 from_q: 0.75,
                 to_q: 0.95,
                 ..variant("F · later slot")
@@ -743,6 +748,25 @@ mod tests {
         assert_eq!(
             labels,
             ["F", "F · earlier slot", "F · later slot", "F maker"]
+        );
+        // Live on the later slot (as shipped since 1 Oct): the median slot,
+        // the original rule, is replayed beside it.
+        let later = PeakSlotSim {
+            slot_from_quantile: 0.75,
+            slot_to_quantile: 0.95,
+            ..PeakSlotSim::default()
+        };
+        let labels: Vec<String> = later.rules().into_iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "F",
+                "F · to 0.99",
+                "F · earlier slot",
+                "F · median slot",
+                "F · 1 °C below",
+                "F maker"
+            ]
         );
         // Disabled live: no row is marked live.
         let off = PeakSlotSim {

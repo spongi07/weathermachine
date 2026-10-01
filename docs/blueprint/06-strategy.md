@@ -397,10 +397,16 @@ The first report at the *whole-degree* high usually comes somewhat earlier
 than the true maximum, which is why the station's own history sets the
 slot.
 
-**SLOT.** From quantile `slot_from_quantile` (0.5, the median) to
-`slot_to_quantile` (0.9) of the season's peak times, end exclusive:
-`[q50, q90 + 1 min)`. Until an installed model carries peak times,
-`fallback_slots` apply:
+**SLOT.** From quantile `slot_from_quantile` to `slot_to_quantile` of the
+season's peak times, end exclusive. The code's defaults are the median and
+the 90th percentile, `[q50, q90 + 1 min)`. The shipped configuration uses
+**0.75 → 0.95** since 1 October 2026: in the 122-day replay at traded
+prices the median → 90 % slot lost $122.00 over 84 trades and the
+75 % → 95 % slot made $11.13 over 80 (+$0.14 per trade, 95 % CI
+−$5.93 … +$5.14). That difference is within noise and was chosen after
+seeing the data, so it is a hypothesis for the coming days, not an edge;
+`research market` keeps replaying the median slot beside it. Until an
+installed model carries peak times, `fallback_slots` apply:
 
 | season | fallback slot |
 |---|---|
@@ -410,7 +416,7 @@ slot.
 | autumn | 14:00–17:00 |
 
 Every evaluation and proposal names the slot and its source, e.g.
-`15:58 local inside the summer slot 15:25–16:56 (median → 90% of 412 days' peak times)`.
+`16:20 local inside the summer slot 15:55–17:26 (75% → 95% of 412 days' peak times)`.
 
 **CONDITIONS**, all required. F is evaluated on every weather update and on
 every order-book update, so the book is watched continuously.

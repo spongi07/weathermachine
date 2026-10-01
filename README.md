@@ -35,10 +35,11 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   itself, E: YES on the high's bucket at 0.90–0.99 once the clock, a
   cooling temperature and a shrinking order book agree (switched off in the
   shipped configuration: it lost money in the replay), F: 100 shares of YES
-  on the high's bucket inside the season's *peak slot* — from the median to
-  the 90th percentile of the local time at which the station's history first
-  reported its day's high — once that bucket is offered above 0.90, at most
-  0.95) → risk engine → simulated venue. A and B pool the model with the
+  on the high's bucket inside the season's *peak slot* — in the shipped
+  configuration from the 75th to the 95th percentile of the local time at
+  which the station's history first reported its day's high — once that
+  bucket is offered above 0.90, at most 0.95) → risk engine → simulated
+  venue. A and B pool the model with the
   market's price: the book can veto a trade, never create one, and a book
   too wide to check the model blocks the trade.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo

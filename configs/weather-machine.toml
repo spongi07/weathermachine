@@ -395,10 +395,15 @@ slippage_allowance = "0.005"      # for the EV shown (not a gate)
 # the bucket holding the day's high so far is offered above min_price, F buys
 # `shares` of its YES at once, paying at most max_price for every share.
 # HYPOTHESIS TO BACKTEST: `research market` replays F and its variants.
+# Slot: the operator's choice after the 122-day replay (1 Oct 2026), where
+# the median → 90 % slot lost $122 over 84 trades and 75 % → 95 % made $11
+# over 80 (per trade about +$0.14, 95 % CI −$5.93 … +$5.14). That is within
+# noise and was picked after seeing the data: a hypothesis to confirm on
+# later days, not an edge. The replay keeps reporting the median slot.
 [strategies.peak_slot]
 enabled = true
-slot_from_quantile = 0.5          # from the median time the high is first reported
-slot_to_quantile = 0.9            # … to the time 90 % of days have it
+slot_from_quantile = 0.75         # from the time 75 % of days first report their high
+slot_to_quantile = 0.95           # … to the time 95 % of days have it
 min_price = "0.90"                # the best ask must be above this
 max_price = "0.95"                # all shares at or below this
 shares = 100

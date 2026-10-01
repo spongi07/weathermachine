@@ -250,7 +250,10 @@ mode.
   EHAM's own METAR history, per season.
   * Training prints the mean, the median, the quantiles and the share of
     days later than the slot, later than 17:00 and before 09:00.
-  * F's slot runs from the median to the 90th percentile of that moment.
+  * F's slot ran from the median to the 90th percentile of that moment
+    until 1 October 2026. After the 122-day replay (that slot −$122.00
+    over 84 trades, 75 % → 95 % +$11.13 over 80, within noise) the shipped
+    configuration uses the 75th to the 95th percentile.
 
 **"It cannot go higher after the slot" is a hypothesis.** The slot ends at
 the 90th percentile, so by construction one day in ten first reports its

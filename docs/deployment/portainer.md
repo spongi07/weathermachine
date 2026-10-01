@@ -205,9 +205,11 @@ trade.
 Strategy F (the high's bucket inside the season's peak slot, 100 shares)
 runs six ways at 100 shares a trade:
 
-* as configured;
+* as configured (the 75 % → 95 % slot);
 * up to 0.99;
-* an earlier slot and a later slot;
+* an earlier slot (25 % → 75 %) and the median slot (50 % → 90 %, F's
+  rule until 1 October 2026); the later-slot variant is the configured
+  rule now, so it is not repeated;
 * only once the report is 1 °C below the high;
 * as a resting bid.
 
