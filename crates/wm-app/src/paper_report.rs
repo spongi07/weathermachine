@@ -1075,6 +1075,31 @@ fn call(
     }
 }
 
+/// How close a line came to trading, compared as a pair (higher is closer).
+type Closeness = (f64, f64);
+
+/// The [`Closeness`] of an evaluation line.
+/// A, B and D trade on a model edge, so their EV ranks them. E and F trade
+/// on a price rule and claim no edge: fewer blockers first, then the higher
+/// ask, since their trigger is the ask rising into a range.
+fn closeness(l: &EvalLine) -> Option<Closeness> {
+    match l.tag.as_str() {
+        "E" | "F" => {
+            let blockers = if l.signal {
+                0
+            } else {
+                l.verdict.split("; ").filter(|b| !b.is_empty()).count()
+            };
+            Some((-(blockers as f64), l.ask?))
+        }
+        _ => Some((l.ev?, 0.0)),
+    }
+}
+
+fn by_closeness(a: Closeness, b: Closeness) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+}
+
 fn strategy_days(
     evaluations: &[&ReportDecision],
     buckets: &HashMap<&str, TemperatureBucket>,
@@ -1087,7 +1112,7 @@ fn strategy_days(
         lines: usize,
         signals: Vec<Call>,
         blockers: BTreeMap<String, (usize, String)>,
-        best: BTreeMap<(String, String), (f64, DateTime<Utc>, EvalLine)>,
+        best: BTreeMap<(String, String), (Closeness, DateTime<Utc>, EvalLine)>,
     }
     let mut by_tag: BTreeMap<String, Acc> = BTreeMap::new();
     for d in evaluations {
@@ -1115,10 +1140,14 @@ fn strategy_days(
                     e.1 = b.to_owned();
                 }
             }
-            if let Some(ev) = l.ev {
+            if let Some(c) = closeness(&l) {
                 let key = (l.bucket.clone(), l.side.clone());
-                if acc.best.get(&key).is_none_or(|(best, ..)| ev > *best) {
-                    acc.best.insert(key, (ev, d.at, l));
+                if acc
+                    .best
+                    .get(&key)
+                    .is_none_or(|(best, ..)| by_closeness(c, *best).is_gt())
+                {
+                    acc.best.insert(key, (c, d.at, l));
                 }
             }
         }
@@ -1137,8 +1166,9 @@ fn strategy_days(
                 .collect();
             blockers.sort_by(|a, b| b.count.cmp(&a.count).then(a.pattern.cmp(&b.pattern)));
             blockers.truncate(BLOCKERS_PER_STRATEGY);
-            let mut best: Vec<(f64, DateTime<Utc>, EvalLine)> = acc.best.into_values().collect();
-            best.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let mut best: Vec<(Closeness, DateTime<Utc>, EvalLine)> =
+                acc.best.into_values().collect();
+            best.sort_by(|a, b| by_closeness(b.0, a.0));
             let closest = best
                 .iter()
                 .take(CLOSEST_PER_STRATEGY)
@@ -1879,6 +1909,75 @@ mod tests {
         assert_eq!(l.p, None);
         assert_eq!(l.ev, None);
         assert!(parse_line("garbage without a verdict").is_none());
+    }
+
+    /// 30 Sep: F's closest call is the 15:27 near-miss (ask 0.94, too few
+    /// shares), not the line with the best model EV; A keeps the EV order.
+    #[test]
+    fn price_rules_rank_closest_calls_by_blockers_then_ask() {
+        let at = |h: u32, m: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 30)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap()
+                .and_utc()
+        };
+        let rec = |t: DateTime<Utc>, lines: &[&str]| ReportDecision {
+            at: t,
+            strategy: "evaluation".into(),
+            event_slug: None,
+            summary: String::new(),
+            inputs: serde_json::Value::Null,
+            outputs: serde_json::json!({ "evaluations": lines }),
+            approved: false,
+            reasons: Vec::new(),
+        };
+        let recs = [
+            rec(
+                at(9, 28),
+                &[
+                    "F 21°C YES · ask 0.009 · p 0.090 · EV +0.0755 — 11:28 outside the autumn slot 13:25–16:01; ask 0.009 not above 0.90",
+                    "A 21°C YES · ask 0.009 · p 0.090 · EV +0.0755 — confirmation 0m < 60m; ask 0.009 outside [0.90, 0.99]",
+                ],
+            ),
+            rec(
+                at(12, 57),
+                &[
+                    "F 23°C YES · ask 0.74 · p 0.437 · EV -0.3175 — ask 0.74 not above 0.90",
+                    "A 23°C YES · ask 0.74 · p 0.437 · EV -0.3175 — confirmation 0m < 60m; ask 0.74 outside [0.90, 0.99]",
+                ],
+            ),
+            rec(
+                at(13, 27),
+                &[
+                    "F 23°C YES · ask 0.94 · p 0.745 (market 0.910) · EV -0.2029 — only 24.14 shares offered ≤ 0.95 (need 100)",
+                ],
+            ),
+            rec(
+                at(13, 57),
+                &[
+                    "F 23°C YES · ask 0.988 · p 0.745 (market 0.966) · EV -0.2487 — ask 0.988 above 0.95; already positioned",
+                ],
+            ),
+        ];
+        let refs: Vec<&ReportDecision> = recs.iter().collect();
+        let days = strategy_days(
+            &refs,
+            &HashMap::new(),
+            Some(23),
+            0.05,
+            chrono_tz::Europe::Amsterdam,
+        );
+        let tag = |t: &str| days.iter().find(|d| d.strategy == t).unwrap();
+        let f: Vec<(&str, &str)> = tag("F")
+            .closest
+            .iter()
+            .map(|c| (c.at.as_str(), c.bucket.as_str()))
+            .collect();
+        // One line per bucket: 23 °C's 15:27 near-miss, then 21 °C.
+        assert_eq!(f, vec![("15:27", "23°C"), ("11:28", "21°C")]);
+        let a: Vec<&str> = tag("A").closest.iter().map(|c| c.at.as_str()).collect();
+        assert_eq!(a, vec!["11:28", "14:57"], "A: by model EV");
     }
 
     #[test]

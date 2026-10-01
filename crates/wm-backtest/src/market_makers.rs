@@ -293,8 +293,12 @@ pub(crate) fn simulate_makers(
                         continue;
                     }
                     let p_used = log_pool(o.p_model, o.market, market_weight).min(o.p_model);
-                    // Rules with a model edge (A, B) need it at the maker's price.
-                    if rule != MakerRule::E && p_used - o.price < sim.min_edge {
+                    // Rules with a model edge (A, B) need it at the maker's
+                    // price and, like live, the market's check on the model.
+                    if rule != MakerRule::E
+                        && (p_used - o.price < sim.min_edge
+                            || (market_weight > 0.0 && o.market.is_none()))
+                    {
                         continue;
                     }
                     let trades = per_bucket.get(o.bucket).map_or(&[][..], Vec::as_slice);

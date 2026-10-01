@@ -33,12 +33,14 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   the final-high bucket, B: buy NO above it, C: split/unwind research, D:
   outcomes the observations have already decided, bought on the report
   itself, E: YES on the high's bucket at 0.90–0.99 once the clock, a
-  cooling temperature and a shrinking order book agree, F: 100 shares of YES
+  cooling temperature and a shrinking order book agree (switched off in the
+  shipped configuration: it lost money in the replay), F: 100 shares of YES
   on the high's bucket inside the season's *peak slot* — from the median to
   the 90th percentile of the local time at which the station's history first
   reported its day's high — once that bucket is offered above 0.90, at most
   0.95) → risk engine → simulated venue. A and B pool the model with the
-  market's price: the book can veto a trade, never create one.
+  market's price: the book can veto a trade, never create one, and a book
+  too wide to check the model blocks the trade.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:

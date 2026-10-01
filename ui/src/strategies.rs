@@ -511,14 +511,14 @@ fn NowPanel(snap: Snap, strategy: Memo<Option<StrategyDto>>) -> impl IntoView {
                 view! {
                     <div class="now-loc">
                         <div class="muted small">{format!(
-                            "{} · {} · local {} {} · {} · high so far {} (first {}) · last report {}",
+                            "{} · {} · local {} {} · {} · high so far {} ({}) · last report {}",
                             l.location.to_uppercase(),
                             l.station,
                             l.local_date,
                             l.local_time,
                             l.current_temp_c.map_or_else(|| DASH.to_owned(), |t| format!("{t:.0} °C now")),
                             view_.as_ref().and_then(|v| v.high_whole).map_or_else(|| DASH.to_owned(), |h| format!("{h} °C")),
-                            view_.as_ref().and_then(|v| v.high_local.clone()).unwrap_or_else(|| DASH.to_owned()),
+                            view_.as_ref().and_then(ViewDto::high_times).unwrap_or_else(|| DASH.to_owned()),
                             l.last_observation_age_s.map_or_else(|| "none".to_owned(), |a| format!("{} ago", fmt::age(a))),
                         )}</div>
                         <div class="table-wrap"><table class="ladder">

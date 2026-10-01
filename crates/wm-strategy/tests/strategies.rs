@@ -906,7 +906,8 @@ fn strategy_a_lets_the_market_veto_but_not_create_a_trade() {
         1,
         "model alone buys"
     );
-    // A wide book is no probability: the model decides alone.
+    // A wide book is no probability, so the market cannot check the model:
+    // nothing trades (the model alone is the weaker opinion) …
     let mut b = books(&m);
     b.insert(
         yes(&m, 18),
@@ -915,6 +916,44 @@ fn strategy_a_lets_the_market_veto_but_not_create_a_trade() {
     let out = run(BuyYesConfig::default(), &b);
     assert_eq!(out.evaluations[0].market_p, None);
     assert!((out.evaluations[0].p_win.unwrap() - 0.985).abs() < 1e-12);
+    assert!(out.proposals.is_empty());
+    assert!(
+        out.evaluations[0]
+            .blockers
+            .contains(&"spread 0.15 > 0.10: too wide to check the model".to_owned()),
+        "{:?}",
+        out.evaluations[0].blockers
+    );
+    // … nor on a one-sided or crossed book …
+    for (bid, why) in [
+        (None, "no bid: the market cannot check the model"),
+        (
+            Some("0.97"),
+            "crossed book: the market cannot check the model",
+        ),
+    ] {
+        let mut b1 = books(&m);
+        b1.insert(yes(&m, 18), book_at(&yes(&m, 18), bid, Some("0.95")));
+        let out = run(BuyYesConfig::default(), &b1);
+        assert!(out.proposals.is_empty());
+        assert!(
+            out.evaluations[0].blockers.iter().any(|x| x == why),
+            "{:?}",
+            out.evaluations[0].blockers
+        );
+    }
+    // … unless the complement's book is tight: it speaks for the market.
+    b.insert(no(&m, 18), book_at(&no(&m, 18), Some("0.05"), Some("0.07")));
+    let out = run(BuyYesConfig::default(), &b);
+    assert!((out.evaluations[0].market_p.unwrap() - 0.94).abs() < 1e-12);
+    assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations[0].blockers);
+    // Weight 0 is model only by choice: the model decides alone.
+    let mut b = books(&m);
+    b.insert(
+        yes(&m, 18),
+        book_at(&yes(&m, 18), Some("0.80"), Some("0.95")),
+    );
+    let out = run(model_only_yes(), &b);
     assert_eq!(out.proposals.len(), 1);
     assert!(
         out.proposals[0]
@@ -969,6 +1008,18 @@ fn strategy_b_pools_each_bucket_with_its_own_book() {
     let e19 = eval(&run(&b), "19°C");
     assert!((e19.market_p.unwrap() - 0.97).abs() < 1e-12);
     assert!((e19.p_win.unwrap() - log_pool(0.988, Some(0.97), 0.5)).abs() < 1e-12);
+    // Without that YES book nothing checks the model: no NO on 19 °C.
+    b.remove(&yes(&m, 19));
+    let out = run(&b);
+    assert!(out.proposals.iter().all(|p| p.bucket_label != "19°C"));
+    let e19 = eval(&out, "19°C");
+    assert_eq!(e19.market_p, None);
+    assert!(
+        e19.blockers
+            .contains(&"spread 0.13 > 0.10: too wide to check the model".to_owned()),
+        "{:?}",
+        e19.blockers
+    );
     // A YES book pricing 20 °C at 12 % vetoes the NO at 0.97.
     let mut b = books(&m);
     b.insert(no(&m, 20), book_at(&no(&m, 20), Some("0.80"), Some("0.97")));

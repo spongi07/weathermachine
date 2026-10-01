@@ -119,11 +119,11 @@ fn location(out: &mut String, l: &LocationDto) {
     for v in &l.views {
         let _ = write!(
             out,
-            "<div class=\"kpi\"><b>{} °C</b><span>{} high @ {} · {} · +{} min · windows {}</span></div>",
+            "<div class=\"kpi\"><b>{} °C</b><span>{} high {} · {} · +{} min · windows {}</span></div>",
             v.high_whole
                 .map_or_else(|| "—".to_owned(), |h| h.to_string()),
             esc(&v.label),
-            esc(v.high_local.as_deref().unwrap_or("—")),
+            esc(&v.high_times().unwrap_or_else(|| "—".to_owned())),
             esc(v.trajectory.as_deref().unwrap_or("—")),
             v.minutes_since_high
                 .map_or_else(|| "—".to_owned(), |m| m.to_string()),

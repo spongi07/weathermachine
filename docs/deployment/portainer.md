@@ -284,7 +284,9 @@ everything. The report reads it back, day by day:
   to reach the bot, and which source (AWC or TGFTP) delivered it first;
 * the day-1 forecast's maximum and its error against the METAR high;
 * per strategy: how often each blocker stopped it, any signals, and the
-  three closest calls with how they would have ended if bought at the ask;
+  three closest calls with how they would have ended if bought at the ask
+  (ranked by model EV for A, B and D; for E and F, which trade on a price,
+  by fewest blockers and then the highest ask);
 * the model against the market on the bucket that won: average
   probability, log loss, and who was sure (≥ 0.90) first;
 * proposals with the risk verdicts, paper orders, fills and settled P&L;

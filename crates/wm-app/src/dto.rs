@@ -151,6 +151,7 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                 high_c: st.and_then(|s| s.high).map(|h| h.value.as_f64()),
                 high_whole: f.map(|f| f.high_whole),
                 high_local: st.and_then(|s| s.high).map(|h| local(h.last_at, tz)),
+                high_first_local: st.and_then(|s| s.high).map(|h| local(h.first_at, tz)),
                 retests: st.and_then(|s| s.high).map_or(0, |h| h.retests),
                 minutes_since_high: f.map(|f| f.minutes_since_high),
                 drop_c: f.map(|f| f64::from(f.drop_tenths) / 10.0),

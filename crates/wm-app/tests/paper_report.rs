@@ -584,7 +584,7 @@ async fn paper_report_reads_a_day_back_from_the_database() {
     assert_eq!(ctype, "text/plain; charset=utf-8");
     for needle in [
         "# Strategy E — Book-confirmed high (`E_book_confirmed_high`)",
-        "## History — 2026-09-29 → 2026-09-30 (database; outcomes judged by the METAR high)",
+        "## History — 2026-09-29 → 2026-09-30 (database; Europe/Amsterdam time; outcomes judged by the METAR high)",
         "Totals: 0 signal(s), 1 proposal(s) (1 approved), 1 order(s), settled paper P&L $0.57.",
         "### 2026-09-30 (in progress) — METAR high –, winner –\n\n- No evaluation of this strategy.",
         "### 2026-09-29 — METAR high 25 °C",

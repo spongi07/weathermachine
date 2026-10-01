@@ -64,7 +64,10 @@ Provider behaviours required by the brief:
   blockers, this run's proposals, orders and evaluation trail.
   `GET /api/v1/strategies/{id}/log` (id or letter; `?days=`, default 7;
   `?download`) renders all of it as Markdown, plus the strategy's last days
-  from `report paper`, with its settled P&L split by strategy. The page's
+  from `report paper`, with its settled P&L split by strategy. Its times are
+  on the station's clock, named in each section's heading (UTC, labelled,
+  when stations differ), and the high says when it was first and last
+  reported (1 Oct: first 02:25, back at it from 11:25). The page's
   *Copy log* button copies it. It uses the clipboard API on https and
   localhost, `execCommand` on plain http, and otherwise opens a dialog with
   the text selected.
@@ -80,10 +83,11 @@ Provider behaviours required by the brief:
   a minute) reads the database back: METAR high, report delays and the
   source that delivered each report first, the day-1 forecast's error, the
   blockers of every evaluation per strategy, the closest calls and how they
-  would have ended, the model against the recorded book on the winning
-  bucket, proposals, orders, fills, P&L settled at the METAR high, provider
-  requests, health changes and logged events. The dashboard only holds the
-  last 100 decisions of the current run.
+  would have ended (by model EV for A, B and D; for the price rules E and F
+  fewest blockers, then the highest ask), the model against the recorded
+  book on the winning bucket, proposals, orders, fills, P&L settled at the
+  METAR high, provider requests, health changes and logged events. The
+  dashboard only holds the last 100 decisions of the current run.
 
 ## 40. Recovery architecture
 

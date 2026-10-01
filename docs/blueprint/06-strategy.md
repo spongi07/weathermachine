@@ -231,6 +231,20 @@ the model, the model is more likely wrong.
   model's probability**. The market can veto a trade but never create one.
   With consistent books the cap is a no-op, because the midpoint is at or
   below the ask.
+* **No check, no trade.** With `market_weight` > 0, a book that gives no
+  market probability (spread above `max_market_spread`, one-sided or
+  crossed, on the token and its complement) blocks the trade: "spread 0.20 >
+  0.10: too wide to check the model", "no bid: …", "crossed book: …". The
+  model alone used to decide then, but it is the weaker opinion: live on
+  1 Oct it priced 21 °C at about 6 % while the book bid NO only 0.74–0.81,
+  and the temperature came back to within a degree of it by midday. The
+  risk engine already rejects spreads above its 0.05 limit and one-sided
+  books, so in practice only crossed books trade differently; the rule
+  keeps a wider risk limit from letting the model trade alone and ends the
+  proposal bursts on wide books (563 rejections in half a second on
+  1 Oct). Weight 0 stays model only. A missing, stale or ask-less book is
+  already blocked and gets no second blocker. The replay applies the same
+  rule (taker and maker).
 * The pooled probability drives EV, break-even and the edge blocker. The
   blocker names the market when it pulled the probability down. The
   rationale records model, market and the result. The dashboard ladder
@@ -243,9 +257,12 @@ effectively stop trading, because the midpoint never clears its own ask.
 **TESTING.** `log_pool_averages_log_odds`,
 `pooled_win_probability_never_exceeds_the_model`,
 `market_probability_needs_a_fresh_tight_two_sided_book`,
-`strategy_a_lets_the_market_veto_but_not_create_a_trade`,
-`strategy_b_pools_each_bucket_with_its_own_book`, plus configuration defaults
-and validation tests.
+`strategy_a_lets_the_market_veto_but_not_create_a_trade` (also: no trade on a
+wide, one-sided or crossed book unless the complement is tight or the weight
+is 0), `strategy_b_pools_each_bucket_with_its_own_book`,
+`a_and_b_replays_need_the_market_to_check_the_model`,
+`the_a_maker_replay_needs_the_market_to_check_the_model`, plus configuration
+defaults and validation tests.
 
 ## 27c. BOOK-CONFIRMED HIGH — strategy E
 
@@ -253,6 +270,16 @@ and validation tests.
 temperature has peaked and the order book of the high's bucket is
 shrinking, buy YES on that bucket at 0.90–0.99. `BookConfirmedHigh`
 (`wm-strategy::book_confirmed`), `[strategies.book_confirmed]`.
+
+**STATUS.** Off in the shipped configuration since 1 Oct 2026. In the
+120-day replay it won 76 of 79 trades and still lost $7.72; live (29 Sep –
+1 Oct) it never traded, because its conditions never held while the ask was
+still in range; and its losses would count toward the daily loss limit
+that strategy F's 100-share trades need. A disabled strategy is neither
+evaluated nor fed books, so its page shows only its history; `research
+market` still replays all three variants (none marked live). The code
+default stays on, so tests and older files keep the rule as designed; set
+`enabled = true` to run it again.
 
 Conditions, all required:
 

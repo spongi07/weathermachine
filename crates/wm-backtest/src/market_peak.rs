@@ -1048,4 +1048,97 @@ mod tests {
             "{md}"
         );
     }
+
+    /// A and B are replayed like live: with weight on the market they need a
+    /// midpoint (both sides traded, close together) to check the model.
+    /// (Here because this module has the day-replay helpers.)
+    #[test]
+    fn a_and_b_replays_need_the_market_to_check_the_model() {
+        let (b, labels) = buckets();
+        let sim = taker_only();
+        let sure = || IncrementDistribution {
+            probs: vec![0.995, 0.004, 0.001],
+            support: 100,
+            source: "test".into(),
+        };
+        // Taker trades of A (window 0, 0.90–0.99) and of B at a high of 22 °C.
+        let count = |quote, weight, model: Option<IncrementDistribution>| {
+            let mut d = decision(15, 25, 22, 0, quote);
+            if let Some(m) = model {
+                d.dists = [Some(m.clone()), Some(m)];
+            }
+            let trades = crate::market_sim::simulate_day(
+                day(),
+                &b,
+                &labels,
+                2,
+                &[d],
+                &sim,
+                0.05,
+                weight,
+                50,
+                TZ,
+            );
+            let n = |s: &str| {
+                trades
+                    .iter()
+                    .filter(|t| {
+                        t.structure == "current"
+                            && t.strategy == s
+                            && t.window == 0
+                            && t.range == "0.90–0.99"
+                    })
+                    .count()
+            };
+            (n("A"), n("B"))
+        };
+        // A: model 0.95 pooled with a tight 0.88/0.90 book still clears the edge.
+        assert_eq!(count((Some(0.90), Some(0.88)), 0.5, None), (1, 0));
+        // Too wide or one-sided: the market cannot check, so no trade …
+        assert_eq!(count((Some(0.90), Some(0.70)), 0.5, None), (0, 0));
+        assert_eq!(count((Some(0.90), None), 0.5, None), (0, 0));
+        // … unless the weight is 0 (model only by choice).
+        assert_eq!(count((Some(0.90), Some(0.70)), 0.0, None), (1, 0));
+        // B: NO on 23 and 24 °C at 0.95 (YES 0.05/0.07) — and nothing on a
+        // wide YES book (0.05/0.30), unless model only.
+        assert_eq!(count((Some(0.07), Some(0.05)), 0.5, Some(sure())), (0, 2));
+        assert_eq!(count((Some(0.30), Some(0.05)), 0.5, Some(sure())), (0, 0));
+        assert_eq!(count((Some(0.30), Some(0.05)), 0.0, Some(sure())), (0, 2));
+    }
+
+    /// The maker replay of A keeps the same market check.
+    #[test]
+    fn the_a_maker_replay_needs_the_market_to_check_the_model() {
+        let (b, labels) = buckets();
+        let sim = MarketSimConfig::default();
+        let fills = |quote, weight| {
+            let mut d = decision(15, 25, 22, 0, quote);
+            d.f.minutes_since_high = 60;
+            let sale = tape(2, at(15, 30), 0.91, false);
+            let mut per_bucket: Vec<Vec<&MarketTrade>> = vec![Vec::new(); b.len()];
+            per_bucket[2].push(&sale);
+            crate::market_makers::simulate_makers(
+                day(),
+                &b,
+                &labels,
+                2,
+                &[d],
+                &per_bucket,
+                &sim,
+                0.05,
+                weight,
+                50,
+                &[25, 55],
+                TZ,
+            )
+            .iter()
+            .filter(|t| t.structure == "current" && t.strategy == "A maker")
+            .count()
+        };
+        // A YES bid at 0.92 under a tight 0.92/0.95 book, sold through at 0.91.
+        assert_eq!(fills((Some(0.95), Some(0.92)), 0.5), 1);
+        // The same bid with no offer above it: nothing checks the model.
+        assert_eq!(fills((None, Some(0.92)), 0.5), 0);
+        assert_eq!(fills((None, Some(0.92)), 0.0), 1);
+    }
 }

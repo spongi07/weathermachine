@@ -187,7 +187,9 @@ pub fn max_p_in_bucket(
 /// more likely wrong than the market (prediction markets beat forecast models
 /// on these contracts). The pooled probability is capped at the model's, so
 /// the market can veto a trade but never create one — a trade still needs the
-/// model's own edge.
+/// model's own edge. With any weight on the market, a book too wide (or
+/// one-sided, or crossed) to give a probability blocks the trade: the market
+/// cannot check the model then, and the model alone is the weaker opinion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pooling {
     /// Weight of the market-implied probability (0 = model only, 1 = market only).
@@ -224,6 +226,35 @@ impl Pooling {
     /// model and market ([`log_pool`]), never above the model.
     pub fn win_probability(&self, model: f64, market: Option<f64>) -> f64 {
         log_pool(model, market, self.weight).min(model)
+    }
+
+    /// Blocker when the market cannot check the model: with weight on the
+    /// market and no market probability, the traded token's book is too
+    /// wide, one-sided or crossed. `None` when the market can check, with
+    /// weight 0 (model only by choice), and when the book is missing, stale
+    /// or has no ask — the other blockers already say so.
+    pub fn check_blocker(
+        &self,
+        own: Option<&OrderBook>,
+        market: Option<f64>,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        if self.weight <= 0.0 || market.is_some() {
+            return None;
+        }
+        let book = own.filter(|b| b.age_ms(now) <= self.max_book_age_ms)?;
+        let ask = book.best_ask()?;
+        Some(match book.best_bid() {
+            None => "no bid: the market cannot check the model".to_owned(),
+            Some(bid) if bid.price > ask.price => {
+                "crossed book: the market cannot check the model".to_owned()
+            }
+            Some(bid) => format!(
+                "spread {} > {}: too wide to check the model",
+                ask.price.saturating_sub(bid.price),
+                self.max_spread
+            ),
+        })
     }
 }
 
@@ -446,6 +477,9 @@ impl Strategy for BuyYesFinalHigh {
                     ));
                 }
             }
+        }
+        if let Some(why) = pooling.check_blocker(book, market_p, ctx.now) {
+            blockers.push(why);
         }
         if let Some(e) = ev
             && e < self.config.min_edge
@@ -690,6 +724,9 @@ impl BuyNoAboveHigh {
                     ));
                 }
             }
+        }
+        if let Some(why) = pooling.check_blocker(book, market_p, ctx.now) {
+            blockers.push(why);
         }
         if let Some(e) = ev
             && e < self.config.min_edge

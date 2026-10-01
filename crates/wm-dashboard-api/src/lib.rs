@@ -264,7 +264,12 @@ pub struct ViewDto {
     pub observations: u32,
     pub high_c: Option<f64>,
     pub high_whole: Option<i32>,
+    /// Local time of the latest report at the high (retests move it).
     pub high_local: Option<String>,
+    /// Local time of the first report at the high.
+    #[serde(default)]
+    pub high_first_local: Option<String>,
+    /// Later reports at the high.
     pub retests: u32,
     pub minutes_since_high: Option<i64>,
     pub drop_c: Option<f64>,
@@ -279,6 +284,26 @@ pub struct ViewDto {
     pub distribution: Option<Vec<f64>>,
     pub model_support: Option<u32>,
     pub model_source: Option<String>,
+}
+
+impl ViewDto {
+    /// When the high was reported: "first reported 02:25, last 13:25,
+    /// 5 retests", or "first reported 13:25" without a retest. `None`
+    /// without a high.
+    pub fn high_times(&self) -> Option<String> {
+        let last = self.high_local.as_deref()?;
+        let first = self.high_first_local.as_deref();
+        Some(match first {
+            Some(f) if self.retests == 0 || f == last => format!("first reported {f}"),
+            Some(f) => format!(
+                "first reported {f}, last {last}, {} retest{}",
+                self.retests,
+                if self.retests == 1 { "" } else { "s" }
+            ),
+            // A snapshot from before the first time was sent.
+            None => format!("last reported {last}"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -687,6 +712,40 @@ mod tests {
             },
         ];
         assert_eq!(s.strategy_counts(&f()), (1, 1, 1, 1));
+    }
+
+    #[test]
+    fn the_high_shows_its_first_and_last_report() {
+        let v = |first: Option<&str>, last: Option<&str>, retests| ViewDto {
+            high_first_local: first.map(Into::into),
+            high_local: last.map(Into::into),
+            retests,
+            ..ViewDto::default()
+        };
+        // 1 Oct: 20 °C first at 02:25 (a warm night), back at it from 11:25.
+        assert_eq!(
+            v(Some("02:25"), Some("13:25"), 5).high_times().as_deref(),
+            Some("first reported 02:25, last 13:25, 5 retests")
+        );
+        assert_eq!(
+            v(Some("12:55"), Some("13:25"), 1).high_times().as_deref(),
+            Some("first reported 12:55, last 13:25, 1 retest")
+        );
+        assert_eq!(
+            v(Some("13:25"), Some("13:25"), 0).high_times().as_deref(),
+            Some("first reported 13:25")
+        );
+        assert_eq!(
+            v(None, Some("13:25"), 2).high_times().as_deref(),
+            Some("last reported 13:25")
+        );
+        assert_eq!(v(Some("02:25"), None, 0).high_times(), None);
+        // A view from an older server decodes without the first time.
+        let old: ViewDto = serde_json::from_str(
+            r#"{"label":"all","observations":3,"high_c":20.0,"high_whole":20,"high_local":"13:25","retests":0,"minutes_since_high":0,"drop_c":0.0,"lower_since_high":0,"slope_c_per_h":null,"accel":null,"trajectory":null,"minutes_after_solar_noon":null,"season":null,"windows_met":[],"distribution":null,"model_support":null,"model_source":null}"#,
+        )
+        .unwrap();
+        assert_eq!(old.high_first_local, None);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use crate::paper_report::{self, DayReport, PaperReport};
 use std::fmt::Write as _;
-use wm_dashboard_api::{DashboardSnapshot, EvaluationDto, LocationDto, StrategyDto};
+use wm_dashboard_api::{DashboardSnapshot, EvaluationDto, LocationDto, StrategyDto, ViewDto};
 
 /// Routine-evaluation lines of this run listed at most.
 const TRAIL_LINES: usize = 30;
@@ -28,9 +28,29 @@ pub enum History<'a> {
     Failed(String),
 }
 
-fn utc_hms(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .map_or_else(|| "?".to_owned(), |t| t.format("%H:%M:%S").to_string())
+/// The clock of "This run": the stations' time zone when they share one —
+/// the clock of "Now" and of the history — else UTC.
+fn clock(snap: &DashboardSnapshot) -> Option<chrono_tz::Tz> {
+    let first = &snap.locations.first()?.timezone;
+    if snap.locations.iter().any(|l| &l.timezone != first) {
+        return None;
+    }
+    first.parse().ok()
+}
+
+fn zone(tz: Option<chrono_tz::Tz>) -> &'static str {
+    tz.map_or("UTC", |z| z.name())
+}
+
+/// Date and time of a decision on that clock; a run spans days.
+fn stamp(ms: i64, tz: Option<chrono_tz::Tz>) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp_millis(ms) else {
+        return "?".to_owned();
+    };
+    match tz {
+        Some(z) => t.with_timezone(&z).format("%m-%d %H:%M:%S").to_string(),
+        None => t.format("%m-%d %H:%M:%S UTC").to_string(),
+    }
 }
 
 fn utc_datetime(ms: i64) -> String {
@@ -166,11 +186,11 @@ fn now(s: &mut String, snap: &DashboardSnapshot, l: &LocationDto, strategy: &Str
     let view = l.views.first();
     let _ = writeln!(
         s,
-        "- Temperature {} °C; high so far {} (first reported {}); last report {}.",
+        "- Temperature {} °C; high so far {} ({}); last report {}.",
         opt(l.current_temp_c, 1),
         view.and_then(|v| v.high_whole)
             .map_or_else(|| "–".to_owned(), |h| format!("{h} °C")),
-        view.and_then(|v| v.high_local.clone())
+        view.and_then(ViewDto::high_times)
             .unwrap_or_else(|| "–".to_owned()),
         l.last_observation_age_s
             .map_or_else(|| "none yet".to_owned(), |a| format!("{} min ago", a / 60))
@@ -252,7 +272,12 @@ fn now(s: &mut String, snap: &DashboardSnapshot, l: &LocationDto, strategy: &Str
 }
 
 fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
-    s.push_str("## This run (since the service started; newest first)\n\n### Proposals and risk verdicts\n\n");
+    let tz = clock(snap);
+    let _ = writeln!(
+        s,
+        "## This run (since the service started; newest first; {} time)\n\n### Proposals and risk verdicts\n",
+        zone(tz)
+    );
     let proposals: Vec<_> = snap
         .decisions
         .iter()
@@ -264,8 +289,8 @@ fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
     for d in proposals {
         let _ = writeln!(
             s,
-            "- {} UTC **{}** — {}{}",
-            utc_hms(d.at_ms),
+            "- {} **{}** — {}{}",
+            stamp(d.at_ms, tz),
             if d.approved { "APPROVED" } else { "REJECTED" },
             d.summary,
             if d.reasons.is_empty() {
@@ -295,7 +320,7 @@ fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
         s.push_str("None in the dashboard's decision log.\n");
     }
     for (at, line) in trail {
-        let _ = writeln!(s, "- {} UTC {line}", utc_hms(at));
+        let _ = writeln!(s, "- {} {line}", stamp(at, tz));
     }
     s.push_str("\n### Orders\n\n");
     let orders: Vec<_> = snap
@@ -306,12 +331,16 @@ fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
     if orders.is_empty() {
         s.push_str("None.\n");
     } else {
-        s.push_str("| created (UTC) | bucket | outcome | side | limit | shares | filled | avg | fees | status | reason |\n|---|---|---|---|---:|---:|---:|---:|---:|---|---|\n");
+        let _ = writeln!(
+            s,
+            "| created ({}) | bucket | outcome | side | limit | shares | filled | avg | fees | status | reason |\n|---|---|---|---|---:|---:|---:|---:|---:|---|---|",
+            zone(tz)
+        );
         for o in orders {
             let _ = writeln!(
                 s,
                 "| {} | {} | {} | {} | {:.3} | {:.0} | {:.0} | {} | {} | {} | {} |",
-                utc_hms(o.created_ms),
+                stamp(o.created_ms, tz),
                 cell(&o.bucket),
                 o.outcome,
                 o.side,
@@ -336,8 +365,8 @@ fn history_section(s: &mut String, r: &PaperReport, days: usize, strategy: &Stra
     };
     let _ = writeln!(
         s,
-        "\n## History — {} → {} (database; outcomes judged by the METAR high)\n",
-        first.date, last.date
+        "\n## History — {} → {} (database; {} time; outcomes judged by the METAR high)\n",
+        first.date, last.date, r.timezone
     );
     let signals: usize = shown
         .iter()
@@ -540,6 +569,8 @@ mod tests {
                 views: vec![ViewDto {
                     high_whole: Some(21),
                     high_local: Some("10:55".into()),
+                    high_first_local: Some("09:25".into()),
+                    retests: 2,
                     ..ViewDto::default()
                 }],
                 market: Some(MarketDto {
@@ -607,7 +638,7 @@ mod tests {
             "- Today in amsterdam: the autumn slot is 13:25–15:26 local; it is 11:12 — before the slot: it starts in 2 h 13 min.",
             "| autumn | 13:25–15:26 | 1987 | 13:40 | 13:25 | 15:25 | 10% |",
             "## Now — AMSTERDAM · EHAM · 2026-09-30 11:12 local",
-            "- Temperature 21.0 °C; high so far 21 °C (first reported 10:55); last report 17 min ago.",
+            "- Temperature 21.0 °C; high so far 21 °C (first reported 09:25, last 10:55, 2 retests); last report 17 min ago.",
             "- Pre-trade gates blocking every new position: EHAM observation source (no healthy source — fail closed).",
             "| 21°C ◀ high | YES | 0.310 | – | 0.500 | – | – | -0.1000 | 11:12 outside the autumn slot 13:25–15:26; ask 0.31 not above 0.90 |",
             "**REJECTED** — BUY YES 21°C 100 @ ≤ 0.94 — PositionSize: cost $94.00 > position size $10.00",
@@ -642,6 +673,32 @@ mod tests {
         assert!(matches(&f(), "F_peak_slot"));
         assert!(matches(&f(), "f"));
         assert!(!matches(&f(), "E"));
+    }
+
+    #[test]
+    fn this_run_and_the_history_share_the_stations_clock() {
+        let mut snap = snapshot();
+        snap.locations[0].timezone = "Europe/Amsterdam".into();
+        let md = render(&snap, &f(), History::Unavailable);
+        // 1_790_000_000_000 ms = 2026-09-21 14:13:20 UTC = 16:13:20 CEST.
+        for part in [
+            "## This run (since the service started; newest first; Europe/Amsterdam time)",
+            "- 09-21 16:13:20 **REJECTED** — BUY YES 21°C",
+            "- 09-21 15:56:40 F 21°C YES · ask 0.31 — 10:55 outside",
+        ] {
+            assert!(md.contains(part), "missing {part:?} in\n{md}");
+        }
+        assert!(!md.contains("UTC **"), "{md}");
+        // Stations on different clocks: UTC, and every time says so.
+        let mut two = snap.clone();
+        two.locations.push(LocationDto {
+            location: "new-york".into(),
+            timezone: "America/New_York".into(),
+            ..LocationDto::default()
+        });
+        let md = render(&two, &f(), History::Unavailable);
+        assert!(md.contains("newest first; UTC time)"), "{md}");
+        assert!(md.contains("- 09-21 14:13:20 UTC **REJECTED**"), "{md}");
     }
 
     #[test]

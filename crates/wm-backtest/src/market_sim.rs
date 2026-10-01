@@ -431,6 +431,11 @@ pub(crate) fn simulate_day(
                             if price < range.0 - 1e-12 || price > range.1 + 1e-12 {
                                 continue;
                             }
+                            // Like live: with weight on the market, no trade
+                            // unless the market can check the model.
+                            if market_weight > 0.0 && market.is_none() {
+                                continue;
+                            }
                             let p_used = log_pool(p_model, market, market_weight).min(p_model);
                             if p_used - price - fee(price) - sim.slippage < sim.min_edge {
                                 continue;
@@ -854,14 +859,15 @@ pub(crate) fn strategies_markdown(
     verdict: &[String],
 ) -> String {
     let mut s = format!(
-        "\n## Strategies at traded prices\n\nStrategies A (YES on the bucket holding the high) and B (NO on the buckets {} above it) replayed at every report with each structure's prequential model. Ask = the latest taker buy of YES (A) or one minus the latest taker sell of YES (B); filled at that price plus {:.3} slippage, taker fee paid, ${:.0} per trade; the model is pooled with the traded midpoint and capped at the model, as live. At most one trade per day, bucket and variant. Depth is unknown, so fills are optimistic in thin markets. **live** marks the configured rule.\n\n",
+        "\n## Strategies at traded prices\n\nStrategies A (YES on the bucket holding the high) and B (NO on the buckets {} above it) replayed at every report with each structure's prequential model. Ask = the latest taker buy of YES (A) or one minus the latest taker sell of YES (B); filled at that price plus {:.3} slippage, taker fee paid, ${:.0} per trade; the model is pooled with the traded midpoint and capped at the model, as live, and with weight on the market no trade happens without a midpoint (both sides traded, at most {:.2} apart). At most one trade per day, bucket and variant. Depth is unknown, so fills are optimistic in thin markets. **live** marks the configured rule.\n\n",
         sim.no_distances
             .iter()
             .map(|k| format!("+{k}"))
             .collect::<Vec<_>>()
             .join("/"),
         sim.slippage,
-        sim.stake_usd
+        sim.stake_usd,
+        sim.max_market_spread
     );
     let e = &sim.e;
     let _ = write!(

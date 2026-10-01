@@ -1379,13 +1379,18 @@ mod tests {
             AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
         let e = cfg.book_confirmed();
         let d = wm_strategy::BookConfirmedConfig::default();
+        assert!(
+            !e.enabled,
+            "E is switched off: it lost money in the 120-day replay"
+        );
         assert_eq!(
             wm_strategy::BookConfirmedConfig {
+                enabled: d.enabled,
                 notional: d.notional,
                 ..e.clone()
             },
             d,
-            "the shipped file states the defaults"
+            "apart from the switch, the shipped file states the defaults"
         );
         assert_eq!(e.notional, cfg.file.risk.position_size_usd);
         let ok = cfg.file.strategies.book_confirmed.clone();

@@ -464,7 +464,7 @@ fn PeakPanel(loc: Memo<Option<LocationDto>>) -> impl IntoView {
                             </div>
                             <div class="stats">
                                 <div><label>"High"</label><b>{v.high_whole.map_or_else(|| DASH.to_owned(), |h| format!("{h} °C"))}</b><small>{v.high_c.map_or_else(String::new, |h| format!("{h:.1} raw"))}</small></div>
-                                <div><label>"At"</label><b>{v.high_local.clone().unwrap_or_else(|| DASH.to_owned())}</b><small>{format!("{} retest(s)", v.retests)}</small></div>
+                                <div><label>"First / last"</label><b>{format!("{} / {}", v.high_first_local.as_deref().unwrap_or(DASH), v.high_local.as_deref().unwrap_or(DASH))}</b><small>{format!("{} retest(s)", v.retests)}</small></div>
                                 <div><label>"Since high"</label><b>{v.minutes_since_high.map_or_else(|| DASH.to_owned(), |m| format!("{m} min"))}</b><small>{format!("{} lower since", v.lower_since_high)}</small></div>
                                 <div><label>"Drop"</label><b>{fmt::opt(v.drop_c, 1)}</b><small>"°C below high"</small></div>
                                 <div><label>"Slope"</label><b>{fmt::signed(v.slope_c_per_h, 2)}</b><small>{format!("°C/h · accel {}", fmt::signed(v.accel, 2))}</small></div>

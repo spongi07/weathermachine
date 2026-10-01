@@ -30,14 +30,14 @@ pub fn catalog(cfg: &AppConfig) -> Vec<StrategyDto> {
             "A_buy_yes_final_high",
             "Buy YES on the final high",
             st.buy_yes.enabled,
-            "Buys YES on the bucket holding the day's high once the model says the high is final with an edge over the ask, after the confirmation time. The model is pooled with the market's price: the book can veto a trade, never create one.",
+            "Buys YES on the bucket holding the day's high once the model says the high is final with an edge over the ask, after the confirmation time. The model is pooled with the market's price: the book can veto a trade, never create one, and a book too wide to check the model blocks it.",
             &st.buy_yes,
         ),
         entry(
             "B_buy_no_above_high",
             "Buy NO above the high",
             st.buy_no.enabled,
-            "Buys NO on buckets above the day's high when the model gives the temperature little chance to climb that far, with an edge over the NO ask.",
+            "Buys NO on buckets above the day's high when the model gives the temperature little chance to climb that far, with an edge over the NO ask. Pooled with the market like A: no trade on a book too wide to check the model.",
             &st.buy_no,
         ),
         entry(

@@ -265,6 +265,17 @@ fn hm(minute: u16) -> String {
     format!("{:02}:{:02}", minute / 60, minute % 60)
 }
 
+/// Shares in a blocker or rationale: whole numbers bare, else at most two
+/// decimals, rounded down — 49.6 offered against a minimum of 50 reads
+/// "49.6", never "50".
+fn share_count(x: f64) -> String {
+    let cents = (x.max(0.0) * 100.0 + 1e-9).floor() / 100.0;
+    format!("{cents:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
 /// A change in percent with its sign: "+12%", "−3%".
 fn signed_pct(x: f64) -> String {
     let r = x.round();
@@ -415,14 +426,17 @@ impl Strategy for BookConfirmedHigh {
             (Some(s), _) => {
                 if s.depth_then < cfg.min_depth_shares {
                     blockers.push(format!(
-                        "only {:.0} shares offered ≤ {} {}m ago (< {:.0})",
-                        s.depth_then, s.edge, cfg.lookback_minutes, cfg.min_depth_shares
+                        "only {} shares offered ≤ {} {}m ago (< {})",
+                        share_count(s.depth_then),
+                        s.edge,
+                        cfg.lookback_minutes,
+                        share_count(cfg.min_depth_shares)
                     ));
                 } else if s.fraction() < cfg.min_depth_shrink {
                     blockers.push(format!(
-                        "book not shrinking: {:.0} → {:.0} shares offered ≤ {} in {}m ({}, need −{:.0}%)",
-                        s.depth_then,
-                        s.depth_now,
+                        "book not shrinking: {} → {} shares offered ≤ {} in {}m ({}, need −{:.0}%)",
+                        share_count(s.depth_then),
+                        share_count(s.depth_now),
                         s.edge,
                         cfg.lookback_minutes,
                         signed_pct(-100.0 * s.fraction()),
@@ -514,9 +528,9 @@ impl Strategy for BookConfirmedHigh {
                         f64::from(drop) / 10.0
                     ),
                     format!(
-                        "book shrinking: {:.0} → {:.0} shares offered ≤ {} in {}m (−{:.0}%), best ask {} → {pr}",
-                        s.depth_then,
-                        s.depth_now,
+                        "book shrinking: {} → {} shares offered ≤ {} in {}m (−{:.0}%), best ask {} → {pr}",
+                        share_count(s.depth_then),
+                        share_count(s.depth_now),
                         s.edge,
                         cfg.lookback_minutes,
                         100.0 * s.fraction(),
@@ -535,6 +549,20 @@ mod tests {
     use super::*;
     use wm_core::market::BookLevel;
     use wm_core::units::Shares;
+
+    #[test]
+    fn share_counts_never_round_up_to_a_threshold() {
+        // 1 Oct: "only 50 shares offered ≤ 0.79 30m ago (< 50)".
+        assert_eq!(share_count(49.6), "49.6");
+        assert_eq!(share_count(49.999), "49.99");
+        assert_eq!(share_count(24.14), "24.14");
+        assert_eq!(share_count(0.29), "0.29");
+        assert_eq!(share_count(50.0), "50");
+        assert_eq!(share_count(600.0), "600");
+        assert_eq!(share_count(0.0), "0");
+        assert_eq!(share_count(-0.0), "0");
+        assert_eq!(share_count(-1e-9), "0");
+    }
 
     fn t(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

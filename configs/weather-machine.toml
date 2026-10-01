@@ -311,7 +311,9 @@ max_strategy_exposure_usd = "110.00"
 # The book is information. A and B pool the model's probability with the
 # market's (midpoint of a fresh book with spread <= max_market_spread):
 # logit(p) = w·logit(market) + (1−w)·logit(model), capped at the model's
-# probability — the market can veto a trade, never create one.
+# probability — the market can veto a trade, never create one. With
+# market_weight > 0 a book too wide (or one-sided, or crossed) to give that
+# midpoint blocks the trade: nothing checks the model then.
 # market_weight: 0 = model only, 1 = market only. `weather-machine research
 # market` estimates the best weight from settled markets.
 [strategies.buy_yes]
@@ -367,8 +369,12 @@ max_jump_tenths = 30
 # also makes the model's probability a veto. Its premise — late favourites
 # win slightly more often than their price — is thin against fee and spread,
 # so treat it as a hypothesis: `research market` replays it at traded prices.
+# Switched off: in the 120-day replay it won 76 of 79 trades and still lost
+# $7.72, and live its conditions never held while the ask was in range.
+# Its losses would also count toward the daily loss limit F needs. The
+# replay keeps showing what it would have done; its page keeps its history.
 [strategies.book_confirmed]
-enabled = true
+enabled = false
 start_local_minute = 720          # 12:00 local
 end_local_minute = 1080           # 18:00 local (exclusive)
 min_minutes_at_high = 60          # since the first report at the high
