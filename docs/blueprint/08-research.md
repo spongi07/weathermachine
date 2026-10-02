@@ -283,7 +283,8 @@ the days downloaded so far are studied.
   METAR on a KNMI signal). A rule whose input is missing is reported as not
   replayed. **Out of sample** as for G–K, per family; the last line names
   the families whose chosen rule held up on the later days (interval above
-  zero). Nothing in the lab trades live.
+  zero over at least five trades on three days). Nothing in the lab trades
+  live.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 

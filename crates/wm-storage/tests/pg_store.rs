@@ -65,12 +65,18 @@ async fn fresh() -> Option<TestDb> {
     })
 }
 
+/// A database name no other test uses: the tests of this binary run in
+/// parallel in one process, and two of them can read the same clock value
+/// (CI's clocks are coarse), so a per-process counter makes it unique; the
+/// process id separates concurrent test binaries.
 fn uuid_like() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("{:x}{:x}", n, std::process::id())
+    let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}{:x}_{k}", n, std::process::id())
 }
 
 fn utc(s: &str) -> DateTime<Utc> {

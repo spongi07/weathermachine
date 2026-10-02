@@ -53,6 +53,12 @@ pub(crate) const STRUCTURE: &str = "lab";
 /// Fewest replayed market days for the out-of-sample split.
 const MIN_SPLIT_DAYS: usize = 20;
 
+/// A family holds up only on at least this many later-days trades, on at
+/// least [`MIN_HELD_DAYS`] days: a handful of wins has an interval of no
+/// width, not one above zero.
+const MIN_HELD_TRADES: u64 = 5;
+const MIN_HELD_DAYS: u64 = 3;
+
 /// Families L1–L25.
 pub const FAMILIES: u8 = 25;
 
@@ -2763,7 +2769,7 @@ pub(crate) fn out_of_sample(
             }
             _ => String::new(),
         };
-        if r.trades > 0 && r.ci_low > 0.0 {
+        if r.trades >= MIN_HELD_TRADES && r.days >= MIN_HELD_DAYS && r.ci_low > 0.0 {
             held.push(format!("{} (${:+.2})", best.label, r.total_usd));
         }
         v.push(format!(
@@ -2786,10 +2792,10 @@ pub(crate) fn out_of_sample(
         ));
     }
     v.push(if held.is_empty() {
-        "Strategy lab: no family's chosen rule held up on the later days (95% CI of the P&L a trade above zero); with 25 families tried, treat any first-half winner as chance until it does.".to_owned()
+        format!("Strategy lab: no family's chosen rule held up on the later days (95% CI of the P&L a trade above zero, at least {MIN_HELD_TRADES} trades on {MIN_HELD_DAYS} days); with 25 families tried, treat any first-half winner as chance until one does.")
     } else {
         format!(
-            "Strategy lab: held up on the later days (95% CI of the P&L a trade above zero): {}. With 25 families tried, confirm on the next run's new days before taking any live.",
+            "Strategy lab: held up on the later days (95% CI of the P&L a trade above zero, at least {MIN_HELD_TRADES} trades on {MIN_HELD_DAYS} days): {}. With 25 families tried, confirm on the next run's new days before taking any live.",
             held.join(", ")
         )
     });
@@ -4063,7 +4069,17 @@ mod tests {
             trades.push(lab_trade(d, "L9", if d <= 15 { 1.0 } else { -1.0 }));
         }
         trades.push(lab_trade(20, "L8", 3.0));
+        // L5 wins both its first-half trades and both of its two later
+        // ones: an interval of no width, too few to hold up.
+        for d in [2, 4, 18, 22] {
+            trades.push(lab_trade(d, "L5", 1.5));
+        }
         let v = out_of_sample(&trades, &days, &cov, 200, 3);
+        let l5 = v
+            .iter()
+            .find(|l| l.starts_with("L5 out of sample"))
+            .unwrap();
+        assert!(l5.contains("it made 2 trades, 2 won"), "{l5}");
         let l9 = v
             .iter()
             .find(|l| l.starts_with("L9 out of sample"))
@@ -4084,6 +4100,7 @@ mod tests {
             "{last}"
         );
         assert!(!last.contains("L9 ("), "{last}");
+        assert!(!last.contains("L5"), "two trades do not hold up: {last}");
         // Too few days: one line.
         assert_eq!(out_of_sample(&trades, &days[..10], &cov, 200, 3).len(), 1);
     }

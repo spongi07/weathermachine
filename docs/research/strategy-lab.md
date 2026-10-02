@@ -71,8 +71,10 @@ G–K ([§9 of the edge research](edge-research.md#9-october-2026-five-new-strat
 * **Judged out of sample.** Per family, the rule with the best P&L on the
   first half of the market days is scored on the second half, and the main
   rule's own second half is shown when another was chosen. The report's
-  last lab line names the families whose chosen rule held up (95 % interval
-  of the P&L a trade above zero on the later days).
+  last lab line names the families whose chosen rule held up: the 95 %
+  interval of the P&L a trade above zero on the later days, over at least
+  five trades on three days (a few wins alone give an interval of no
+  width).
 
 **Many tries.** Twenty-five families and fifty-one rules: on the first half
 one or two will look good by chance. A family counts only when its later
@@ -312,8 +314,9 @@ inputs each day had, a line per family (or why it was not replayed), the
 out-of-sample lines and a table of all rules; the summary repeats which
 families held up. To take one live:
 
-1. its chosen rule held up on the later days (interval above zero) — and
-   the main rule was not far behind;
+1. its chosen rule held up on the later days (interval above zero, at
+   least five trades on three days) — and the main rule was not far
+   behind;
 2. it holds up again on the next run's new days;
 3. it is built as a live strategy with its own tests and runs in paper
    (`weather-machine report paper`) before any money.
