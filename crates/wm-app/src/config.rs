@@ -1481,6 +1481,7 @@ mod tests {
             st.tail_seller,
             wm_strategy::TailSellerConfig {
                 min_distance: 3,
+                max_model_ratio: 1e6,
                 ..wm_strategy::TailSellerConfig::default()
             }
         );
@@ -1490,7 +1491,6 @@ mod tests {
         assert_eq!(
             st.knmi_nowcast,
             wm_strategy::KnmiNowcastConfig {
-                max_price: Price::saturating_from_micros(850_000),
                 p_new_high: 0.94,
                 ..wm_strategy::KnmiNowcastConfig::default()
             }

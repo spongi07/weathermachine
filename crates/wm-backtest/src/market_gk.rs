@@ -218,7 +218,7 @@ impl GkRule {
                 cfg.max_yes_price.as_f64(),
                 hm(cfg.start_local_minute),
                 hm(cfg.end_local_minute),
-                if cfg.max_model_ratio >= 1e6 {
+                if model_off(cfg) {
                     ", no model condition".to_owned()
                 } else {
                     format!(", the model ≤ {:.2} × that price", cfg.max_model_ratio)
@@ -369,11 +369,17 @@ pub(crate) fn rules(sim: &GkSim) -> Vec<GkRule> {
                 ..g.clone()
             },
         ),
+        // The other model condition: none when the configured rule has the
+        // veto, the veto (1 × the price) when it has none.
         (
-            "G · no model",
+            if model_off(g) {
+                "G · with model"
+            } else {
+                "G · no model"
+            },
             false,
             TailSellerConfig {
-                max_model_ratio: 1e9,
+                max_model_ratio: if model_off(g) { 1.0 } else { 1e9 },
                 ..g.clone()
             },
         ),
@@ -498,6 +504,26 @@ pub(crate) fn rules(sim: &GkSim) -> Vec<GkRule> {
             d,
             false,
         ),
+        // The other price cap: 0.85 when the configured one is lower, 0.75
+        // when it is 0.85 or more.
+        (
+            if k.max_price < cap(850_000) {
+                "K · to 0.85"
+            } else {
+                "K · to 0.75"
+            },
+            false,
+            KnmiNowcastConfig {
+                max_price: if k.max_price < cap(850_000) {
+                    cap(850_000)
+                } else {
+                    cap(750_000)
+                },
+                ..k.clone()
+            },
+            d,
+            false,
+        ),
         ("K · YES above", false, k.clone(), d, true),
         ("K · known after 2′", false, k.clone(), 2, false),
         ("K · known after 8′", false, k.clone(), 8, false),
@@ -511,6 +537,16 @@ pub(crate) fn rules(sim: &GkSim) -> Vec<GkRule> {
         });
     }
     v
+}
+
+/// G without its model veto: a ratio this large never binds (live G still
+/// needs a model to exist).
+fn model_off(cfg: &TailSellerConfig) -> bool {
+    cfg.max_model_ratio >= 1e6
+}
+
+fn cap(micros: u32) -> wm_core::units::Price {
+    wm_core::units::Price::saturating_from_micros(micros)
 }
 
 fn tick(p: f64) -> f64 {
@@ -1748,6 +1784,26 @@ mod tests {
             .collect();
         assert!(labels.contains(&"G · ≥ 2 above".to_owned()), "{labels:?}");
         assert!(!labels.contains(&"G · ≥ 3 above".to_owned()), "{labels:?}");
+        // A G without the model veto compares with the veto; a K capped at
+        // 0.85 with 0.75, and the other way round.
+        let all =
+            |s: &GkSim| -> Vec<String> { rules(s).iter().map(|x| x.label().to_owned()).collect() };
+        let d = all(&GkSim::default());
+        assert!(d.contains(&"G · no model".to_owned()) && d.contains(&"K · to 0.85".to_owned()));
+        let mut s = GkSim::default();
+        s.g.max_model_ratio = 1e6;
+        s.k.max_price = wm_core::units::Price::saturating_from_micros(850_000);
+        let f = all(&s);
+        assert!(f.contains(&"G · with model".to_owned()), "{f:?}");
+        assert!(!f.contains(&"G · no model".to_owned()), "{f:?}");
+        assert!(f.contains(&"K · to 0.75".to_owned()), "{f:?}");
+        assert!(!f.contains(&"K · to 0.85".to_owned()), "{f:?}");
+        let g = rules(&s).into_iter().find(|x| x.label() == "G").unwrap();
+        assert!(
+            g.describe().contains("no model condition"),
+            "{}",
+            g.describe()
+        );
     }
 
     /// A trade of the default rule `label`, as the replay records it.

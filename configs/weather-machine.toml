@@ -506,12 +506,16 @@ max_data_age_minutes = 40
 # above the high G lost $18.04 over 37 trades (two of those tails won);
 # from three above all 15 trades won, +$18.74, and so did its one trade in
 # August–September (the out-of-sample half). A small earner, not a big one.
+# Second replay (same day): without the model veto G traded 127 times, 125
+# won, +$76.64; chosen on June–July it won all 53 trades of
+# August–September (+$55.09). The veto removed winners, not losers, so it
+# is off (a ratio of 1e6 never binds; G still needs a model to exist).
 [strategies.tail_seller]
 enabled = true
 min_distance = 3                  # every value of the bucket ≥ high + 3
 min_yes_price = "0.01"            # the YES offered (1 − the NO bid) …
 max_yes_price = "0.08"            # … in this range
-max_model_ratio = 1.0             # the model's probability ≤ 1.0 × that price
+max_model_ratio = 1e6             # model veto off (1.0: the model's probability ≤ the price)
 start_local_minute = 600          # 10:00 local
 end_local_minute = 1260           # 21:00 local (exclusive)
 notional = "30.00"                # per order, at the NO price
@@ -593,7 +597,9 @@ max_book_age_ms = 15000
 # won, +$81.10; the best variant on June–July won all 4 of its trades in
 # August–September (+$56.41). The next METAR raised the high after 194 of
 # 199 readings 0.3–0.5 °C above the rounding edge (0.975, 95 % CI 0.943 …
-# 0.989) and after all 137 readings further above it.
+# 0.989) and after all 137 readings further above it. A cap of 0.85 made K
+# buy earlier at higher prices (mean 0.66 instead of 0.57: 5 trades, +$73.98
+# against 4, +$81.10), so the cap stays at 0.75; the replay shows the other.
 [strategies.knmi_nowcast]
 enabled = true
 mean_margin_tenths = 3            # ten-minute mean ≥ high + 0.5 + 0.3 °C
@@ -601,7 +607,7 @@ require_max_at_edge = true        # and the ten-minute maximum ≥ high + 0.5 °
 max_age_minutes = 12              # the reading's interval ended ≤ 12′ ago …
 max_lead_minutes = 16             # … and ≤ 16′ before the report it anticipates
 min_price = "0.02"                # the NO of the high's bucket …
-max_price = "0.85"                # … at most this (the EV rule binds near 0.87)
+max_price = "0.75"                # … at most this
 p_new_high = 0.94                 # measured: the lower 95 % bound at this margin
 min_edge = 0.05                   # EV per share at p_new_high, after fee and slippage
 notional = "25.00"

@@ -114,12 +114,12 @@ intervals, never on win rate.
 | C | split + unwind (§27) | off | research only |
 | D | decided outcomes (§27a) | off | dead buckets reprice a median 39 s after the observation, before the bot knows the report |
 | E | book-confirmed high (§27c) | off | −$7.18 over 80 replayed trades |
-| F | peak slot (§27d) | **on** | traded; slot 75 % → 95 % since 1 Oct; replay 2 Oct: +$11.13 over 80 trades (about break-even) |
-| G | tail seller (§27e) | **on**, from 3 °C above | replay 2 Oct: from 2 °C above −$18.04 (37 trades), from 3 above 15 of 15 won (+$18.74) |
+| F | peak slot (§27d) | **on** | traded; slot 75 % → 95 % since 1 Oct; replay 2 Oct: +$11.13 over 80 trades (about break-even: −$60 in June–July, +$71 in August–September) |
+| G | tail seller (§27e) | **on**, from 3 °C above, no model veto | replay 2 Oct: from 2 °C above −$18.04 (37 trades); from 3 above without the veto 125 of 127 won (+$76.64), out of sample 53 of 53 (+$55.09) |
 | H | next degree (§27f) | off (2 Oct) | replay 2 Oct: −$77.18 over 169 trades; its best variant lost $92.20 out of sample |
-| I | middle fade (§27g) | **on** | replay 2 Oct: +$58.79 over 90 trades (interval spans zero); to be confirmed out of sample |
+| I | middle fade (§27g) | **on** | replay 2 Oct: +$58.79 over 90 trades; its configured rule +$10.03 in August–September (interval spans zero) |
 | J | morning maker (§27h) | off (2 Oct) | replay 2 Oct: −$197.52 over 250 fills; its best variant lost $171.88 out of sample |
-| K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: 4 of 4 won (+$81.10), out of sample 4 of 4 (+$56.41) |
+| K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: every trade won (4 of 4, +$81.10); out of sample too |
 | U | unwind (§28) | **on** | the exit engine; leaves G–K alone |
 
 A strategy switched off is not shown on the dashboard; its code stays,
@@ -553,7 +553,9 @@ day's high.
   spread is one tick): the YES offered is one minus that bid and must lie in
   [`min_yes_price`, `max_yes_price`] = [0.01, 0.08];
 * the model's upper-bound probability for the bucket is at most
-  `max_model_ratio` (1.0) × that YES price; no model, no order;
+  `max_model_ratio` × that YES price — shipped as 1e6 since the second
+  replay of 2 October 2026, which never binds (the veto removed winners,
+  not losers); G still needs a model to exist;
 * $30 an order (`notional`), good till 10 minutes before the next routine
   report (`cancel_before_report_minutes`), not posted with less than 3
   minutes left; posted again after the report;
@@ -568,8 +570,11 @@ all.
 lost $18.04 over 37 trades: two of those tails won. From three above all 15
 trades won, +$18.74 ($1.25 a trade), and its one trade in the
 out-of-sample half (August–September) won too — so G now starts three
-degrees above the high. Without the model veto G lost $37.20 over 192
-trades.
+degrees above the high. From two above without the model veto G lost
+$37.20 over 192 trades; from three above without it, 125 of 127 trades won,
++$76.64 ($0.60 a trade), and chosen on June–July that rule won all 53
+trades of August–September (+$55.09) — so the veto is off. Two tails won
+in four months: each cost $30.
 
 ## 27f. NEXT DEGREE — strategy H
 
@@ -689,9 +694,9 @@ METAR is taken, still counts until that METAR is published — its mean is
 ≥ high + 0.5 + 0.3 °C (the
 rounding edge plus `mean_margin_tenths`) and its maximum ≥ high + 0.5 °C:
 buy the NO of the bucket holding the high (it dies the moment a report beats
-it) when the NO ask is in [0.02, 0.85] and the EV at `p_new_high` (0.94,
-measured) is ≥ 0.05 after fee and slippage — which binds near 0.87;
-$25, fill-and-kill, held to settlement. A
+it) when the NO ask is in [0.02, 0.75] and the EV at `p_new_high` (0.94,
+measured) is ≥ 0.05 after fee and slippage; $25, fill-and-kill, held to
+settlement. A
 bucket that also holds high + 1 is skipped. Its books may be up to 0.10 wide
 (`[risk.strategy_caps.K_knmi_nowcast].max_spread`): makers widen their quotes
 before a report.
@@ -715,7 +720,11 @@ beats the high, so this is conservative. K made 4 trades, all won, +$81.10
 June–July (the reading known after 2 minutes) won all 4 of its trades in
 August–September (+$56.41). With a 0.1 °C margin K traded 18 times but won
 only 11: the cases the market had not yet priced are the doubtful ones.
-Buying the YES of the next degree instead lost $577.12 over 83 trades.
+Buying the YES of the next degree instead lost $577.12 over 83 trades. A
+cap of 0.85 (tried in the second replay) made K buy earlier at higher
+prices — a mean NO price of 0.66 instead of 0.57, 5 trades for +$73.98
+against 4 for +$81.10 — so the cap stayed at 0.75; the replay keeps the
+other cap as a variant.
 The replay assumes a reading is known 5 minutes after its interval
 (variants 2 and 8); the live logs (`KNMI ten-minute reading …
 delay_minutes`) and the dashboard's *KNMI 10-minute* box measure the real

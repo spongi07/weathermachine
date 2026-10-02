@@ -367,9 +367,10 @@ read-only and changes nothing.
   needs a fresh midpoint; J earns the spread when both sides fill; K buys
   the high's NO before the METAR, also on the reading known as its report
   is taken, and the accuracy table counts it; the configured rules come
-  first and duplicates are dropped (G's distance variant is the other of two
-  and three degrees); the out-of-sample line also judges the configured rule
-  when another was chosen. `with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached`
+  first and duplicates are dropped (G's distance and model variants and K's
+  price-cap variant are the other of the configured choice: two or three
+  degrees, with or without the veto, 0.75 or 0.85); the out-of-sample line
+  also judges the configured rule when another was chosen. `with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached`
   runs the study end to end with a mock KNMI server.
 
 Data API paging, the offset cap, window splitting, dedup and the request

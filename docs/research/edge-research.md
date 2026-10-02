@@ -421,10 +421,10 @@ is a hypothesis with replay evidence, judged out of sample by `research
 market`, to run in paper first. A, B and D (no trade on 30 September – 1
 October) are switched off, C and E were already off.
 
-*Update, 2 October 2026.* The first replay of G–K with KNMI's readings
-(§9.5) kept K — 4 of 4 won in- and out of sample — and switched H and J
-off; G now starts three degrees above the high, and I waits for its
-configured rule's own out-of-sample result.
+*Update, 2 October 2026.* The replays of G–K with KNMI's readings (§9.5)
+kept K — every trade won, in- and out of sample — and I (a thin edge),
+switched H and J off, and moved G to three degrees above the high without
+the model veto.
 
 ### 9.1 What others found
 
@@ -513,16 +513,31 @@ June–July (61 days), scored on August–September (62 days).
 
 | | configured rule, all days | best on June–July | that rule in August–September | decision |
 |---|---|---|---|---|
-| F | 80 trades, 75 won, +$11.13 | maker, +$27.72 | 11 trades, 10 won, −$18.76 | on for now: about break-even with ~$93 at risk a trade; its own August–September result decides |
-| G | 37 trades, 35 won, −$18.04 | three above, +$16.46 | 1 trade, won, +$2.28 | from three degrees above (15 of 15 won, +$18.74 over all days) |
+| F | 80 trades, 75 won, +$11.13 | maker, +$27.72 | 11 trades, 10 won, −$18.76 | on; its own August–September result: below |
+| G | 37 trades, 35 won, −$18.04 | three above, +$16.46 | 1 trade, won, +$2.28 | from three degrees above (15 of 15 won, +$18.74 over all days); then the model veto off (below) |
 | H | 169 trades, 38 won, −$77.18 | maker, +$159.31 | 48 trades, 5 won, −$92.20 | **off** |
-| I | 90 trades, 51 won, +$58.79 | maker, +$87.81 | 28 trades, 11 won, −$74.85 | on for now; its own August–September result decides |
+| I | 90 trades, 51 won, +$58.79 | maker, +$87.81 | 28 trades, 11 won, −$74.85 | on; its own August–September result: below |
 | J | 250 fills, 111 won, −$197.52 | YES bids, +$28.88 | 56 fills, 14 won, −$171.88 (95 % CI −5.87 … −0.22 a fill) | **off** |
-| K | 4 trades, 4 won, +$81.10 | reading known after 2′, +$91.43 | 4 trades, 4 won, +$56.41 (95 % CI +10.72 … +17.01 a trade) | on; `p_new_high` 0.94 (measured), NO up to 0.85 |
+| K | 4 trades, 4 won, +$81.10 | reading known after 2′, +$91.43 | 4 trades, 4 won, +$56.41 (95 % CI +10.72 … +17.01 a trade) | on; `p_new_high` 0.94 (measured); NO price cap 0.75 (see below) |
 
 The best rule on June–July is not always the configured one, so from this
 release each out-of-sample line also gives the configured rule's own
-result on the later days.
+result on the later days. The second run the same day (with G from three
+degrees, K's measured probability and a 0.85 cap) gave those:
+
+| | configured rule in August–September | decision |
+|---|---|---|
+| F | 44 trades, 42 won, +$71.24 (95 % CI −5.25 … +6.39 a trade) | stays on: −$60 in June–July, so about break-even over both halves, with ~$93 at risk a trade |
+| G | three above with the model veto: 1 trade, +$2.28 | **veto off**: without it 125 of 127 trades won, +$76.64; chosen on June–July, that rule won all 53 trades of August–September (+$55.09) |
+| H | 81 trades, 17 won, −$150.88 | stays off |
+| I | 36 trades, 20 won, +$10.03 (95 % CI −2.27 … +3.23 a trade) | stays on: positive in both halves (+$48.76, +$10.03), a thin edge |
+| J | 110 fills, 47 won, −$200.99 (95 % CI −3.44 … −0.13 a fill) | stays off |
+| K | cap 0.85: 3 trades, 3 won, +$20.18 | **cap back to 0.75**: at 0.85 K bought earlier at higher prices (mean 0.66 instead of 0.57): 5 trades, +$73.98, against 4, +$81.10. Every K trade in both runs won |
+
+K with the reading known after 2 minutes (instead of the assumed 5) made 12
+trades, all won, +$172.28; with a 0.1 °C margin 25 trades, 18 won,
++$181.52 (interval spans zero). The real KNMI delay, which the dashboard
+shows, decides how much K can do.
 
 **What the numbers say.**
 
