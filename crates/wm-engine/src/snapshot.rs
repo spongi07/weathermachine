@@ -125,12 +125,16 @@ pub struct EngineSnapshot {
     pub locations: Vec<LocationSnapshot>,
     pub health: Vec<ProviderHealthSnapshot>,
     pub positions: Vec<Position>,
+    /// The latest 100 orders of the main book, then the latest 100 of the
+    /// lab's books, each newest first.
     pub orders: Vec<OrderRecord>,
     pub exposure: ExposureSummary,
     pub risk: RiskConfig,
     pub daily_new_exposure: Usd,
     pub daily_realized_pnl: Usd,
     pub realized_pnl_total: Usd,
+    /// The latest 100 decisions of the main book (with the routine
+    /// evaluations), then the latest 100 of the lab's books, newest first.
     pub decisions: Vec<DecisionRecord>,
     /// Each lab strategy's own book (the fields above are the main book's).
     #[serde(default)]

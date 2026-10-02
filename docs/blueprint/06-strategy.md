@@ -800,7 +800,10 @@ each, a `RiskEngine` with `lab_risk_config` (§30) and its realized P&L. A
 lab strategy is evaluated against its own book's positions and live
 orders, its proposals pass its own book's gates, its fills land in its own
 book, and settlement settles every book (the engine's settlement P&L stays
-the main book's). The unwind engine sees the main book only. The snapshot
+the main book's). The unwind engine sees the main book only. A restart
+gives each fill back to its strategy's book; a lab strategy switched off
+since gets a book anyway (`restore_book`), so its positions settle there
+and never reach the main book. The snapshot
 carries each book (`lab_books`) and the lab's inputs per location; the
 dashboard shows them in the lab panel and keeps the KPI strip, positions
 and orders to the main book.
@@ -817,8 +820,8 @@ data age, prices) gate every book.
   reading or book; every family without its inputs does nothing.
 * `wm-backtest/tests/lab_session.rs`: K, L2 and L7 buy the same NO in the
   shared session loop, each on its own book, and settle apart; a restart
-  gives each fill back to its own book; yesterday's forecast error and
-  each taker trade counted once.
+  gives each fill back to its own book, a switched-off lab strategy's
+  too; yesterday's forecast error and each taker trade counted once.
 * `wm-app`: `[strategies.lab]` and `[lab]` validation
   (`lab_settings_are_validated`: unknown codes, stakes the books would
   refuse, L3's stake against F's shares, timings, neighbours), the shipped

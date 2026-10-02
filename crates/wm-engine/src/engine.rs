@@ -406,6 +406,27 @@ impl Engine {
         self.book_of.get(strategy).copied().unwrap_or(MAIN)
     }
 
+    /// The book a restored fill of `strategy` belongs to. A lab strategy
+    /// switched off since its order still gets a book of its own: its
+    /// positions settle there and never land in the main book, where A–K's
+    /// caps would count them and the unwind engine would sell them.
+    fn restore_book(&mut self, strategy: &StrategyId) -> usize {
+        if let Some(&b) = self.book_of.get(strategy) {
+            return b;
+        }
+        let id = strategy.as_str();
+        match wm_strategy::lab::family_of(id).filter(|_| wm_strategy::lab::is_lab_id(id)) {
+            Some(family) => {
+                let risk = lab_risk_config(&self.cfg.risk, &self.cfg.lab.risk, family);
+                let b = self.paper.len();
+                self.paper.push(PaperBook::new(risk, &self.cfg.run_id));
+                self.book_of.insert(strategy.clone(), b);
+                b
+            }
+            None => MAIN,
+        }
+    }
+
     /// Live orders of book `b`.
     fn book_orders(&self, b: usize) -> Vec<OpenOrderView> {
         self.orders
@@ -1356,7 +1377,7 @@ impl Engine {
         }
         let today = now.date_naive();
         for r in &state.fills {
-            let b = self.book_index(&r.strategy);
+            let b = self.restore_book(&r.strategy);
             let book = &mut self.paper[b];
             let before = book.positions.total_realized_pnl();
             match book.positions.apply_fill(&r.fill, &r.instrument) {
@@ -1535,13 +1556,39 @@ impl Engine {
             locations,
             health: self.health.values().cloned().collect(),
             positions: main.positions.iter().cloned().collect(),
-            orders: self.orders.recent(100).into_iter().cloned().collect(),
+            // The main book's latest orders and the lab's apart, so the
+            // lab's quotes never push A–K's out of the blotter.
+            orders: {
+                let (main, lab): (Vec<_>, Vec<_>) = self
+                    .orders
+                    .recent(usize::MAX)
+                    .into_iter()
+                    .partition(|o| self.book_index(&o.strategy) == MAIN);
+                main.into_iter()
+                    .take(100)
+                    .chain(lab.into_iter().take(100))
+                    .cloned()
+                    .collect()
+            },
             exposure,
             risk: main.risk.config().clone(),
             daily_new_exposure: main.risk.daily_new_exposure(),
             daily_realized_pnl: main.risk.daily_realized_pnl(),
             realized_pnl_total: main.realized_pnl_total,
-            decisions: self.decisions.iter().rev().take(100).cloned().collect(),
+            // As the orders: the main book's (and the evaluations) and the
+            // lab's latest 100 apart.
+            decisions: {
+                let (main, lab): (Vec<_>, Vec<_>) = self
+                    .decisions
+                    .iter()
+                    .rev()
+                    .partition(|d| self.book_index(&d.strategy) == MAIN);
+                main.into_iter()
+                    .take(100)
+                    .chain(lab.into_iter().take(100))
+                    .cloned()
+                    .collect()
+            },
             lab_books,
         }
     }

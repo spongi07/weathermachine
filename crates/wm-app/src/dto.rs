@@ -549,10 +549,15 @@ pub fn build(
             updated_ms: ms(o.updated_at),
         })
         .collect();
+    // The main book's latest 80 (with the evaluations) and the lab's apart.
+    let is_lab =
+        |d: &&wm_core::trading::DecisionRecord| wm_strategy::lab::is_lab_id(d.strategy.as_str());
     let decisions = snap
         .decisions
         .iter()
+        .filter(|d| !is_lab(d))
         .take(80)
+        .chain(snap.decisions.iter().filter(is_lab).take(80))
         .map(|d| DecisionDto {
             id: d.decision_id.0,
             at_ms: ms(d.at),

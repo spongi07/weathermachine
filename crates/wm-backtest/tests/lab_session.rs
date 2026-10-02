@@ -325,6 +325,21 @@ fn lab_strategies_and_k_buy_the_same_token_on_their_own_books() {
         .unwrap();
     assert!(l2.positions.is_empty(), "the maker's bid rests");
     assert_eq!(snap.lab_books.len(), 2);
+    // The snapshot lists the main book's orders and decisions first, the
+    // lab's after them: the lab never pushes K's out of the dashboard.
+    let lab_id = |s: &str| wm_strategy::lab::is_lab_id(s);
+    let orders: Vec<&str> = snap.orders.iter().map(|o| o.strategy.as_str()).collect();
+    assert_eq!(orders.iter().filter(|s| lab_id(s)).count(), 2, "{orders:?}");
+    assert!(
+        orders.is_sorted_by_key(|s| lab_id(s)),
+        "main first: {orders:?}"
+    );
+    let decisions: Vec<&str> = snap.decisions.iter().map(|d| d.strategy.as_str()).collect();
+    assert!(decisions.contains(&"K_knmi_nowcast") && decisions.iter().any(|s| lab_id(s)));
+    assert!(
+        decisions.is_sorted_by_key(|s| lab_id(s)),
+        "main first: {decisions:?}"
+    );
     // Lab state on the dashboard: the readings kept, today's reports.
     let lab = snap.locations[0].lab.as_ref().unwrap();
     assert_eq!(lab.knmi_readings, 2);
@@ -408,6 +423,68 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
     let snap = e.snapshot();
     assert_eq!(snap.daily_new_exposure, Usd::from_whole(10));
     assert_eq!(snap.lab_books[0].daily_new_exposure, Usd::from_whole(20));
+}
+
+/// A lab strategy switched off since it bought keeps its position on a
+/// book of its own after a restart: it never reaches the main book (A–K's
+/// caps, the unwind engine) and settles apart.
+#[test]
+fn a_switched_off_lab_strategy_keeps_its_restored_position_off_the_main_book() {
+    let m = market();
+    let o = m.outcome_for_value(18).unwrap();
+    let state = RestoreState {
+        markets: vec![m.clone()],
+        fills: vec![RestoredFill {
+            fill: Fill {
+                client_order_id: ClientOrderId::from_static_string("l19".into()),
+                token: o.no_token.clone(),
+                side: Side::Buy,
+                price: Price::parse("0.40").unwrap(),
+                shares: Shares::from_whole(50),
+                fee: Usd::ZERO,
+                liquidity: Liquidity::Taker,
+                ts: utc("2026-07-01T11:00:00Z"),
+            },
+            instrument: InstrumentRef {
+                token: o.no_token.clone(),
+                condition_id: o.condition_id.clone(),
+                event_slug: m.event_slug.clone(),
+                outcome_side: OutcomeSide::No,
+                bucket: o.bucket,
+            },
+            strategy: StrategyId::from_static("L19_skill_follow"),
+        }],
+        ..RestoreState::default()
+    };
+    // Only L7 runs now; with the whole lab off it is the same.
+    for cfg in [config(&[7]), {
+        let mut c = config(&[7]);
+        c.lab.enabled = false;
+        c
+    }] {
+        let mut e = Engine::new(cfg, Arc::new(NoEdgeModel));
+        let summary = e.restore(&state, utc("2026-07-01T12:30:00Z"));
+        assert_eq!(summary.open_positions, 1);
+        assert!(summary.rejected.is_empty(), "{:?}", summary.rejected);
+        assert!(
+            e.positions().get(&o.no_token).is_none(),
+            "not on the main book"
+        );
+        let l19 = StrategyId::from_static("L19_skill_follow");
+        assert_eq!(
+            e.lab_positions(&l19)
+                .and_then(|b| b.get(&o.no_token))
+                .map(|p| p.shares),
+            Some(Shares::from_whole(50))
+        );
+        let snap = e.snapshot();
+        assert!(snap.positions.is_empty());
+        assert!(snap.lab_books.iter().any(|b| b.strategy == l19));
+        // 18 °C was the high: the NO lost, on L19's book only.
+        let main = e.settle(&m.event_slug, 18);
+        assert!(main.is_zero(), "{main}");
+        assert_eq!(e.lab_realized_pnl_total(), Usd::from_whole(-20));
+    }
 }
 
 #[test]

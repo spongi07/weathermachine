@@ -387,7 +387,8 @@ each in its own book
 ([`lab_session.rs`](../../crates/wm-backtest/tests/lab_session.rs)). The
 unwind engine exits the main book's positions only. A restart gives each
 fill back to the book of the strategy whose order it filled, with each lab
-strategy's new exposure of the day.
+strategy's new exposure of the day; a family switched off in the meantime
+keeps what it holds on its own book until it settles.
 
 **Rules.** Every threshold is the replay's main rule (§3): the same time
 windows, price bands and win probabilities

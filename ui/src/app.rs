@@ -891,8 +891,19 @@ fn Blotter(snap: Snap) -> impl IntoView {
 #[component]
 fn DecisionLog(snap: Snap) -> impl IntoView {
     let show_evaluations = RwSignal::new(false);
+    // The main book's decisions; the lab's are on its strategies' pages.
     let decisions = Memo::new(move |_| {
-        snap.with(|s| s.as_ref().map(|s| s.decisions.clone()).unwrap_or_default())
+        snap.with(|s| {
+            s.as_ref()
+                .map(|s| {
+                    s.decisions
+                        .iter()
+                        .filter(|d| !s.is_lab(&d.strategy))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
     });
     let rows = move || {
         let all = show_evaluations.get();

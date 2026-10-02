@@ -343,7 +343,7 @@ pub fn LabPanel(snap: Snap) -> impl IntoView {
                 {inputs}
                 <div class="table-wrap"><table class="lab-table">
                     <thead><tr><th>""</th><th>"Strategy"</th><th>"Now"</th><th>"Approved · rejected · orders · filled"</th><th>"Open"</th><th>"Realized today"</th><th>"Realized total"</th></tr></thead>
-                    <tbody>{body}</tbody>
+                    <tbody>{if body.is_empty() { view! { <tr><td colspan="7" class="empty">"No lab strategy is switched on; positions already open settle on their own books."</td></tr> }.into_any() } else { body.into_any() }}</tbody>
                 </table></div>
             </section>
         })
