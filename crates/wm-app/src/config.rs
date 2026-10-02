@@ -169,6 +169,64 @@ impl Default for KnmiSection {
     }
 }
 
+/// A KNMI station near the market's (the lab's upwind rule, L24).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NeighbourToml {
+    /// WMO number (`06215`); its EDR location is the WIGOS id.
+    pub wmo: String,
+    pub name: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+/// What the strategy lab's paper strategies read beyond A–K's inputs;
+/// `[strategies.lab]` switches them on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LabSection {
+    /// KNMI's global-radiation parameter (W/m²), read with the station's
+    /// ten-minute readings (L25). Empty: none.
+    pub radiation_parameter: String,
+    /// KNMI stations around the market's (L24): one request each per new
+    /// reading of the station.
+    pub neighbours: Vec<NeighbourToml>,
+    /// At start, the station's readings of the last this-many minutes are
+    /// read (the rules look back up to 90 minutes).
+    pub knmi_history_minutes: i64,
+    /// Today's market's taker trades (with their wallets) are read from the
+    /// Data API this often (L18–L21).
+    pub taker_poll_seconds: u64,
+    /// Takers are scored on this many settled market days before today
+    /// (L19, L20); the days are cached beside `research market`'s.
+    pub wallet_history_days: u32,
+}
+
+impl Default for LabSection {
+    fn default() -> Self {
+        // Schiphol's neighbours: Voorschoten near the coast (south-west,
+        // Valkenburg's successor), De Bilt inland (south-east), Berkhout
+        // (north-north-east).
+        let n = |wmo: &str, name: &str, latitude: f64, longitude: f64| NeighbourToml {
+            wmo: wmo.into(),
+            name: name.into(),
+            latitude,
+            longitude,
+        };
+        Self {
+            radiation_parameter: "qg".into(),
+            neighbours: vec![
+                n("06215", "Voorschoten", 52.141, 4.437),
+                n("06260", "De Bilt", 52.100, 5.180),
+                n("06249", "Berkhout", 52.644, 4.979),
+            ],
+            knmi_history_minutes: 180,
+            taker_poll_seconds: 20,
+            wallet_history_days: 60,
+        }
+    }
+}
+
 /// IEM throttles each IP to one request per second; we space requests 15 s
 /// apart, one at a time, with a small daily cap.
 fn default_iem_provider() -> ProviderSection {
@@ -304,6 +362,10 @@ pub struct StrategiesSection {
     /// reading says the next METAR will beat it).
     #[serde(default = "wm_strategy::KnmiNowcastConfig::absent")]
     pub knmi_nowcast: wm_strategy::KnmiNowcastConfig,
+    /// The strategy lab's 25 strategies (L1–L25) as paper strategies, each
+    /// on its own paper book. Off when the section is missing.
+    #[serde(default = "wm_strategy::LabConfig::absent")]
+    pub lab: wm_strategy::LabConfig,
     pub unwind: UnwindConfig,
 }
 
@@ -647,6 +709,8 @@ pub struct AppConfigFile {
     pub forecast: ForecastSection,
     #[serde(default)]
     pub knmi: KnmiSection,
+    #[serde(default)]
+    pub lab: LabSection,
 }
 
 /// Per-location file.
@@ -1264,6 +1328,88 @@ impl AppConfig {
                 "one trade",
             )?;
         }
+        self.validate_lab()
+    }
+
+    /// The strategy lab: known family codes, a stake its own books allow,
+    /// sane timings, and inputs it can read.
+    fn validate_lab(&self) -> Result<()> {
+        let lab = &self.file.strategies.lab;
+        let unknown = lab.unknown_codes();
+        if !unknown.is_empty() {
+            bail!(
+                "strategies.lab: unknown family code(s) {} (use L1 … L25)",
+                unknown.join(", ")
+            );
+        }
+        if lab.notional <= Usd::ZERO {
+            bail!("strategies.lab.notional must be positive");
+        }
+        let r = &lab.risk;
+        if r.position_size_usd < lab.notional {
+            bail!(
+                "strategies.lab.risk.position_size_usd ({}) must be at least the notional ({}): every trade would be rejected",
+                r.position_size_usd,
+                lab.notional
+            );
+        }
+        let f = self.peak_slot();
+        let f_cost = wm_core::units::notional(f.max_price, f.shares, wm_core::units::Rounding::Up);
+        if lab.runs(3) && r.f_escape_position_usd < f_cost {
+            bail!(
+                "strategies.lab.risk.f_escape_position_usd ({}) must cover F's {} shares at {} ({f_cost}): L3 buys as F does",
+                r.f_escape_position_usd,
+                f.shares,
+                f.max_price
+            );
+        }
+        if r.max_exposure_usd < r.position_size_usd
+            || r.max_daily_new_exposure_usd < r.position_size_usd
+            || r.max_daily_loss_usd <= Usd::ZERO
+        {
+            bail!(
+                "strategies.lab.risk: max_exposure_usd and max_daily_new_exposure_usd must be at least position_size_usd, max_daily_loss_usd positive"
+            );
+        }
+        if !(Price::ZERO < r.max_spread && r.max_spread < Price::ONE)
+            || r.max_orders_per_minute == 0
+        {
+            bail!("strategies.lab.risk: need 0 < max_spread < 1 and max_orders_per_minute ≥ 1");
+        }
+        if lab.max_reading_age_minutes < 1
+            || lab.max_data_age_minutes < 1
+            || lab.max_book_age_ms < 1
+            || !(0..=15).contains(&lab.report_known_minutes)
+            || !(1..=29).contains(&lab.cancel_before_report_minutes)
+            || !(1..=29).contains(&lab.min_rest_minutes)
+            || lab.cancel_before_report_minutes + lab.min_rest_minutes >= 30
+        {
+            bail!(
+                "strategies.lab: need max_reading_age_minutes, max_data_age_minutes and max_book_age_ms ≥ 1, report_known_minutes 0–15, and 1 ≤ cancel_before_report_minutes, min_rest_minutes with a sum < 30"
+            );
+        }
+        let inputs = &self.file.lab;
+        if inputs.taker_poll_seconds < 10
+            || !(1..=365).contains(&inputs.wallet_history_days)
+            || !(40..=1440).contains(&inputs.knmi_history_minutes)
+        {
+            bail!(
+                "[lab]: need taker_poll_seconds ≥ 10, wallet_history_days 1–365 and knmi_history_minutes 40–1440"
+            );
+        }
+        for n in &inputs.neighbours {
+            let wmo_ok = n.wmo.len() == 5 && n.wmo.bytes().all(|b| b.is_ascii_digit());
+            if !wmo_ok
+                || n.name.trim().is_empty()
+                || !(-90.0..=90.0).contains(&n.latitude)
+                || !(-180.0..=180.0).contains(&n.longitude)
+            {
+                bail!(
+                    "[lab].neighbours: '{}' needs a five-digit WMO number, a name and a position",
+                    n.wmo
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1504,6 +1650,11 @@ mod tests {
             cfg.file.providers.knmi.base_url,
             wm_weather::knmi::DEFAULT_BASE_URL
         );
+        // The strategy lab runs every family's main rule, paper only, with
+        // the documented defaults, and reads the documented inputs.
+        assert_eq!(st.lab, wm_strategy::LabConfig::default());
+        assert!((1..=25).all(|f| st.lab.runs(f) && !st.lab.variant(f)));
+        assert_eq!(cfg.file.lab, LabSection::default());
         // The operator moved F's slot to 75 % → 95 % after the replay; the
         // rest of the section states the documented defaults.
         let f = cfg.peak_slot();
@@ -1568,9 +1719,11 @@ mod tests {
         for line in text.lines() {
             let t = line.trim();
             if t.starts_with('[') {
-                skipping = sections
-                    .iter()
-                    .any(|s| t == format!("[{s}]") || t.starts_with(&format!("[{s}.")));
+                skipping = sections.iter().any(|s| {
+                    t == format!("[{s}]")
+                        || t == format!("[[{s}]]")
+                        || t.starts_with(&format!("[{s}."))
+                });
             }
             if skipping || keys.iter().any(|k| t.starts_with(&format!("{k} ="))) {
                 continue;
@@ -1603,8 +1756,16 @@ mod tests {
                 "risk.strategy_caps.I_middle_fade",
                 "risk.strategy_caps.J_morning_maker",
                 "risk.strategy_caps.K_knmi_nowcast",
+                "strategies.lab",
+                "lab",
+                "lab.neighbours",
             ],
             &["market_weight", "max_market_spread", "exempt_strategies"],
+        );
+        assert!(
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .all(|l| !l.contains("[strategies.lab") && !l.contains("lab.neighbours"))
         );
         assert!(
             text.lines()
@@ -1632,6 +1793,10 @@ mod tests {
                 && !st.knmi_nowcast.enabled
         );
         assert!(file.risk.strategy_caps.is_empty());
+        // Without its section the lab is off; its inputs keep their defaults.
+        assert_eq!(st.lab, wm_strategy::LabConfig::absent());
+        assert!((1..=25).all(|f| !st.lab.runs(f)));
+        assert_eq!(file.lab, LabSection::default());
         // Unwind leaves G–K alone even in an older file.
         assert_eq!(
             st.unwind.exempt_strategies,
@@ -1789,6 +1954,51 @@ mod tests {
         cfg.file.strategies.tail_seller.enabled = false;
         cfg.file.strategies.knmi_nowcast.enabled = false;
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn lab_settings_are_validated() {
+        let ok = AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        fn usd(whole: i64) -> wm_core::units::Usd {
+            wm_core::units::Usd::from_whole(whole)
+        }
+        let bad: [fn(&mut AppConfig); 14] = [
+            |c| c.file.strategies.lab.disabled = vec!["L26".into()],
+            |c| c.file.strategies.lab.variants = vec!["l2".into()],
+            |c| c.file.strategies.lab.notional = wm_core::units::Usd::ZERO,
+            // Below the $20 notional, every trade would be rejected.
+            |c| c.file.strategies.lab.risk.position_size_usd = usd(10),
+            // L3 buys F's 100 shares at up to 0.95: $95.
+            |c| c.file.strategies.lab.risk.f_escape_position_usd = usd(50),
+            |c| c.file.strategies.lab.risk.max_exposure_usd = usd(20),
+            |c| c.file.strategies.lab.risk.max_daily_loss_usd = wm_core::units::Usd::ZERO,
+            |c| c.file.strategies.lab.risk.max_spread = Price::ONE,
+            |c| c.file.strategies.lab.cancel_before_report_minutes = 0,
+            |c| {
+                let lab = &mut c.file.strategies.lab;
+                (lab.cancel_before_report_minutes, lab.min_rest_minutes) = (20, 10);
+            },
+            |c| c.file.lab.taker_poll_seconds = 5,
+            |c| c.file.lab.wallet_history_days = 0,
+            |c| c.file.lab.knmi_history_minutes = 30,
+            |c| c.file.lab.neighbours[0].wmo = "6215".into(),
+        ];
+        for (i, f) in bad.into_iter().enumerate() {
+            let mut c = ok.clone();
+            f(&mut c);
+            assert!(c.validate().is_err(), "case {i} must be refused");
+        }
+        ok.validate().unwrap();
+        // The error names the code and the codes that exist.
+        let mut c = ok.clone();
+        c.file.strategies.lab.variants = vec!["L2".into(), "L99".into()];
+        let err = format!("{:#}", c.validate().unwrap_err());
+        assert!(err.contains("L99") && err.contains("L1 … L25"), "{err}");
+        // With L3 switched off, the lab's stake need not cover F's shares.
+        let mut c = ok.clone();
+        c.file.strategies.lab.disabled = vec!["L3".into()];
+        c.file.strategies.lab.risk.f_escape_position_usd = usd(50);
+        c.validate().unwrap();
     }
 
     #[test]

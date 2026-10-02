@@ -11,6 +11,7 @@ pub mod health;
 pub mod ids;
 pub mod ingest;
 pub mod market;
+pub mod metar_wx;
 pub mod portfolio;
 pub mod resolution;
 pub mod rng;

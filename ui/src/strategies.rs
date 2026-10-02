@@ -172,6 +172,7 @@ pub fn StrategiesPanel(snap: Snap) -> impl IntoView {
                 .map(|s| {
                     s.strategies
                         .iter()
+                        .filter(|x| !x.lab)
                         .map(|x| x.id.clone())
                         .collect::<Vec<_>>()
                 })
@@ -221,6 +222,130 @@ fn StrategyCard(snap: Snap, id: String) -> impl IntoView {
                     <CopyButton url=url.clone() label="Copy log" />
                 </div>
             </div>
+        })
+    }
+}
+
+/// One lab strategy's row: the strategy, its status, its counts this run
+/// and its own book.
+type LabRow = (
+    StrategyDto,
+    (&'static str, String),
+    (usize, usize, usize, usize),
+    Option<LabBookDto>,
+);
+
+/// What the lab reads at a location, in one line.
+fn lab_inputs_line(i: &LabInputsDto) -> String {
+    let mut parts = vec![format!(
+        "{}: KNMI {} reading(s)",
+        i.location, i.knmi_readings
+    )];
+    if let Some(r) = i.radiation_wm2 {
+        parts.push(format!(
+            "radiation {r} W/m²{}",
+            i.clear_sky_pct
+                .map(|p| format!(" ({p:.0}% of the clear sky)"))
+                .unwrap_or_default()
+        ));
+    }
+    if !i.neighbours.is_empty() {
+        parts.push(
+            i.neighbours
+                .iter()
+                .map(|n| format!("{} {} °C", n.name, fmt::opt(n.mean_c, 1)))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    parts.push(match &i.latest_weather {
+        Some(w) if !w.is_empty() => format!("{} METAR(s) today, the latest {w}", i.reports),
+        _ => format!("{} METAR(s) today", i.reports),
+    });
+    if let Some(f) = i.forecast_max_c {
+        parts.push(format!("forecast max {f:.1} °C"));
+    }
+    if let Some(e) = i.yesterday_error_c {
+        parts.push(format!("yesterday's error {e:+.1} °C"));
+    }
+    parts.push(format!("{} taker trade(s) today", i.taker_trades));
+    parts.push(match i.wallet_days {
+        Some(d) => format!(
+            "takers' records: {d} day(s), {} skilled, {} losing",
+            i.wallets_skilled, i.wallets_losing
+        ),
+        None => "takers' records: not loaded yet".to_owned(),
+    });
+    parts.join(" · ")
+}
+
+/// The strategy lab (L1–L25): paper strategies on their own books.
+#[component]
+pub fn LabPanel(snap: Snap) -> impl IntoView {
+    let data = Memo::new(move |_| {
+        snap.with(|s| {
+            let s = s.as_ref()?;
+            let lab = s.lab.clone()?;
+            let rows: Vec<LabRow> = s
+                .strategies
+                .iter()
+                .filter(|x| x.lab && x.enabled)
+                .map(|st| {
+                    (
+                        st.clone(),
+                        s.strategy_status(st),
+                        s.strategy_counts(st),
+                        lab.books.iter().find(|b| b.strategy == st.id).cloned(),
+                    )
+                })
+                .collect();
+            Some((lab, rows))
+        })
+    });
+    move || {
+        let (lab, rows) = data.get()?;
+        let open: usize = lab.books.iter().map(|b| b.open_positions).sum();
+        let capital: f64 = lab.books.iter().map(|b| b.capital_usd).sum();
+        let today: f64 = lab.books.iter().map(|b| b.today_realized_usd).sum();
+        let total: f64 = lab.books.iter().map(|b| b.realized_total_usd).sum();
+        let inputs = lab
+            .inputs
+            .iter()
+            .map(|i| view! { <div class="small muted lab-inputs">{lab_inputs_line(i)}</div> })
+            .collect::<Vec<_>>();
+        let body = rows
+            .into_iter()
+            .map(|(st, (class, status), (approved, rejected, orders, filled), book)| {
+                let href = page_href(&st.id);
+                let pnl = |v: f64| {
+                    let class = if v > 0.0 { "num good" } else if v < 0.0 { "num bad" } else { "num" };
+                    view! { <td class=class>{fmt::usd_signed(v)}</td> }
+                };
+                view! {
+                    <tr>
+                        <td><a class="card-letter" href=href.clone()>{st.letter.clone()}</a></td>
+                        <td class="text"><a href=href.clone()>{st.name.clone()}</a></td>
+                        <td class=format!("small text status {class}")>{status}</td>
+                        <td class="num small">{format!("{approved} ✓ · {rejected} ✗ · {orders} · {filled}")}</td>
+                        <td class="num">{book.as_ref().map_or(0, |b| b.open_positions)}</td>
+                        {pnl(book.as_ref().map_or(0.0, |b| b.today_realized_usd))}
+                        {pnl(book.as_ref().map_or(0.0, |b| b.realized_total_usd))}
+                    </tr>
+                }
+            })
+            .collect::<Vec<_>>();
+        Some(view! {
+            <section class="panel">
+                <div class="panel-title">
+                    <span>"STRATEGY LAB · PAPER · L1–L25"</span>
+                    <span class="muted">{format!("each on its own paper book, never blocking A–K · {open} open, capital {}, realized today {}, total {}", fmt::usd(capital), fmt::usd_signed(today), fmt::usd_signed(total))}</span>
+                </div>
+                {inputs}
+                <div class="table-wrap"><table class="lab-table">
+                    <thead><tr><th>""</th><th>"Strategy"</th><th>"Now"</th><th>"Approved · rejected · orders · filled"</th><th>"Open"</th><th>"Realized today"</th><th>"Realized total"</th></tr></thead>
+                    <tbody>{body}</tbody>
+                </table></div>
+            </section>
         })
     }
 }
@@ -311,12 +436,8 @@ pub fn ReportsPanel(snap: Snap) -> impl IntoView {
 #[component]
 pub fn StrategyPage(snap: Snap, id: String) -> impl IntoView {
     let key = id.clone();
-    let strategy = Memo::new(move |_| {
-        snap.with(|s| {
-            s.as_ref()
-                .and_then(|s| s.strategies.iter().find(|x| x.id == key).cloned())
-        })
-    });
+    let strategy =
+        Memo::new(move |_| snap.with(|s| s.as_ref().and_then(|s| s.strategy(&key).cloned())));
     let url = log_url(&id);
     // The log as the Copy button copies it, refreshed every minute.
     let log = RwSignal::new(None::<Result<String, String>>);

@@ -25,11 +25,12 @@ const SEASONS: [Season; 4] = [
 pub const UNWIND_ID: &str = "U_unwind";
 
 /// The strategies the dashboard shows: those switched on, in the order the
-/// engine evaluates them, plus the unwind engine. A strategy switched off in
-/// the configuration is not shown: A–E were taken out of the live bot on
-/// 1 October 2026 after two days without a trade (E already earlier). Their
-/// code stays, because `research market` replays A, B and E as baselines,
-/// and switching one on again brings it back here.
+/// engine evaluates them, plus the unwind engine, then the strategy lab's
+/// paper strategies. A strategy switched off in the configuration is not
+/// shown: A–E were taken out of the live bot on 1 October 2026 after two
+/// days without a trade (E already earlier). Their code stays, because
+/// `research market` replays A, B and E as baselines, and switching one on
+/// again brings it back here.
 pub fn catalog(cfg: &AppConfig) -> Vec<StrategyDto> {
     every_strategy(cfg)
         .into_iter()
@@ -122,10 +123,86 @@ pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
             UNWIND_ID,
             "Unwind (exits)",
             st.unwind.enabled,
-            "Sells positions the evidence has turned against (the win probability fell below the exit level, or the holding time ran out). Positions of the strategies that hold to settlement by design (G–K) are left alone.",
+            "Sells positions the evidence has turned against (the win probability fell below the exit level, or the holding time ran out). Positions of the strategies that hold to settlement by design (G–K) are left alone, and so are the lab's (they trade their own books).",
             &st.unwind,
         ),
     ]
+    .into_iter()
+    .chain(lab_entries(cfg))
+    .collect()
+}
+
+/// The strategy lab's 25 strategies, L1 first: each a paper strategy on its
+/// own book (`lab` on the dashboard).
+pub fn lab_entries(cfg: &AppConfig) -> Vec<StrategyDto> {
+    let lab = &cfg.file.strategies.lab;
+    // As written in the configuration file, like A–K's settings.
+    let usd = |u: wm_core::units::Usd| u.to_string().trim_start_matches('$').to_owned();
+    (1..=wm_strategy::lab::FAMILIES as u8)
+        .map(|family| {
+            let variant = lab.variant(family);
+            let id = wm_strategy::lab::id_of(family).unwrap_or_default();
+            let code = wm_strategy::lab::code(family);
+            let mut settings = vec![
+                (
+                    "rule".to_owned(),
+                    if variant {
+                        format!("variant (listed in strategies.lab.variants as {code})")
+                    } else {
+                        "main rule".to_owned()
+                    },
+                ),
+                (
+                    "notional".to_owned(),
+                    if family == 3 {
+                        format!("F's {} shares", cfg.peak_slot().shares)
+                    } else {
+                        usd(lab.notional)
+                    },
+                ),
+            ];
+            let book = &lab.risk;
+            let position = if family == 3 {
+                book.f_escape_position_usd
+            } else {
+                book.position_size_usd
+            };
+            settings.extend([
+                ("book.position_size_usd".to_owned(), usd(position)),
+                ("book.max_exposure_usd".to_owned(), usd(book.max_exposure_usd)),
+                (
+                    "book.max_daily_new_exposure_usd".to_owned(),
+                    usd(book.max_daily_new_exposure_usd),
+                ),
+                (
+                    "book.max_daily_loss_usd".to_owned(),
+                    usd(book.max_daily_loss_usd),
+                ),
+                ("book.max_spread".to_owned(), book.max_spread.to_string()),
+                (
+                    "max_reading_age_minutes".to_owned(),
+                    lab.max_reading_age_minutes.to_string(),
+                ),
+                (
+                    "slippage_allowance".to_owned(),
+                    lab.slippage_allowance.to_string(),
+                ),
+            ]);
+            StrategyDto {
+                id: id.to_owned(),
+                letter: code,
+                name: wm_strategy::lab::NAMES[usize::from(family - 1)].to_owned(),
+                enabled: lab.runs(family),
+                summary: format!(
+                    "{} Paper only, on its own book: it never blocks, nor is blocked by, A–K or another lab strategy.",
+                    wm_strategy::lab::summary(family, variant)
+                ),
+                settings,
+                peak_slot: None,
+                lab: true,
+            }
+        })
+        .collect()
 }
 
 fn entry<T: Serialize>(
@@ -148,6 +225,7 @@ fn entry<T: Serialize>(
         summary: summary.to_owned(),
         settings,
         peak_slot: None,
+        lab: false,
     }
 }
 
@@ -318,7 +396,7 @@ mod tests {
     fn the_strategies_switched_on_are_listed_with_their_settings() {
         let cfg = shipped();
         let c = catalog(&cfg);
-        let ids: Vec<&str> = c.iter().map(|s| s.id.as_str()).collect();
+        let ids: Vec<&str> = c.iter().filter(|s| !s.lab).map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
             [
@@ -329,14 +407,66 @@ mod tests {
                 "U_unwind"
             ]
         );
-        let letters: String = c.iter().map(|s| s.letter.as_str()).collect();
+        let letters: String = c
+            .iter()
+            .filter(|s| !s.lab)
+            .map(|s| s.letter.as_str())
+            .collect();
         assert_eq!(letters, "FGIKU");
+        // The lab's 25 paper strategies follow, L1 first, every one running
+        // its main rule.
+        let lab: Vec<&StrategyDto> = c.iter().filter(|s| s.lab).collect();
+        assert_eq!(
+            lab.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            wm_strategy::lab::IDS
+        );
+        assert_eq!(
+            lab.iter().map(|s| s.letter.clone()).collect::<Vec<_>>(),
+            (1..=25).map(|n| format!("L{n}")).collect::<Vec<_>>()
+        );
+        assert!(c.iter().skip(5).all(|s| s.lab), "after the unwind engine");
+        let setting = |s: &StrategyDto, k: &str| {
+            s.settings
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert!(
+            lab.iter()
+                .all(|s| setting(s, "rule").as_deref() == Some("main rule"))
+        );
+        assert_eq!(setting(lab[0], "notional").as_deref(), Some("20.00"));
+        assert_eq!(
+            setting(lab[2], "notional").as_deref(),
+            Some("F's 100 shares")
+        );
+        assert_eq!(
+            setting(lab[2], "book.position_size_usd").as_deref(),
+            Some("100.00")
+        );
+        assert!(lab.iter().all(|s| s.summary.contains("Paper only")));
+        // A family switched off leaves the list; a variant says so.
+        let mut fewer = cfg.clone();
+        fewer.file.strategies.lab.disabled = vec!["L19".into(), "L20".into()];
+        fewer.file.strategies.lab.variants = vec!["L2".into()];
+        let c2 = catalog(&fewer);
+        assert_eq!(c2.iter().filter(|s| s.lab).count(), 23);
+        assert!(!c2.iter().any(|s| s.letter == "L19" || s.letter == "L20"));
+        let l2 = c2.iter().find(|s| s.letter == "L2").unwrap();
+        assert!(
+            setting(l2, "rule").unwrap().starts_with("variant"),
+            "{:?}",
+            l2.settings
+        );
+        assert!(l2.summary.contains("0.6 °C"), "{}", l2.summary);
         // A–E, H and J are off and not shown; switched on again they come back.
         let all: String = every_strategy(&cfg)
             .iter()
+            .filter(|s| !s.lab)
             .map(|s| s.letter.as_str())
             .collect();
         assert_eq!(all, "ABCDEFGHIJKU");
+        assert_eq!(every_strategy(&fewer).iter().filter(|s| s.lab).count(), 25);
         let mut again = cfg.clone();
         again.file.strategies.buy_yes.enabled = true;
         assert_eq!(catalog(&again)[0].id, "A_buy_yes_final_high");

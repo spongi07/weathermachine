@@ -2,13 +2,15 @@
 //!
 //! The pure decision core shared by backtest, paper and live runs:
 //! temperature state, peak features, probability models, EV math,
-//! strategies A–K and the unwind engine. No I/O, no clocks, no randomness.
+//! strategies A–K, the strategy lab's paper strategies L1–L25 and the unwind
+//! engine. No I/O, no clocks, no randomness.
 
 pub mod book_confirmed;
 pub mod certain;
 pub mod ev;
 pub mod forecast;
 pub mod knmi_nowcast;
+pub mod lab;
 pub mod middle_fade;
 pub mod morning_maker;
 pub mod next_degree;
@@ -26,6 +28,7 @@ pub use book_confirmed::{BookConfirmedConfig, BookConfirmedHigh};
 pub use certain::{CertainConfig, CertainOutcomes};
 pub use forecast::ForecastDay;
 pub use knmi_nowcast::{KnmiNowcast, KnmiNowcastConfig};
+pub use lab::{LabConfig, LabInputs, LabRiskConfig, LabStrategy, lab_strategies};
 pub use middle_fade::{MiddleFade, MiddleFadeConfig};
 pub use morning_maker::{MorningMaker, MorningMakerConfig};
 pub use next_degree::{NextDegree, NextDegreeConfig};

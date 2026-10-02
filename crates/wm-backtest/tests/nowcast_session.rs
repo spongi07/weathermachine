@@ -57,6 +57,8 @@ fn config() -> EngineConfig {
             // under which the 11:25 report would not count.
             confirmed_filter: Some(ObservationFilter::AllRows),
             routine_minutes: vec![25, 55],
+            position: None,
+            neighbours: Vec::new(),
         }],
         risk: RiskConfig::default(),
         buy_yes: BuyYesConfig {
@@ -89,6 +91,8 @@ fn config() -> EngineConfig {
             notional: Usd::from_whole(10),
             ..KnmiNowcastConfig::default()
         },
+        lab: wm_strategy::LabConfig::absent(),
+        lab_forecast: None,
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: true,
         decision_log_capacity: 200,
@@ -143,6 +147,7 @@ fn reading(end: &str, mean: i32, max: i32, known: &str) -> EventEnvelope {
                 interval_end: utc(end),
                 mean: Some(TempC::from_tenths(mean)),
                 max: Some(TempC::from_tenths(max)),
+                radiation: None,
                 received_at: utc(known),
             },
         }),

@@ -1713,6 +1713,7 @@ mod tests {
             interval_end: utc(end),
             mean: Some(TempC::from_tenths(mean)),
             max: Some(TempC::from_tenths(max)),
+            radiation: None,
             received_at: utc(end) + Duration::minutes(5),
         }
     }

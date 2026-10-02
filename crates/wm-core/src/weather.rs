@@ -167,6 +167,10 @@ pub struct TenMinuteObservation {
     pub mean: Option<TempC>,
     /// Highest 1.5 m air temperature in the interval.
     pub max: Option<TempC>,
+    /// Global radiation over the interval (W/m², KNMI `qg`), when it was
+    /// requested (the strategy lab's L25 reads it); `None` otherwise.
+    #[serde(default)]
+    pub radiation: Option<i32>,
     /// When the bot received it.
     pub received_at: DateTime<Utc>,
 }

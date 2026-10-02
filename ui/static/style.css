@@ -211,6 +211,12 @@ a.btn:hover { text-decoration: none; }
 .strategy-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
 .strategy-card { background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .strategy-card.off { opacity: 0.62; }
+.lab-inputs { margin: 0 0 6px; overflow-wrap: anywhere; }
+/* Words wrap but never break, so a narrow screen scrolls the table instead of
+   squeezing its text columns to a letter a line. */
+.lab-table td.text { white-space: normal; overflow-wrap: break-word; min-width: 150px; }
+.lab-table td.status { min-width: 240px; }
+.lab-table .card-letter { font-size: 12px; padding: 3px 6px; text-decoration: none; }
 .card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .card-letter { font: 700 15px/1 var(--mono); color: #fff; background: rgba(139, 123, 255, 0.2); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
 .card-name { font-weight: 600; color: var(--text); flex: 1; min-width: 0; overflow-wrap: anywhere; }

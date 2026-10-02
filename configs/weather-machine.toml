@@ -216,7 +216,10 @@ politeness_decay_secs = 86400.0
 max_body_bytes = 4194304
 
 # Polymarket Data API: public trade history, read by `weather-machine research
-# market` only (documented limit 200 requests / 10 s; we use 2 per second).
+# market` and, live, by the strategy lab: today's taker trades every
+# [lab].taker_poll_seconds (L18–L21) and, once a day, the settled days the
+# takers are scored on (L19, L20). Documented limit 200 requests / 10 s; we
+# use at most 2 per second.
 [providers.polymarket_data]
 enabled = true
 base_url = "https://data-api.polymarket.com"
@@ -243,7 +246,9 @@ max_body_bytes = 8388608
 # automatic weather station (predictive input for strategy K, never
 # observation or resolution data). Needs WM_KNMI_API_KEY — a free key from
 # the KNMI Developer Portal, sent in the Authorization header, never logged.
-# Live: two requests a minute; `research market`: one per week of history.
+# Live: two requests a minute, plus one per [lab] neighbour after each new
+# reading (about 140 an hour with three neighbours, well inside the 1,000 a
+# registered key allows); `research market`: one per week of history.
 [providers.knmi]
 enabled = true
 base_url = "https://api.dataplatform.knmi.nl/edr/v1/collections/10-minute-in-situ-meteorological-observations"
@@ -307,7 +312,9 @@ throttle_memory_secs = 1800
 # ---------------------------------------------------------------------------
 # Risk (paper money). FAIL CLOSED. The strategies that run — F and G–K —
 # each have their own position and capital caps at the end of [risk]; the
-# portfolio-wide caps fit all of them at once.
+# portfolio-wide caps fit all of them at once. The strategy lab (L1–L25)
+# trades its own paper books under [strategies.lab.risk], outside these caps:
+# it never takes room from A–K, nor A–K from it.
 # ---------------------------------------------------------------------------
 [risk]
 position_size_usd = "10.00"          # any strategy without its own caps
@@ -615,6 +622,54 @@ max_data_age_minutes = 40
 max_book_age_ms = 15000
 slippage_allowance = "0.01"
 
+# The strategy lab: the 25 strategies `research market` replays (L1–L25,
+# docs/research/strategy-lab.md), trading PAPER ONLY, each on its own paper
+# book with its own positions, risk limits and P&L, so none of them blocks
+# A–K or another lab strategy (two of them may hold the same token). Every
+# rule threshold is the replay's pre-registered main rule; `variants` runs a
+# family's second rule instead, `disabled` switches families off:
+#   L1  KNMI-shielded maker on the next degree     L14 Morning departure from the hourly forecast
+#   L2  KNMI-informed maker on the doomed bucket   L15 Past the forecast's own peak hour
+#   L3  F's escape hatch (F's 100 shares)          L16 Evening-high days
+#   L4  KNMI cooling lock                          L17 Yesterday's forecast error
+#   L5  Late next-degree NO under KNMI cooling     L18 Pre-report burst, confirmed by KNMI
+#   L6  K late: YES of the new degree              L19 Follow skilled takers
+#   L7  KNMI slope: K one reading early            L20 Fade losing longshot buyers
+#   L8  Sea-breeze lock                            L21 Fade the jump after a new high
+#   L9  Rain-cooled cap                            L22 Overnight tail maker around the favourite
+#   L10 TREND cap                                  L23 After the shower: the recovery
+#   L11 Fog and stratus fade                       L24 Upwind KNMI station
+#   L12 Clear dry morning: the bucket above        L25 Radiation collapse
+#   L13 Cold-front early-high lock
+# The KNMI rules (L1, L2, L4–L7, L18, L21, L23–L25) need WM_KNMI_API_KEY
+# and stay idle without it (L3 then enters as F does but cannot escape);
+# L18–L21 read the Data API's taker trades; L19 and L20 wait
+# for the takers' records (built from the last [lab].wallet_history_days
+# settled days, a few minutes after the start). The sections below are
+# optional: without them the lab is off.
+[strategies.lab]
+enabled = true
+disabled = []                     # e.g. ["L19", "L20"]
+variants = []                     # e.g. ["L2"]: the margin of 0.6 °C instead of 0.3 °C
+notional = "20.00"                # cost of one trade at its price (L3: F's 100 shares)
+slippage_allowance = "0.005"      # in the expected profit of a taker buy
+max_book_age_ms = 15000
+max_data_age_minutes = 40         # METAR age limit
+max_reading_age_minutes = 15      # an older KNMI reading is no signal
+report_known_minutes = 3          # a routine report counts as known this long after it
+cancel_before_report_minutes = 10 # L22's quotes expire this long before a report …
+min_rest_minutes = 5              # … and are not posted with less than this to go
+# Each lab strategy's own paper book (the main [risk] settings apply for
+# data freshness and prices).
+[strategies.lab.risk]
+position_size_usd = "25.00"       # largest order
+f_escape_position_usd = "100.00"  # L3 buys F's 100 shares (at most 0.95 each)
+max_exposure_usd = "120.00"       # open positions and live orders of one lab strategy
+max_daily_new_exposure_usd = "120.00"
+max_daily_loss_usd = "100.00"
+max_spread = "0.10"               # several rules trade minutes before a report
+max_orders_per_minute = 10
+
 [strategies.unwind]
 enabled = true
 exit_below_probability = 0.5
@@ -670,3 +725,29 @@ max_parameter = "tx"              # its maximum
 location_id = ""                  # empty: the WIGOS id of the station's WMO number (0-20000-0-06240)
 poll_seconds = 30
 lookback_minutes = 40
+
+# What the strategy lab reads beyond A–K's inputs (with [strategies.lab]).
+# KNMI's global radiation is read with Schiphol's ten-minute readings (L25);
+# the neighbours' readings are read after each new one (L24): Voorschoten on
+# the coast to the south-west (Valkenburg's successor), De Bilt inland to the
+# south-east, Berkhout to the north-north-east.
+[lab]
+radiation_parameter = "qg"        # W/m²; empty: none
+knmi_history_minutes = 180        # read at start (the rules look back 90 minutes)
+taker_poll_seconds = 20           # today's taker trades from the Data API
+wallet_history_days = 60          # settled days the takers are scored on
+[[lab.neighbours]]
+wmo = "06215"
+name = "Voorschoten"
+latitude = 52.141
+longitude = 4.437
+[[lab.neighbours]]
+wmo = "06260"
+name = "De Bilt"
+latitude = 52.100
+longitude = 5.180
+[[lab.neighbours]]
+wmo = "06249"
+name = "Berkhout"
+latitude = 52.644
+longitude = 4.979

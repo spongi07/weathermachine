@@ -61,18 +61,23 @@ impl PgStore {
             .collect()
     }
 
-    /// Limit price and filled shares (micros) of the opening buy orders
-    /// created at or after `since`: what their approvals left in the daily
-    /// new exposure once the unfilled parts ended (an order still resting
-    /// when the earlier run stopped ended with it).
-    pub async fn opening_orders_since(&self, since: DateTime<Utc>) -> Result<Vec<(i32, i64)>> {
+    /// Strategy, limit price and filled shares (micros) of the opening buy
+    /// orders created at or after `since`: what their approvals left in the
+    /// daily new exposure once the unfilled parts ended (an order still
+    /// resting when the earlier run stopped ended with it). Each lab
+    /// strategy's count toward its own book.
+    pub async fn opening_orders_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<(String, i32, i64)>> {
         let rows = sqlx::query(
-            "SELECT o.limit_price_micros,
+            "SELECT o.strategy,
+                    o.limit_price_micros,
                     COALESCE(SUM(f.shares_micros), 0)::BIGINT AS filled_micros
              FROM orders o
              LEFT JOIN fills f ON f.client_order_id = o.client_order_id
              WHERE o.created_at >= $1 AND o.side = 'BUY' AND o.kind = 'open'
-             GROUP BY o.client_order_id, o.limit_price_micros",
+             GROUP BY o.client_order_id, o.strategy, o.limit_price_micros",
         )
         .bind(since)
         .fetch_all(&self.pool)
@@ -80,6 +85,7 @@ impl PgStore {
         rows.into_iter()
             .map(|r| {
                 Ok((
+                    r.try_get("strategy")?,
                     r.try_get("limit_price_micros")?,
                     r.try_get("filled_micros")?,
                 ))

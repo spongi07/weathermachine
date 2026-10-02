@@ -117,10 +117,11 @@ impl Ord for Queued {
 fn priority(e: &WeatherMachineEvent) -> u8 {
     match e {
         WeatherMachineEvent::ProviderHealthChanged(_) | WeatherMachineEvent::Operator(_) => 0,
-        WeatherMachineEvent::MarketSnapshot(_) => 1,
+        WeatherMachineEvent::MarketSnapshot(_) | WeatherMachineEvent::WalletScores(_) => 1,
         WeatherMachineEvent::OrderUpdate(_) => 2,
         WeatherMachineEvent::OrderBookUpdate(_)
         | WeatherMachineEvent::MarketTrade(_)
+        | WeatherMachineEvent::TakerTrades(_)
         | WeatherMachineEvent::MarketStreamHeartbeat(_) => 3,
         WeatherMachineEvent::WeatherObservation(_)
         | WeatherMachineEvent::WeatherCorrection(_)

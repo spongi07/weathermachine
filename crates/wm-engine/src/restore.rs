@@ -7,6 +7,7 @@
 //! to [`crate::Engine::restore`] before the first live event.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use wm_core::ids::StrategyId;
 use wm_core::market::DailyTemperatureMarket;
 use wm_core::portfolio::InstrumentRef;
@@ -30,13 +31,18 @@ pub struct RestoreState {
     /// Their fills, oldest first.
     pub fills: Vec<RestoredFill>,
     /// Cost at the limit of the filled part of the opening orders approved
-    /// today (UTC).
+    /// today (UTC), of the main book's strategies (A–K).
     pub new_exposure_today: Usd,
+    /// The same per lab strategy: each counts toward its own book's limit.
+    #[serde(default)]
+    pub lab_new_exposure_today: BTreeMap<StrategyId, Usd>,
 }
 
 impl RestoreState {
     pub fn is_empty(&self) -> bool {
-        self.fills.is_empty() && self.new_exposure_today.is_zero()
+        self.fills.is_empty()
+            && self.new_exposure_today.is_zero()
+            && self.lab_new_exposure_today.values().all(|c| c.is_zero())
     }
 }
 

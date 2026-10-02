@@ -124,6 +124,22 @@ Consequences, by design:
 * One F loss (≈ $95) stays under the $100 daily-loss stop; a second loss
   on the same UTC day stops all new positions for the rest of that day.
 
+**The strategy lab's own books (since 2 October 2026).** Each lab strategy
+(L1–L25, [§27j](06-strategy.md#27j-strategy-lab--l1l25-in-paper)) trades a
+paper book of its own with its own `RiskEngine`: `lab_risk_config` takes
+the main `[risk]` and sets the position size ($25; L3 $100), one cap for
+the book's global, market, location and strategy exposure ($120), the daily
+new exposure ($120), the daily loss ($100), the spread (0.10) and the order
+rate (10 a minute) from `[strategies.lab.risk]`. Everything else — the kill
+switch, compliance, storage, execution, weather health, data age, prices —
+is the main book's and gates every book alike. The consequences above hold
+within a book only: a lab trade never counts toward the main book's caps
+or another lab strategy's, and the Duplicate check sees only the
+strategy's own book, so K and L7 may hold the same NO at once. A restart
+restores each book apart: `opening_orders_since` returns each order's
+strategy, the main book's new exposure of the day and each lab strategy's
+(`RestoreState::lab_new_exposure_today`).
+
 **KNOWN FACT (design, tested).** Buckets of one daily event are mutually
 exclusive and exhaustive, so exposure is computed **per scenario**. For each
 possible final bucket, `wm_risk::event_exposure` sums every leg's PnL
@@ -142,7 +158,10 @@ unit tests for hedges and pending buys, and the global cap in `each_gate_rejects
 `a_strategy_may_have_its_own_spread_limit` and
 `strategy_caps_parse_and_are_validated` cover the per-strategy caps;
 `unfilled_cost_returns_to_the_daily_new_exposure_of_its_day` and
-`wm-backtest/tests/maker_session.rs` the cost given back.
+`wm-backtest/tests/maker_session.rs` the cost given back;
+`lab_strategies_and_k_buy_the_same_token_on_their_own_books` and
+`a_restart_gives_each_fill_back_to_its_own_book`
+(`wm-backtest/tests/lab_session.rs`) the lab's own books.
 
 ## 31. PostgreSQL schema
 

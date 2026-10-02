@@ -14,7 +14,7 @@
 //! of `stake_usd` (L3 at F's shares).
 //!
 //! The inputs beyond G–K's: the METAR's weather groups (wind, weather,
-//! clouds, QNH, TREND — [`wm_weather::metar_wx`]), the day-1 hourly forecast
+//! clouds, QNH, TREND — [`wm_core::metar_wx`]), the day-1 hourly forecast
 //! even when the model does not use it, KNMI's global radiation and the
 //! ten-minute temperatures of neighbouring stations, every taker's track
 //! record on the days before (wallets scored prequentially), and F's
@@ -35,17 +35,20 @@ use crate::market_gk::{fresh_quote, taker_price, tick};
 use crate::market_makers::{Resting, cancel_time, next_routine, through_fill};
 use crate::market_peak::local_to_utc;
 use crate::market_sim::{Decision, MarketSimConfig, SimTrade, StrategyRow, local_hm, row};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use wm_core::market::TemperatureBucket;
+use wm_core::metar_wx::{MetarWx, parse_wx};
 use wm_core::time::{local_day_bounds, local_minute_of_day};
 use wm_core::weather::{Observation, TenMinuteObservation};
+pub(crate) use wm_strategy::lab::WalletBook;
+use wm_strategy::lab::solar::{angle_between, bearing, clear_sky_ghi};
+use wm_strategy::lab::wallets::ScoredTrade;
 use wm_strategy::{ForecastDay, PeakTimes};
 use wm_weather::knmi::SeriesPoint;
-use wm_weather::metar_wx::{MetarWx, parse_wx};
 
 /// The lab's trades carry this structure (no model structure).
 pub(crate) const STRUCTURE: &str = "lab";
@@ -128,11 +131,7 @@ impl Default for LabSim {
 impl LabSim {
     /// Initial bearing (degrees true, 0–360) from the station to `n`.
     pub fn bearing_to(&self, n: &Neighbour) -> f64 {
-        let (p1, p2) = (self.latitude.to_radians(), n.latitude.to_radians());
-        let dl = (n.longitude - self.longitude).to_radians();
-        let y = dl.sin() * p2.cos();
-        let x = p1.cos() * p2.sin() - p1.sin() * p2.cos() * dl.cos();
-        y.atan2(x).to_degrees().rem_euclid(360.0)
+        bearing(self.latitude, self.longitude, n.latitude, n.longitude)
     }
 }
 
@@ -304,34 +303,8 @@ pub(crate) struct LabRule {
     pub(crate) kind: Kind,
 }
 
-/// The families' names, L1 first.
-pub const NAMES: [&str; FAMILIES as usize] = [
-    "KNMI-shielded maker on the next degree",
-    "KNMI-informed maker on the doomed bucket",
-    "F's escape hatch",
-    "KNMI cooling lock",
-    "Late next-degree NO under KNMI cooling",
-    "K late: YES of the new degree",
-    "KNMI slope: K one reading early",
-    "Sea-breeze lock",
-    "Rain-cooled cap",
-    "TREND cap",
-    "Fog and stratus fade",
-    "Clear dry morning: the bucket above",
-    "Cold-front early-high lock",
-    "Morning departure from the hourly forecast",
-    "Past the forecast's own peak hour",
-    "Evening-high days",
-    "Yesterday's forecast error",
-    "Pre-report burst, confirmed by KNMI",
-    "Follow skilled takers",
-    "Fade losing longshot buyers",
-    "Fade the jump after a new high",
-    "Overnight tail maker around the favourite",
-    "After the shower: the recovery",
-    "Upwind KNMI station",
-    "Radiation collapse",
-];
+/// The families' names, L1 first (the paper strategies' names).
+pub const NAMES: [&str; FAMILIES as usize] = wm_strategy::lab::NAMES;
 
 impl LabRule {
     pub(crate) fn name(&self) -> &'static str {
@@ -530,127 +503,27 @@ pub(crate) fn weather_of(decisions: &[Decision], obs: &[&Observation]) -> Vec<Op
         .collect()
 }
 
-/// A taker's record over the days before: P&L per share after the taker
-/// fee, one observation per trade.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct WalletStats {
-    pub(crate) n: u64,
-    sum: f64,
-    sum_sq: f64,
-}
-
-impl WalletStats {
-    pub(crate) fn add(&mut self, pnl: f64) {
-        self.n += 1;
-        self.sum += pnl;
-        self.sum_sq += pnl * pnl;
-    }
-
-    pub(crate) fn mean(&self) -> f64 {
-        if self.n == 0 {
-            0.0
-        } else {
-            self.sum / self.n as f64
-        }
-    }
-
-    /// The mean over its standard error.
-    pub(crate) fn t(&self) -> f64 {
-        if self.n < 2 {
-            return 0.0;
-        }
-        let n = self.n as f64;
-        let var = ((self.sum_sq - n * self.mean().powi(2)) / (n - 1.0)).max(0.0);
-        self.mean() / (var.sqrt().max(1e-6) / n.sqrt())
-    }
-}
-
-/// Fewest earlier trades before a taker is judged.
-const MIN_WALLET_TRADES: u64 = 30;
-
-/// Every taker's record on the market days before the one replayed.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct WalletBook {
-    stats: HashMap<String, WalletStats>,
-}
-
-impl WalletBook {
-    /// Learn a settled day's taker trades (after replaying it).
-    pub(crate) fn add_day(
-        &mut self,
-        per_bucket: &[Vec<&MarketTrade>],
-        winner: usize,
-        fee_rate: f64,
-    ) {
-        for (i, trades) in per_bucket.iter().enumerate() {
-            for t in trades {
-                let Some(w) = &t.taker else { continue };
-                let p = t.yes_price;
-                let fee = fee_rate * p * (1.0 - p);
-                let pnl = if t.taker_buys_yes {
-                    f64::from(u8::from(i == winner)) - p - fee
-                } else {
-                    f64::from(u8::from(i != winner)) - (1.0 - p) - fee
-                };
-                self.stats.entry(w.clone()).or_default().add(pnl);
-            }
-        }
-    }
-
-    pub(crate) fn get(&self, wallet: &str) -> Option<&WalletStats> {
-        self.stats.get(wallet)
-    }
-
-    /// Made ≥ 0.02 a share over ≥ 30 trades with t ≥ `min_t`.
-    pub(crate) fn skilled(&self, wallet: &str, min_t: f64) -> bool {
-        self.get(wallet)
-            .is_some_and(|s| s.n >= MIN_WALLET_TRADES && s.mean() >= 0.02 && s.t() >= min_t)
-    }
-
-    /// Lost ≥ 0.05 a share over ≥ 30 trades with t ≤ −2.
-    pub(crate) fn losing(&self, wallet: &str) -> bool {
-        self.get(wallet)
-            .is_some_and(|s| s.n >= MIN_WALLET_TRADES && s.mean() <= -0.05 && s.t() <= -2.0)
-    }
-
-    /// (takers, skilled at t ≥ 2, losing).
-    pub(crate) fn counts(&self) -> (u64, u64, u64) {
-        let skilled = self.stats.keys().filter(|w| self.skilled(w, 2.0)).count();
-        let losing = self.stats.keys().filter(|w| self.losing(w)).count();
-        (self.stats.len() as u64, skilled as u64, losing as u64)
-    }
-}
-
-/// Cosine of the solar zenith angle at `t` (NOAA's fractional-year
-/// approximation, good to a few tenths of a degree).
-pub(crate) fn cos_zenith(t: DateTime<Utc>, latitude: f64, longitude: f64) -> f64 {
-    use std::f64::consts::PI;
-    let hour = f64::from(t.hour()) + f64::from(t.minute()) / 60.0 + f64::from(t.second()) / 3600.0;
-    let g = 2.0 * PI / 365.0 * (f64::from(t.ordinal()) - 1.0 + (hour - 12.0) / 24.0);
-    let decl = 0.006918 - 0.399912 * g.cos() + 0.070257 * g.sin() - 0.006758 * (2.0 * g).cos()
-        + 0.000907 * (2.0 * g).sin()
-        - 0.002697 * (3.0 * g).cos()
-        + 0.00148 * (3.0 * g).sin();
-    let eq_time = 229.18
-        * (0.000075 + 0.001868 * g.cos()
-            - 0.032077 * g.sin()
-            - 0.014615 * (2.0 * g).cos()
-            - 0.040849 * (2.0 * g).sin());
-    let true_solar_min = hour * 60.0 + eq_time + 4.0 * longitude;
-    let hour_angle = (true_solar_min / 4.0 - 180.0).to_radians();
-    let lat = latitude.to_radians();
-    lat.sin() * decl.sin() + lat.cos() * decl.cos() * hour_angle.cos()
-}
-
-/// Clear-sky global horizontal irradiance (W/m²), Haurwitz (1945):
-/// 1098 · cos z · exp(−0.057 / cos z); zero with the sun down.
-pub(crate) fn clear_sky_ghi(t: DateTime<Utc>, latitude: f64, longitude: f64) -> f64 {
-    let c = cos_zenith(t, latitude, longitude);
-    if c <= 0.0 {
-        0.0
-    } else {
-        1098.0 * c * (-0.057 / c).exp()
-    }
+/// Learn a settled day's taker trades (after replaying it): each trade's
+/// P&L a share after the taker fee, held to settlement.
+pub(crate) fn learn_day(
+    book: &mut WalletBook,
+    per_bucket: &[Vec<&MarketTrade>],
+    winner: usize,
+    fee_rate: f64,
+) {
+    book.add_trades(
+        per_bucket.iter().enumerate().flat_map(|(i, trades)| {
+            trades.iter().filter_map(move |t| {
+                Some(ScoredTrade {
+                    taker: t.taker.as_deref()?,
+                    yes_price: t.yes_price,
+                    taker_buys_yes: t.taker_buys_yes,
+                    bucket_won: i == winner,
+                })
+            })
+        }),
+        fee_rate,
+    );
 }
 
 /// One market day's inputs.
@@ -2423,12 +2296,6 @@ fn shower_recovery(
     }
 }
 
-/// Smallest angle between two bearings (degrees).
-fn angle_between(a: f64, b: f64) -> f64 {
-    let d = (a - b).rem_euclid(360.0);
-    d.min(360.0 - d)
-}
-
 /// L24. Air arrives from upwind: a station 30–40 km upwind shows Schiphol's
 /// next hour (forecasters' "upstream conditions"), ten minutes at a time.
 fn upwind(day: &LabDay<'_>, rule: &LabRule, warm: bool, ctx: &Ctx<'_>, out: &mut Vec<SimTrade>) {
@@ -2984,6 +2851,7 @@ mod tests {
             interval_end: z(hm),
             mean: Some(TempC::from_tenths(mean)),
             max: Some(TempC::from_tenths(max)),
+            radiation: None,
             received_at: z(hm) + Duration::minutes(5),
         }
     }
@@ -3687,14 +3555,9 @@ mod tests {
 
     fn book(wallet: &str, n: u64, mean: f64, sd: f64) -> WalletBook {
         let mut b = WalletBook::default();
-        let nf = n as f64;
-        b.stats.insert(
-            wallet.to_owned(),
-            WalletStats {
-                n,
-                sum: mean * nf,
-                sum_sq: sd * sd * (nf - 1.0) + nf * mean * mean,
-            },
+        b.insert(
+            wallet,
+            wm_strategy::lab::WalletStats::from_moments(n, mean, sd),
         );
         b
     }
@@ -3708,7 +3571,7 @@ mod tests {
         ];
         let per: Vec<Vec<&MarketTrade>> = vec![vec![&trades[0]], vec![&trades[1], &trades[2]]];
         let mut b = WalletBook::default();
-        b.add_day(&per, 0, FEE);
+        learn_day(&mut b, &per, 0, FEE);
         let w = b.get("w").unwrap();
         // YES of the winner at 0.30: 0.70 − fee; YES of a loser sold at
         // 0.30 (NO at 0.70): 0.30 − fee.
@@ -3931,7 +3794,7 @@ mod tests {
     fn clear_sky_radiation_and_bearings_are_right() {
         // Midsummer solar noon at Schiphol: the sun 61° high, ~900 W/m².
         let noon = utc("2026-06-21T11:42:00Z");
-        let c = cos_zenith(noon, 52.318, 4.790);
+        let c = wm_strategy::lab::solar::cos_zenith(noon, 52.318, 4.790);
         assert!(
             (c - (90.0f64 - 61.1).to_radians().cos()).abs() < 0.01,
             "{c}"
@@ -3943,7 +3806,7 @@ mod tests {
             0.0
         );
         // Midwinter noon: the sun ~14° high.
-        let w = cos_zenith(utc("2026-12-21T11:51:00Z"), 52.318, 4.790);
+        let w = wm_strategy::lab::solar::cos_zenith(utc("2026-12-21T11:51:00Z"), 52.318, 4.790);
         assert!(
             (w - (90.0f64 - 14.3).to_radians().cos()).abs() < 0.01,
             "{w}"

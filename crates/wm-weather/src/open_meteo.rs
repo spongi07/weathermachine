@@ -239,15 +239,17 @@ impl ForecastProvider for OpenMeteoPreviousRuns {
         &self.model
     }
 
-    /// The series around `query.local_date` (one UTC day either side covers
-    /// the local day in every timezone).
+    /// The series around `query.local_date`: one UTC day after it, two
+    /// before (one either side covers the local day in every timezone; the
+    /// second one before covers yesterday's local day too, whose forecast
+    /// maximum the strategy lab compares with yesterday's high).
     fn fetch<'a>(
         &'a self,
         query: &'a ForecastQuery,
         max_gate_wait: Duration,
     ) -> BoxFuture<'a, Result<ForecastEvent, ForecastError>> {
         Box::pin(async move {
-            let start = query.local_date - ChronoDuration::days(1);
+            let start = query.local_date - ChronoDuration::days(2);
             let end = query.local_date + ChronoDuration::days(1);
             let s = self
                 .fetch_series(query.latitude, query.longitude, start, end, max_gate_wait)

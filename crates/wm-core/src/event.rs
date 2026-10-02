@@ -7,11 +7,11 @@
 
 use crate::health::{ProviderHealthSnapshot, ProviderHealthState};
 use crate::ids::{LocationId, ProviderId};
-use crate::market::{DailyTemperatureMarket, OrderBook, TradePrint};
+use crate::market::{DailyTemperatureMarket, OrderBook, TakerTrade, TradePrint};
 use crate::trading::{Fill, OrderUpdate};
 use crate::units::TempC;
 use crate::weather::{DedupClass, Observation, TenMinuteObservation};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Where an event came from.
@@ -71,6 +71,12 @@ pub enum WeatherMachineEvent {
     ProviderHealthChanged(ProviderHealthEvent),
     Operator(OperatorCommand),
     MarketStreamHeartbeat(StreamHeartbeatEvent),
+    /// Taker trades with their (hashed) wallets from the public trade
+    /// history (predictive input of the strategy lab only).
+    TakerTrades(TakerTradesEvent),
+    /// Takers' records on recent settled market days (the strategy lab's
+    /// L19 and L20).
+    WalletScores(WalletScoresEvent),
 }
 
 impl WeatherMachineEvent {
@@ -88,6 +94,8 @@ impl WeatherMachineEvent {
             WeatherMachineEvent::ProviderHealthChanged(_) => "provider_health_changed",
             WeatherMachineEvent::Operator(_) => "operator",
             WeatherMachineEvent::MarketStreamHeartbeat(_) => "market_stream_heartbeat",
+            WeatherMachineEvent::TakerTrades(_) => "taker_trades",
+            WeatherMachineEvent::WalletScores(_) => "wallet_scores",
         }
     }
 }
@@ -158,6 +166,37 @@ pub struct OrderBookEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarketTradeEvent {
     pub trade: TradePrint,
+}
+
+/// New taker trades of a market, oldest first (duplicates of earlier polls
+/// are the engine's to drop).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TakerTradesEvent {
+    pub trades: Vec<TakerTrade>,
+}
+
+/// A taker's record over settled market days: one observation per trade,
+/// its P&L a share after the taker fee (held to settlement).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalletScore {
+    /// Short hash of the wallet, as in [`TakerTrade::taker`].
+    pub wallet: String,
+    pub trades: u64,
+    pub mean: f64,
+    /// The mean over its standard error.
+    pub t: f64,
+}
+
+/// Every scored taker with enough trades, over the settled market days up
+/// to `through`. Replaces the previous scores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalletScoresEvent {
+    pub through: NaiveDate,
+    /// Settled market days scored.
+    pub days: u32,
+    /// Takers seen on them (also those with too few trades to be listed).
+    pub takers: u64,
+    pub scores: Vec<WalletScore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

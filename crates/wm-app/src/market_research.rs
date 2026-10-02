@@ -146,7 +146,9 @@ struct CachedTrades {
     trades: Vec<CachedTrade>,
 }
 
-fn short_hash(s: &str) -> String {
+/// A wallet as the caches and the paper strategies keep it: the first 16
+/// hex digits of its SHA-256.
+pub(crate) fn short_hash(s: &str) -> String {
     wm_core::hash::sha256_hex(s.as_bytes())[..16].to_owned()
 }
 
@@ -215,17 +217,20 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// A settled market day, from the cache or the network.
-async fn market_day(
+/// A settled market day of `spec`, from the cache in `cache_dir` or the
+/// network (then cached). `Ok((Err(why), _))`: no settled market that day.
+/// The paper strategies' wallet scores read the same cache.
+pub(crate) async fn market_day(
     gamma: &GammaClient,
     data: &DataApiClient,
-    plan: &MarketResearchPlan,
+    spec: &LocationMarketSpec,
+    cache_dir: &Path,
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<(Result<MarketDay, String>, bool)> {
-    let slug = event_slug(&plan.spec.slug_template, date);
-    let event_path = plan.cache_dir.join(format!("{slug}.event.json"));
-    let trades_path = plan.cache_dir.join(format!("{slug}.trades.json"));
+    let slug = event_slug(&spec.slug_template, date);
+    let event_path = cache_dir.join(format!("{slug}.event.json"));
+    let trades_path = cache_dir.join(format!("{slug}.trades.json"));
     let cached_event = std::fs::read(&event_path)
         .ok()
         .and_then(|b| parse_events(&b).ok().map(|e| (e, b)));
@@ -244,7 +249,7 @@ async fn market_day(
     let Some(ev) = events.iter().find(|e| e.slug == slug) else {
         return Ok((Err("no event with this slug".into()), false));
     };
-    let market = match build_market(ev, &plan.spec, date, now) {
+    let market = match build_market(ev, spec, date, now) {
         Ok(m) => m,
         Err(e) => return Ok((Err(format!("market mapping failed: {e}")), false)),
     };
@@ -255,7 +260,7 @@ async fn market_day(
     let trades = match cached_trades.filter(|_| from_cache) {
         Some(t) => t,
         None => {
-            let (start, end) = local_day_bounds(date, plan.spec.timezone);
+            let (start, end) = local_day_bounds(date, spec.timezone);
             let conditions: Vec<ConditionId> = market
                 .outcomes
                 .iter()
@@ -284,8 +289,8 @@ async fn market_day(
                     })
                     .collect(),
             };
-            std::fs::create_dir_all(&plan.cache_dir)
-                .with_context(|| format!("creating {}", plan.cache_dir.display()))?;
+            std::fs::create_dir_all(cache_dir)
+                .with_context(|| format!("creating {}", cache_dir.display()))?;
             training::write_atomic(&trades_path, &serde_json::to_vec(&cached)?)?;
             training::write_atomic(&event_path, &body)?;
             cached
@@ -330,7 +335,7 @@ pub async fn run(
             total,
         });
         let fetched = tokio::select! {
-            r = market_day(clients.gamma, clients.data, plan, date, now) => r,
+            r = market_day(clients.gamma, clients.data, &plan.spec, &plan.cache_dir, date, now) => r,
             _ = shutdown.changed() => bail!("shutting down"),
         };
         // A day that still fails after the retries is skipped, not fatal:

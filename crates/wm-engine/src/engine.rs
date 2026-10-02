@@ -1,39 +1,58 @@
 //! The kernel implementation.
 
 use crate::restore::{RestoreState, RestoreSummary};
-use crate::snapshot::{EngineSnapshot, ForecastSnapshot, LocationSnapshot, ViewSnapshot};
-use chrono::{DateTime, Duration, Utc};
+use crate::snapshot::{
+    EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LocationSnapshot,
+    NeighbourSnapshot, ViewSnapshot,
+};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use wm_core::event::{
     EventEnvelope, ForecastEvent, OperatorCommand, OrderUpdateEvent, TimerKind, WeatherMachineEvent,
 };
+use wm_core::forecast::ForecastProduct;
 use wm_core::health::{ProviderHealthSnapshot, station_state};
 use wm_core::ids::{
     DecisionId, EventSlug, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId,
 };
-use wm_core::market::{DailyTemperatureMarket, OrderBook, TradePrint};
+use wm_core::market::{DailyTemperatureMarket, OrderBook, TakerTrade, TradePrint};
 use wm_core::portfolio::PositionBook;
 use wm_core::resolution::ObservationFilter;
-use wm_core::time::local_date;
+use wm_core::time::{local_date, local_day_bounds};
 use wm_core::trading::{DecisionRecord, IntentKind, OrderStatus, RunMode, TradeIntent};
 use wm_core::units::{Probability, Rounding, Usd, notional};
-use wm_core::weather::TenMinuteObservation;
+use wm_core::weather::{Observation, TenMinuteObservation};
 use wm_execution::{Applied, OrderManager};
 use wm_risk::{
-    ApprovedIntent, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs, WeatherStatus,
+    ApprovedIntent, OpenOrderView, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs,
+    WeatherStatus,
 };
+use wm_strategy::lab::{NeighbourReadings, WalletScores, WxReport};
 use wm_strategy::{
     BookConfirmedConfig, BookConfirmedHigh, BucketEvaluation, BuyNoAboveHigh, BuyNoConfig,
     BuyYesConfig, BuyYesFinalHigh, CertainConfig, CertainOutcomes, ForecastDay, KnmiNowcast,
-    KnmiNowcastConfig, MiddleFade, MiddleFadeConfig, MorningMaker, MorningMakerConfig, NextDegree,
-    NextDegreeConfig, PeakConfig, PeakDetectionEngine, PeakSlotConfig, PeakSlotHigh,
-    ProbabilityModel, Proposal, SplitUnwind, SplitUnwindConfig, Strategy, StrategyContext,
-    TailSeller, TailSellerConfig, TemperatureStateEngine, UnwindConfig, UnwindEngine,
-    ViewEvaluation, ViewKind,
+    KnmiNowcastConfig, LabConfig, LabInputs, LabRiskConfig, MiddleFade, MiddleFadeConfig,
+    MorningMaker, MorningMakerConfig, NextDegree, NextDegreeConfig, PeakConfig,
+    PeakDetectionEngine, PeakSlotConfig, PeakSlotHigh, ProbabilityModel, Proposal, SplitUnwind,
+    SplitUnwindConfig, Strategy, StrategyContext, TailSeller, TailSellerConfig,
+    TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind, lab_strategies,
 };
+
+/// How long the lab's KNMI readings and METAR weather groups are kept.
+const LAB_HISTORY: Duration = Duration::hours(36);
+
+/// A neighbouring KNMI station of a location (the strategy lab's L24).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeighbourStation {
+    /// The station id its readings carry (its WMO number, e.g. `06215`).
+    pub station: StationId,
+    pub name: String,
+    /// Bearing from the location's station, degrees true.
+    pub bearing_deg: f64,
+}
 
 /// A location the engine trades.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +68,12 @@ pub struct EngineLocation {
     /// orders expire before them). Empty: unknown.
     #[serde(default)]
     pub routine_minutes: Vec<u8>,
+    /// The station's latitude and longitude (the lab's clear sky).
+    #[serde(default)]
+    pub position: Option<(f64, f64)>,
+    /// KNMI stations around it (the lab's upwind rule).
+    #[serde(default)]
+    pub neighbours: Vec<NeighbourStation>,
 }
 
 /// Engine configuration.
@@ -87,6 +112,14 @@ pub struct EngineConfig {
     /// reading says the next METAR will beat it.
     #[serde(default = "KnmiNowcastConfig::absent")]
     pub knmi_nowcast: KnmiNowcastConfig,
+    /// The strategy lab's paper strategies L1–L25, each on its own paper
+    /// book with its own limits ([`LabConfig::risk`]).
+    #[serde(default = "LabConfig::absent")]
+    pub lab: LabConfig,
+    /// The day-1 forecast product the lab reads (the configured one; the
+    /// model may use none). `None`: the model's product, if any.
+    #[serde(default)]
+    pub lab_forecast: Option<ForecastProduct>,
     pub unwind: UnwindConfig,
     pub evaluate_on_book_updates: bool,
     pub decision_log_capacity: usize,
@@ -167,6 +200,67 @@ fn tenths_series(e: &ForecastEvent) -> Vec<(DateTime<Utc>, i32)> {
     e.hourly.iter().map(|(t, v)| (*t, v.tenths())).collect()
 }
 
+/// One paper book: its positions, the strategy that opened each, its risk
+/// limits and counters, and its realized P&L. Strategies A–K and the unwind
+/// engine share the main book; each lab strategy trades a book of its own,
+/// so it neither blocks nor is blocked by any other strategy.
+struct PaperBook {
+    positions: PositionBook,
+    position_strategy: HashMap<TokenId, StrategyId>,
+    risk: RiskEngine,
+    realized_pnl_total: Usd,
+}
+
+impl PaperBook {
+    fn new(risk: RiskConfig, run: &RunId) -> Self {
+        Self {
+            positions: PositionBook::new(),
+            position_strategy: HashMap::new(),
+            risk: RiskEngine::new(risk, run),
+            realized_pnl_total: Usd::ZERO,
+        }
+    }
+}
+
+/// The main book (strategies A–K and the unwind engine).
+const MAIN: usize = 0;
+
+/// A lab strategy's own limits: the main risk settings (data freshness,
+/// prices, books, weather gates) with the lab's money limits.
+pub fn lab_risk_config(main: &RiskConfig, lab: &LabRiskConfig, family: u8) -> RiskConfig {
+    let position = if family == 3 {
+        lab.f_escape_position_usd
+    } else {
+        lab.position_size_usd
+    };
+    let exposure = lab.max_exposure_usd.max(position);
+    RiskConfig {
+        position_size_usd: position,
+        global_max_exposure_usd: exposure,
+        max_market_exposure_usd: Some(exposure),
+        max_location_exposure_usd: Some(exposure),
+        max_strategy_exposure_usd: Some(exposure),
+        max_daily_new_exposure_usd: Some(lab.max_daily_new_exposure_usd.max(position)),
+        max_daily_loss_usd: Some(lab.max_daily_loss_usd),
+        max_spread: lab.max_spread,
+        max_orders_per_minute: lab.max_orders_per_minute.max(1),
+        strategy_caps: BTreeMap::new(),
+        ..main.clone()
+    }
+}
+
+/// What the lab strategies read beyond A–K's inputs.
+#[derive(Default)]
+struct LabState {
+    /// KNMI readings per station of the last [`LAB_HISTORY`], oldest first.
+    knmi: HashMap<StationId, Vec<TenMinuteObservation>>,
+    /// METARs with their weather groups per station, oldest first.
+    reports: HashMap<StationId, Vec<WxReport>>,
+    /// Taker trades per market, oldest first, and the ids seen.
+    takers: HashMap<EventSlug, (Vec<TakerTrade>, HashSet<String>)>,
+    wallets: Option<WalletScores>,
+}
+
 /// The kernel.
 pub struct Engine {
     cfg: EngineConfig,
@@ -179,10 +273,12 @@ pub struct Engine {
     last_trades: HashMap<TokenId, TradePrint>,
     strategies: Vec<Box<dyn Strategy>>,
     unwind: UnwindEngine,
-    risk: RiskEngine,
     orders: OrderManager,
-    positions: PositionBook,
-    position_strategy: HashMap<TokenId, StrategyId>,
+    /// The main book first, then one per lab strategy.
+    paper: Vec<PaperBook>,
+    /// The book of each lab strategy (others trade the main book).
+    book_of: HashMap<StrategyId, usize>,
+    lab: LabState,
     health: BTreeMap<(ProviderId, Option<StationId>), ProviderHealthSnapshot>,
     corrections: HashMap<StationId, DateTime<Utc>>,
     kill_switch: Option<String>,
@@ -196,7 +292,6 @@ pub struct Engine {
     views: HashMap<LocationId, Vec<ViewEvaluation>>,
     hints: HashMap<StationId, StationHint>,
     stats: EngineStats,
-    realized_pnl_total: Usd,
     recent_rejections: HashMap<String, DateTime<Utc>>,
     forecasts: HashMap<ForecastKey, StoredForecast>,
     /// The latest ten-minute reading per station (predictive input only).
@@ -232,7 +327,7 @@ impl Engine {
             temps.register_station(l.station.clone(), l.timezone);
             peak.insert(l.location.clone(), PeakDetectionEngine::new(l.peak.clone()));
         }
-        let strategies: Vec<Box<dyn Strategy>> = vec![
+        let mut strategies: Vec<Box<dyn Strategy>> = vec![
             Box::new(CertainOutcomes::new(cfg.certain.clone())),
             Box::new(BuyYesFinalHigh::new(cfg.buy_yes.clone())),
             Box::new(BuyNoAboveHigh::new(cfg.buy_no.clone())),
@@ -245,7 +340,14 @@ impl Engine {
             Box::new(MorningMaker::new(cfg.morning_maker.clone())),
             Box::new(KnmiNowcast::new(cfg.knmi_nowcast.clone())),
         ];
-        let risk = RiskEngine::new(cfg.risk.clone(), &cfg.run_id);
+        let mut paper = vec![PaperBook::new(cfg.risk.clone(), &cfg.run_id)];
+        let mut book_of = HashMap::new();
+        for s in lab_strategies(&cfg.lab, &cfg.peak_slot) {
+            let risk = lab_risk_config(&cfg.risk, &cfg.lab.risk, s.family());
+            book_of.insert(s.id().clone(), paper.len());
+            paper.push(PaperBook::new(risk, &cfg.run_id));
+            strategies.push(Box::new(s));
+        }
         let unwind = UnwindEngine::new(cfg.unwind.clone());
         Self {
             temps,
@@ -257,10 +359,10 @@ impl Engine {
             last_trades: HashMap::new(),
             strategies,
             unwind,
-            risk,
             orders: OrderManager::new(),
-            positions: PositionBook::new(),
-            position_strategy: HashMap::new(),
+            paper,
+            book_of,
+            lab: LabState::default(),
             health: BTreeMap::new(),
             corrections: HashMap::new(),
             kill_switch: None,
@@ -274,7 +376,6 @@ impl Engine {
             views: HashMap::new(),
             hints: HashMap::new(),
             stats: EngineStats::default(),
-            realized_pnl_total: Usd::ZERO,
             recent_rejections: HashMap::new(),
             forecasts: HashMap::new(),
             nowcasts: HashMap::new(),
@@ -292,10 +393,35 @@ impl Engine {
         self.model.id()
     }
 
-    /// Replace the default strategy set (e.g. research configurations).
+    /// Replace the default strategy set (e.g. research configurations). A
+    /// lab strategy keeps its own book; every other one trades the main
+    /// book.
     pub fn with_strategies(mut self, strategies: Vec<Box<dyn Strategy>>) -> Self {
         self.strategies = strategies;
         self
+    }
+
+    /// The book `strategy` trades.
+    fn book_index(&self, strategy: &StrategyId) -> usize {
+        self.book_of.get(strategy).copied().unwrap_or(MAIN)
+    }
+
+    /// Live orders of book `b`.
+    fn book_orders(&self, b: usize) -> Vec<OpenOrderView> {
+        self.orders
+            .open_views()
+            .into_iter()
+            .filter(|o| self.book_index(&o.strategy) == b)
+            .collect()
+    }
+
+    /// Tokens with live orders of book `b`.
+    fn book_pending(&self, b: usize) -> HashSet<TokenId> {
+        self.orders
+            .open_orders()
+            .filter(|o| self.book_index(&o.strategy) == b)
+            .map(|o| o.token.clone())
+            .collect()
     }
 
     pub fn now(&self) -> DateTime<Utc> {
@@ -306,8 +432,16 @@ impl Engine {
         &self.cfg
     }
 
+    /// The main book's positions (strategies A–K).
     pub fn positions(&self) -> &PositionBook {
-        &self.positions
+        &self.paper[MAIN].positions
+    }
+
+    /// A lab strategy's own positions.
+    pub fn lab_positions(&self, strategy: &StrategyId) -> Option<&PositionBook> {
+        self.book_of
+            .get(strategy)
+            .map(|&b| &self.paper[b].positions)
     }
 
     pub fn orders(&self) -> &OrderManager {
@@ -322,8 +456,14 @@ impl Engine {
         &self.stats
     }
 
+    /// Realized P&L of the main book.
     pub fn realized_pnl_total(&self) -> Usd {
-        self.realized_pnl_total
+        self.paper[MAIN].realized_pnl_total
+    }
+
+    /// Realized P&L of every lab book together.
+    pub fn lab_realized_pnl_total(&self) -> Usd {
+        self.paper[1..].iter().map(|b| b.realized_pnl_total).sum()
     }
 
     pub fn set_storage_ok(&mut self, ok: bool) {
@@ -356,6 +496,34 @@ impl Engine {
             .position(|l| &l.location == location)
     }
 
+    /// Keep a report's weather groups for the lab (the latest version of
+    /// each report; [`LAB_HISTORY`] of them).
+    fn note_report(&mut self, o: &Observation) {
+        if !self.cfg.lab.enabled {
+            return;
+        }
+        let list = self.lab.reports.entry(o.key.station.clone()).or_default();
+        let r = WxReport::from_observation(o);
+        match list.binary_search_by_key(&r.observed_at, |x| x.observed_at) {
+            Ok(i) => list[i] = r,
+            Err(i) => list.insert(i, r),
+        }
+        let cutoff = self.now - LAB_HISTORY;
+        list.retain(|x| x.observed_at >= cutoff);
+    }
+
+    /// Keep a ten-minute reading for the lab (a later copy of the same
+    /// interval replaces it; [`LAB_HISTORY`] of them).
+    fn note_reading(&mut self, o: &TenMinuteObservation) {
+        let list = self.lab.knmi.entry(o.station.clone()).or_default();
+        match list.binary_search_by_key(&o.interval_end, |x| x.interval_end) {
+            Ok(i) => list[i] = o.clone(),
+            Err(i) => list.insert(i, o.clone()),
+        }
+        let cutoff = self.now - LAB_HISTORY;
+        list.retain(|x| x.interval_end >= cutoff);
+    }
+
     /// Handle one event.
     pub fn handle(&mut self, env: &EventEnvelope) -> EngineOutput {
         let started = std::time::Instant::now();
@@ -379,12 +547,14 @@ impl Engine {
         match &env.event {
             WeatherMachineEvent::WeatherObservation(o) => {
                 self.temps.apply_observation(&o.observation);
+                self.note_report(&o.observation);
                 if let Some(i) = self.location_index_for_station(o.observation.station()) {
                     self.evaluate_location(i, true, &mut out);
                 }
             }
             WeatherMachineEvent::WeatherCorrection(c) => {
                 self.temps.apply_correction(c);
+                self.note_report(&c.current);
                 self.corrections
                     .insert(c.current.key.station.clone(), self.now);
                 out.alerts.push(format!(
@@ -420,9 +590,11 @@ impl Engine {
                 }
             }
             WeatherMachineEvent::NowcastUpdate(n) => {
-                // Predictive input only: the latest reading per station. It
-                // never touches the observed high, the views or settlement.
+                // Predictive input only: the latest reading per station (and
+                // the lab's history of them). It never touches the observed
+                // high, the views or settlement.
                 let o = &n.observation;
+                self.note_reading(o);
                 let newer = self
                     .nowcasts
                     .get(&o.station)
@@ -477,6 +649,37 @@ impl Engine {
                 self.last_trades
                     .insert(t.trade.token.clone(), t.trade.clone());
             }
+            WeatherMachineEvent::TakerTrades(t) => {
+                // Who traded (the lab's flow rules): new trades of known
+                // markets, each once; their market is evaluated again.
+                let mut touched: Vec<LocationId> = Vec::new();
+                for trade in &t.trades {
+                    let Some(slug) = self.token_index.get(&trade.token) else {
+                        continue;
+                    };
+                    let (list, ids) = self.lab.takers.entry(slug.clone()).or_default();
+                    if !ids.insert(trade.id.clone()) {
+                        continue;
+                    }
+                    let at = list.partition_point(|x| x.at <= trade.at);
+                    list.insert(at, trade.clone());
+                    if let Some(m) = self.markets.get(slug)
+                        && !touched.contains(&m.location)
+                    {
+                        touched.push(m.location.clone());
+                    }
+                }
+                if self.cfg.lab.enabled {
+                    for loc in touched {
+                        if let Some(i) = self.location_index(&loc) {
+                            self.evaluate_location(i, false, &mut out);
+                        }
+                    }
+                }
+            }
+            WeatherMachineEvent::WalletScores(w) => {
+                self.lab.wallets = Some(WalletScores::from_event(w));
+            }
             WeatherMachineEvent::OrderUpdate(u) => self.apply_order_update(u, &mut out),
             WeatherMachineEvent::Timer(t) => match &t.kind {
                 TimerKind::Evaluate { location } => {
@@ -521,25 +724,31 @@ impl Engine {
                     && let Some(fill) = &ev.fill
                     && let Some(rec) = self.orders.get(&ev.update.client_order_id).cloned()
                 {
-                    let before = self.positions.total_realized_pnl();
-                    match self.positions.apply_fill(fill, &rec.instrument()) {
+                    let b = self.book_index(&rec.strategy);
+                    let now = self.now;
+                    let book = &mut self.paper[b];
+                    let before = book.positions.total_realized_pnl();
+                    match book.positions.apply_fill(fill, &rec.instrument()) {
                         Ok(()) => {
                             self.stats.fills_total += 1;
                             if fill.side == wm_core::market::Side::Buy {
-                                self.position_strategy
+                                book.position_strategy
                                     .entry(fill.token.clone())
                                     .or_insert(rec.strategy.clone());
-                                self.unwind.note_entry(&fill.token, fill.ts);
+                                if b == MAIN {
+                                    self.unwind.note_entry(&fill.token, fill.ts);
+                                }
                             }
-                            let delta = self.positions.total_realized_pnl() - before;
+                            let delta = book.positions.total_realized_pnl() - before;
                             if !delta.is_zero() {
-                                self.risk.record_realized_pnl(delta, self.now);
-                                self.realized_pnl_total += delta;
+                                book.risk.record_realized_pnl(delta, now);
+                                book.realized_pnl_total += delta;
                             }
-                            if self
-                                .positions
-                                .get(&fill.token)
-                                .is_some_and(|p| p.shares.is_zero())
+                            if b == MAIN
+                                && book
+                                    .positions
+                                    .get(&fill.token)
+                                    .is_some_and(|p| p.shares.is_zero())
                             {
                                 self.unwind.forget(&fill.token);
                             }
@@ -570,8 +779,10 @@ impl Engine {
             && rec.remaining().micros() > 0
         {
             let cost = notional(rec.limit_price, rec.remaining(), Rounding::Up);
-            self.risk
-                .release_daily_new_exposure(cost, rec.created_at, self.now);
+            let (created, b) = (rec.created_at, self.book_index(&rec.strategy));
+            self.paper[b]
+                .risk
+                .release_daily_new_exposure(cost, created, self.now);
         }
     }
 
@@ -698,6 +909,46 @@ impl Engine {
         })
     }
 
+    /// The lab's day-1 forecast for `date` (the configured product, else
+    /// the model's) and yesterday's error: its observed high (whole °C, the
+    /// location's view) minus its forecast maximum, tenths.
+    fn lab_forecast(
+        &self,
+        loc: &EngineLocation,
+        date: NaiveDate,
+    ) -> (Option<ForecastDay>, Option<i32>) {
+        let Some(product) = self
+            .cfg
+            .lab_forecast
+            .as_ref()
+            .or_else(|| self.model.forecast_product())
+        else {
+            return (None, None);
+        };
+        let key = (
+            loc.location.clone(),
+            product.provider.clone(),
+            product.model.clone(),
+            Some(product.lead_days),
+        );
+        let Some(stored) = self.forecasts.get(&key) else {
+            return (None, None);
+        };
+        let series = tenths_series(&stored.event);
+        let today = (stored.received_at >= product.usable_from(date, loc.timezone))
+            .then(|| ForecastDay::from_series(date, loc.timezone, &series, stored.received_at))
+            .flatten();
+        let error = date.pred_opt().and_then(|y| {
+            let fmax = ForecastDay::from_series(y, loc.timezone, &series, stored.received_at)?
+                .day_max_tenths()?;
+            let view = loc.confirmed_filter.map_or(ViewKind::All, view_of);
+            let (_, end) = local_day_bounds(y, loc.timezone);
+            let high = self.temps.day_state(&loc.station, y, view, end)?.high?;
+            Some(high.value.round_half_up_whole() * 10 - fmax)
+        });
+        (today, error)
+    }
+
     fn weather_status(&self, station: &StationId) -> WeatherStatus {
         let health = station_state(
             self.health
@@ -749,7 +1000,9 @@ impl Engine {
         let (views, _snaps, complete) = self.build_views(&loc, market.as_ref());
 
         let has_exposure = market.as_ref().is_some_and(|m| {
-            self.positions.for_event(&m.event_slug).next().is_some()
+            self.paper
+                .iter()
+                .any(|b| b.positions.for_event(&m.event_slug).next().is_some())
                 || self
                     .orders
                     .open_orders()
@@ -766,34 +1019,74 @@ impl Engine {
         self.views.insert(loc.location.clone(), views.clone());
         let Some(market) = market else { return };
 
-        let pending = self.orders.pending_tokens();
+        // Each book's live tokens: a strategy sees only its own book.
+        let pending: Vec<HashSet<TokenId>> = (0..self.paper.len())
+            .map(|b| self.book_pending(b))
+            .collect();
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut evaluations: Vec<BucketEvaluation> = Vec::new();
         if complete && !views.is_empty() {
             let model = Arc::clone(&self.model);
-            let ctx = StrategyContext {
-                now: self.now,
-                mode: self.cfg.mode,
-                location: &loc.location,
-                market: &market,
-                books: &self.books,
-                views: &views,
-                positions: &self.positions,
-                pending_tokens: &pending,
-                peak_times: model.peak_times(),
-                routine_minutes: &loc.routine_minutes,
-                nowcast: self.nowcasts.get(&loc.station),
+            let today = local_date(self.now, loc.timezone);
+            let (forecast, yesterday_error) = if self.cfg.lab.enabled {
+                self.lab_forecast(&loc, today)
+            } else {
+                (None, None)
+            };
+            let day_start = local_day_bounds(today, loc.timezone).0;
+            let reports: &[WxReport] = self.lab.reports.get(&loc.station).map_or(&[], |r| {
+                &r[r.partition_point(|x| x.observed_at < day_start)..]
+            });
+            let neighbours: Vec<NeighbourReadings<'_>> = loc
+                .neighbours
+                .iter()
+                .map(|n| NeighbourReadings {
+                    name: &n.name,
+                    bearing_deg: n.bearing_deg,
+                    readings: self.lab.knmi.get(&n.station).map_or(&[], Vec::as_slice),
+                })
+                .collect();
+            let lab = LabInputs {
+                knmi: self.lab.knmi.get(&loc.station).map_or(&[], Vec::as_slice),
+                neighbours: &neighbours,
+                reports,
+                forecast: forecast.as_ref(),
+                yesterday_error_tenths: yesterday_error,
+                takers: self
+                    .lab
+                    .takers
+                    .get(&market.event_slug)
+                    .map_or(&[], |(v, _)| v.as_slice()),
+                wallets: self.lab.wallets.as_ref(),
+                position: loc.position,
             };
             for s in self.strategies.iter_mut() {
                 if !s.enabled() {
                     continue;
                 }
+                let b = self.book_of.get(s.id()).copied().unwrap_or(MAIN);
+                let ctx = StrategyContext {
+                    now: self.now,
+                    mode: self.cfg.mode,
+                    location: &loc.location,
+                    market: &market,
+                    books: &self.books,
+                    views: &views,
+                    positions: &self.paper[b].positions,
+                    pending_tokens: &pending[b],
+                    peak_times: model.peak_times(),
+                    routine_minutes: &loc.routine_minutes,
+                    nowcast: self.nowcasts.get(&loc.station),
+                    lab: &lab,
+                };
                 let o = s.evaluate(&ctx);
                 proposals.extend(o.proposals);
                 evaluations.extend(o.evaluations);
             }
         }
         // Unwind runs even when views are incomplete (exits are risk-reducing).
+        // It looks after the main book only: lab strategies hold to
+        // settlement (L3 makes its own exit).
         let unwind_views = if views.is_empty() {
             Vec::new()
         } else {
@@ -801,11 +1094,11 @@ impl Engine {
         };
         proposals.extend(self.unwind.evaluate(
             &market,
-            &self.positions,
+            &self.paper[MAIN].positions,
             &self.books,
             &unwind_views,
-            &pending,
-            &self.position_strategy,
+            &pending[MAIN],
+            &self.paper[MAIN].position_strategy,
             self.now,
         ));
         self.evaluations
@@ -905,9 +1198,17 @@ impl Engine {
             rationale: p.rationale.clone(),
         };
         let weather = self.weather_status(&loc.station);
-        let open = self.orders.open_views();
+        // The proposal's own book: its positions, live orders and limits.
+        let b = self.book_index(&p.strategy);
+        let open = self.book_orders(b);
         let book = self.books.get(&intent.token);
         let top = book.map(|b| serde_json::json!({ "bid": b.best_bid().map(|l| l.price.to_string()), "ask": b.best_ask().map(|l| l.price.to_string()), "age_ms": b.age_ms(self.now) }));
+        let PaperBook {
+            positions,
+            position_strategy,
+            risk,
+            ..
+        } = &mut self.paper[b];
         let inputs = RiskInputs {
             now: self.now,
             mode: self.cfg.mode,
@@ -919,13 +1220,13 @@ impl Engine {
             market,
             book,
             portfolio: PortfolioView {
-                positions: &self.positions,
+                positions,
                 open_orders: &open,
                 markets: &self.markets,
-                position_strategy: &self.position_strategy,
+                position_strategy,
             },
         };
-        let decision = self.risk.evaluate(intent.clone(), &inputs);
+        let decision = risk.evaluate(intent.clone(), &inputs);
         let (approved, reasons) = match &decision {
             RiskDecision::Approved(_) => (true, Vec::new()),
             RiskDecision::Rejected { reasons, .. } => (
@@ -1007,16 +1308,26 @@ impl Engine {
 
     /// Settle an event at its final whole-degree value (backtests use the
     /// observed resolution value; paper/live use the venue's resolution).
+    /// Every book settles; the main book's P&L is returned (each lab
+    /// book's counts toward its own limits and totals).
     pub fn settle(&mut self, slug: &EventSlug, final_value: i32) -> Usd {
-        let pnl = self.positions.settle_event(slug, final_value);
-        if !pnl.is_zero() {
-            self.risk.record_realized_pnl(pnl, self.now);
-            self.realized_pnl_total += pnl;
+        let now = self.now;
+        let mut main = Usd::ZERO;
+        for (i, book) in self.paper.iter_mut().enumerate() {
+            let pnl = book.positions.settle_event(slug, final_value);
+            if !pnl.is_zero() {
+                book.risk.record_realized_pnl(pnl, now);
+                book.realized_pnl_total += pnl;
+            }
+            if i == MAIN {
+                main = pnl;
+            }
         }
         if let Some(m) = self.markets.get_mut(slug) {
             m.closed = true;
         }
-        pnl
+        self.lab.takers.remove(slug);
+        main
     }
 
     /// Rebuild earlier runs' paper book after a restart (see [`RestoreState`]):
@@ -1045,27 +1356,32 @@ impl Engine {
         }
         let today = now.date_naive();
         for r in &state.fills {
-            let before = self.positions.total_realized_pnl();
-            match self.positions.apply_fill(&r.fill, &r.instrument) {
+            let b = self.book_index(&r.strategy);
+            let book = &mut self.paper[b];
+            let before = book.positions.total_realized_pnl();
+            match book.positions.apply_fill(&r.fill, &r.instrument) {
                 Ok(()) => {
                     if r.fill.side == wm_core::market::Side::Buy {
-                        self.position_strategy
+                        book.position_strategy
                             .entry(r.fill.token.clone())
                             .or_insert(r.strategy.clone());
-                        self.unwind.note_entry(&r.fill.token, r.fill.ts);
+                        if b == MAIN {
+                            self.unwind.note_entry(&r.fill.token, r.fill.ts);
+                        }
                     }
-                    let delta = self.positions.total_realized_pnl() - before;
+                    let delta = book.positions.total_realized_pnl() - before;
                     if !delta.is_zero() {
-                        self.risk.record_realized_pnl(delta, r.fill.ts);
+                        book.risk.record_realized_pnl(delta, r.fill.ts);
                         if r.fill.ts.date_naive() == today {
-                            self.realized_pnl_total += delta;
+                            book.realized_pnl_total += delta;
                             summary.realized_today += delta;
                         }
                     }
-                    if self
-                        .positions
-                        .get(&r.fill.token)
-                        .is_some_and(|p| p.shares.is_zero())
+                    if b == MAIN
+                        && book
+                            .positions
+                            .get(&r.fill.token)
+                            .is_some_and(|p| p.shares.is_zero())
                     {
                         self.unwind.forget(&r.fill.token);
                     }
@@ -1076,9 +1392,16 @@ impl Engine {
                 )),
             }
         }
-        self.risk
+        self.paper[MAIN]
+            .risk
             .restore_daily_new_exposure(state.new_exposure_today, now);
-        for p in self.positions.open_positions() {
+        for (strategy, cost) in &state.lab_new_exposure_today {
+            if let Some(&b) = self.book_of.get(strategy) {
+                self.paper[b].risk.restore_daily_new_exposure(*cost, now);
+                summary.new_exposure_today += *cost;
+            }
+        }
+        for p in self.paper.iter().flat_map(|b| b.positions.open_positions()) {
             summary.open_positions += 1;
             summary.open_shares += p.shares;
             summary.open_cost += p.cost_basis;
@@ -1167,15 +1490,39 @@ impl Engine {
                 hint: self.hints.get(&loc.station).copied().unwrap_or_default(),
                 forecast: self.forecast_snapshot(loc, today),
                 nowcast: self.nowcasts.get(&loc.station).cloned(),
+                lab: self.cfg.lab.enabled.then(|| self.lab_snapshot(loc, today)),
             });
         }
-        let open = self.orders.open_views();
-        let exposure = self.risk.exposure(&PortfolioView {
-            positions: &self.positions,
+        let main = &self.paper[MAIN];
+        let open = self.book_orders(MAIN);
+        let exposure = main.risk.exposure(&PortfolioView {
+            positions: &main.positions,
             open_orders: &open,
             markets: &self.markets,
-            position_strategy: &self.position_strategy,
+            position_strategy: &main.position_strategy,
         });
+        let mut lab_books: Vec<LabBookSnapshot> = self
+            .book_of
+            .iter()
+            .map(|(strategy, &b)| {
+                let book = &self.paper[b];
+                let open = self.book_orders(b);
+                LabBookSnapshot {
+                    strategy: strategy.clone(),
+                    positions: book.positions.iter().cloned().collect(),
+                    exposure: book.risk.exposure(&PortfolioView {
+                        positions: &book.positions,
+                        open_orders: &open,
+                        markets: &self.markets,
+                        position_strategy: &book.position_strategy,
+                    }),
+                    daily_new_exposure: book.risk.daily_new_exposure(),
+                    daily_realized_pnl: book.risk.daily_realized_pnl(),
+                    realized_pnl_total: book.realized_pnl_total,
+                }
+            })
+            .collect();
+        lab_books.sort_by_key(|b| wm_strategy::lab::family_of(b.strategy.as_str()));
         EngineSnapshot {
             now: self.now,
             mode: self.cfg.mode,
@@ -1187,14 +1534,75 @@ impl Engine {
             stats: self.stats.clone(),
             locations,
             health: self.health.values().cloned().collect(),
-            positions: self.positions.iter().cloned().collect(),
-            orders: self.orders.recent(50).into_iter().cloned().collect(),
+            positions: main.positions.iter().cloned().collect(),
+            orders: self.orders.recent(100).into_iter().cloned().collect(),
             exposure,
-            risk: self.risk.config().clone(),
-            daily_new_exposure: self.risk.daily_new_exposure(),
-            daily_realized_pnl: self.risk.daily_realized_pnl(),
-            realized_pnl_total: self.realized_pnl_total,
+            risk: main.risk.config().clone(),
+            daily_new_exposure: main.risk.daily_new_exposure(),
+            daily_realized_pnl: main.risk.daily_realized_pnl(),
+            realized_pnl_total: main.realized_pnl_total,
             decisions: self.decisions.iter().rev().take(100).cloned().collect(),
+            lab_books,
+        }
+    }
+
+    /// The lab's inputs at a location, for the dashboard.
+    fn lab_snapshot(&self, loc: &EngineLocation, today: NaiveDate) -> LabInputsSnapshot {
+        let knmi = self
+            .lab
+            .knmi
+            .get(&loc.station)
+            .map_or(&[][..], Vec::as_slice);
+        let latest = knmi.last();
+        let radiation = latest.and_then(|r| r.radiation);
+        let clear_sky_index = match (latest, radiation, loc.position) {
+            (Some(r), Some(v), Some((lat, lon))) => {
+                let cs = wm_strategy::lab::solar::clear_sky_ghi(
+                    r.interval_end - Duration::minutes(5),
+                    lat,
+                    lon,
+                );
+                (cs >= 150.0).then(|| f64::from(v) / cs)
+            }
+            _ => None,
+        };
+        let day_start = local_day_bounds(today, loc.timezone).0;
+        let reports = self.lab.reports.get(&loc.station).map_or(&[][..], |r| {
+            &r[r.partition_point(|x| x.observed_at < day_start)..]
+        });
+        let (forecast, yesterday_error) = self.lab_forecast(loc, today);
+        let taker_trades = self
+            .today_market(loc)
+            .and_then(|m| self.lab.takers.get(&m.event_slug).map(|(v, _)| v.len()))
+            .unwrap_or(0);
+        let (skilled, losing) = self.lab.wallets.as_ref().map_or((0, 0), |w| w.counts(2.0));
+        LabInputsSnapshot {
+            knmi_readings: knmi.len(),
+            radiation_wm2: radiation,
+            clear_sky_index,
+            neighbours: loc
+                .neighbours
+                .iter()
+                .map(|n| {
+                    let r = self.lab.knmi.get(&n.station).and_then(|v| v.last());
+                    NeighbourSnapshot {
+                        name: n.name.clone(),
+                        bearing_deg: n.bearing_deg,
+                        interval_end: r.map(|r| r.interval_end),
+                        mean_tenths: r.and_then(|r| r.mean).map(|m| m.tenths()),
+                    }
+                })
+                .collect(),
+            reports: reports.len(),
+            latest_weather: reports
+                .last()
+                .map(|r| format!("{} UTC: {}", r.observed_at.format("%H:%M"), r.wx.summary())),
+            forecast_day_max_tenths: forecast.as_ref().and_then(ForecastDay::day_max_tenths),
+            yesterday_error_tenths: yesterday_error,
+            taker_trades,
+            wallet_days: self.lab.wallets.as_ref().map(|w| w.days),
+            wallets_skilled: skilled,
+            wallets_losing: losing,
         }
     }
 }

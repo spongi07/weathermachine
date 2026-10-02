@@ -19,6 +19,8 @@ use crate::dto::{self, DtoInputs};
 use crate::http::Publisher;
 use crate::setup::{self, ModelLoad, Providers};
 use crate::training::{self, Progress, TrainPlan};
+
+mod lab;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -413,6 +415,7 @@ async fn discovery_loop(
     events: mpsc::Sender<EventEnvelope>,
     assets: watch::Sender<Vec<TokenId>>,
     today_tokens: watch::Sender<Vec<TokenId>>,
+    today_markets: watch::Sender<Vec<DailyTemperatureMarket>>,
     side: SharedSide,
     clock: Arc<dyn Clock>,
     mut shutdown: watch::Receiver<bool>,
@@ -512,6 +515,19 @@ async fn discovery_loop(
             }
         });
         today_tokens.send_replace(today.into_iter().collect());
+        let todays: Vec<DailyTemperatureMarket> = known
+            .values()
+            .filter(|m| !m.closed && m.local_date == local_date(now, m.timezone))
+            .cloned()
+            .collect();
+        today_markets.send_if_modified(|v| {
+            if *v == todays {
+                false
+            } else {
+                *v = todays;
+                true
+            }
+        });
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {}
             r = shutdown.changed() => { if r.is_err() || *shutdown.borrow() { return; } }
@@ -874,6 +890,8 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     // -- KNMI ten-minute readings (predictive input for strategy K) ----------------------
     match setup::knmi_client(&cfg, &providers) {
         Some(client) => {
+            let lab = &cfg.file.strategies.lab;
+            let lab_inputs = &cfg.file.lab;
             let targets: Vec<KnmiTarget> = cfg
                 .locations
                 .iter()
@@ -881,6 +899,22 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                     Some(KnmiTarget {
                         station: setup::location_ids(l).ok()?.station,
                         location: setup::knmi_location(&cfg, l)?,
+                        radiation: (lab.enabled
+                            && !lab_inputs.radiation_parameter.trim().is_empty())
+                        .then(|| lab_inputs.radiation_parameter.trim().to_owned()),
+                        history: if lab.enabled {
+                            Duration::minutes(lab_inputs.knmi_history_minutes)
+                        } else {
+                            Duration::minutes(cfg.file.knmi.lookback_minutes)
+                        },
+                        neighbours: setup::lab_neighbours(&cfg, l)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|n| KnmiNeighbour {
+                                location: wm_weather::knmi::wigos_id(n.station.as_str()),
+                                station: n.station,
+                            })
+                            .collect(),
                     })
                 })
                 .collect();
@@ -897,18 +931,33 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 )));
             }
         }
-        None if cfg.file.strategies.knmi_nowcast.enabled => with_side(&side, |s| {
-            s.alert(
-                "warning",
-                "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then K stays idle",
-            )
-        }),
-        None => {}
+        None => {
+            let k = cfg.file.strategies.knmi_nowcast.enabled;
+            let lab = wm_strategy::lab::KNMI_FAMILIES
+                .iter()
+                .any(|f| cfg.file.strategies.lab.runs(*f));
+            let message = match (k, lab) {
+                (true, false) => Some(
+                    "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then K stays idle",
+                ),
+                (true, true) => Some(
+                    "strategy K and the lab's KNMI rules (L1–L7, L18, L21, L23–L25) need KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then they stay idle (L3 enters as F does, without its exit)",
+                ),
+                (false, true) => Some(
+                    "the lab's KNMI rules (L1–L7, L18, L21, L23–L25) need KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then they stay idle (L3 enters as F does, without its exit)",
+                ),
+                (false, false) => None,
+            };
+            if let Some(m) = message {
+                with_side(&side, |s| s.alert("warning", m));
+            }
+        }
     }
 
     // -- Markets: discovery, stream, REST fallback --------------------------------------
     let (assets_tx, assets_rx) = watch::channel(Vec::<TokenId>::new());
     let (today_tx, today_rx) = watch::channel(Vec::<TokenId>::new());
+    let (today_markets_tx, today_markets_rx) = watch::channel(Vec::<DailyTemperatureMarket>::new());
     let mut stream_status: Option<watch::Receiver<StreamStatus>> = None;
     if let Some(f) = providers.fetcher("polymarket_gamma") {
         let specs = cfg
@@ -924,12 +973,71 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             events_tx.clone(),
             assets_tx,
             today_tx,
+            today_markets_tx,
             Arc::clone(&side),
             Arc::clone(&clock),
             shutdown.clone(),
         )));
     } else {
         tracing::warn!("polymarket_gamma disabled: no markets will be discovered");
+    }
+
+    // -- The strategy lab's flow inputs: today's takers and their records ----------------
+    let lab_cfg = &cfg.file.strategies.lab;
+    let flow_rules = [18u8, 19, 20, 21].iter().any(|f| lab_cfg.runs(*f));
+    let wallet_rules = [19u8, 20].iter().any(|f| lab_cfg.runs(*f));
+    match (providers.fetcher("polymarket_data"), flow_rules) {
+        (Some(f), true) => {
+            let data = || {
+                wm_polymarket::DataApiClient::new(
+                    Arc::clone(f),
+                    &cfg.file.providers.polymarket_data.base_url,
+                )
+            };
+            tasks.push(tokio::spawn(lab::taker_loop(
+                data(),
+                today_markets_rx,
+                std::time::Duration::from_secs(cfg.file.lab.taker_poll_seconds.max(10)),
+                events_tx.clone(),
+                Arc::clone(&side),
+                Arc::clone(&clock),
+                shutdown.clone(),
+            )));
+            if let (true, Some(g)) = (wallet_rules, providers.fetcher("polymarket_gamma")) {
+                let data_dir = std::path::PathBuf::from(&cfg.file.model.auto_train.data_dir);
+                let sources = cfg
+                    .locations
+                    .iter()
+                    .map(|l| {
+                        let spec = setup::market_spec(l)?;
+                        Ok(lab::WalletSource {
+                            cache_dir: data_dir
+                                .join("research")
+                                .join("polymarket")
+                                .join(spec.station.as_str()),
+                            spec,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                tasks.push(tokio::spawn(lab::wallet_loop(
+                    GammaClient::new(Arc::clone(g), &cfg.file.providers.polymarket_gamma.base_url),
+                    data(),
+                    sources,
+                    cfg.file.lab.wallet_history_days,
+                    events_tx.clone(),
+                    Arc::clone(&side),
+                    Arc::clone(&clock),
+                    shutdown.clone(),
+                )));
+            }
+        }
+        (None, true) => with_side(&side, |s| {
+            s.alert(
+                "warning",
+                "the strategy lab's flow rules (L18–L21) need the Data API: providers.polymarket_data is off, so they stay idle",
+            )
+        }),
+        _ => drop(today_markets_rx),
     }
     if let Some(gate) = providers.gate("polymarket_ws") {
         let stream = MarketStream::new(
@@ -1415,18 +1523,45 @@ async fn model_maintenance_loop(
     }
 }
 
-/// A station whose KNMI ten-minute readings are polled.
+/// A station whose KNMI readings are polled, with the neighbours the lab
+/// reads around it.
 #[derive(Debug, Clone)]
 struct KnmiTarget {
     station: StationId,
     /// EDR location id (WIGOS).
     location: String,
+    /// KNMI's global-radiation parameter read along (the lab's L25).
+    radiation: Option<String>,
+    /// The readings of this long before a start are read at the first poll.
+    history: Duration,
+    /// The lab's upwind stations: polled once per new reading of `station`.
+    neighbours: Vec<KnmiNeighbour>,
 }
 
-/// Polls each station's latest KNMI ten-minute readings every `poll` and
-/// hands the newest to the engine when it is newer than the last one sent.
-/// Predictive input only: failures mean strategy K waits; they are alerted
-/// once until recovery.
+#[derive(Debug, Clone)]
+struct KnmiNeighbour {
+    station: StationId,
+    location: String,
+}
+
+/// Readings newer than the last one handed on, oldest first, with a
+/// temperature (the newest per station decides what is new).
+fn new_readings(
+    readings: Vec<wm_core::weather::TenMinuteObservation>,
+    last: Option<DateTime<Utc>>,
+) -> Vec<wm_core::weather::TenMinuteObservation> {
+    readings
+        .into_iter()
+        .filter(|r| r.mean.is_some() && last.is_none_or(|l| r.interval_end > l))
+        .collect()
+}
+
+/// Polls each station's KNMI ten-minute readings every `poll` and hands
+/// every reading newer than the last one to the engine, oldest first (at
+/// the first poll the target's history: the lab's rules look back up to 90
+/// minutes). After a new reading of a station, its neighbours are read once.
+/// Predictive input only: failures mean strategy K and the lab's KNMI rules
+/// wait; they are alerted once until recovery.
 #[allow(clippy::too_many_arguments)]
 async fn knmi_loop(
     client: KnmiTenMinute,
@@ -1438,13 +1573,26 @@ async fn knmi_loop(
     clock: Arc<dyn Clock>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let wait = std::time::Duration::from_secs(20);
     let mut failing = false;
     let mut last_sent: HashMap<StationId, DateTime<Utc>> = HashMap::new();
+    let mut neighbour_failing: HashMap<StationId, bool> = HashMap::new();
     loop {
         for t in &targets {
             let now = clock.now();
+            let from = now
+                - if last_sent.contains_key(&t.station) {
+                    lookback
+                } else {
+                    t.history.max(lookback)
+                };
             let fetched = tokio::select! {
-                r = client.fetch(&t.station, &t.location, now - lookback, now, std::time::Duration::from_secs(20), 1) => r,
+                r = async {
+                    match &t.radiation {
+                        Some(qg) => client.fetch_with_radiation(&t.station, &t.location, from, now, qg, wait, 1).await,
+                        None => client.fetch(&t.station, &t.location, from, now, wait, 1).await,
+                    }
+                } => r,
                 _ = shutdown.changed() => return,
             };
             match fetched {
@@ -1455,21 +1603,16 @@ async fn knmi_loop(
                             s.alert("info", "KNMI ten-minute readings available again")
                         });
                     }
-                    let Some(newest) = readings.into_iter().rev().find(|r| r.mean.is_some()) else {
+                    let last = last_sent.get(&t.station).copied();
+                    let fresh = new_readings(readings, last);
+                    let Some(newest) = fresh.last().cloned() else {
                         continue;
                     };
-                    if last_sent
-                        .get(&t.station)
-                        .is_some_and(|x| *x >= newest.interval_end)
-                    {
-                        continue;
-                    }
+                    last_sent.insert(t.station.clone(), newest.interval_end);
                     // The first reading after a start was published before
                     // it: its delay says when the service started, not how
                     // fast KNMI is.
-                    let first = last_sent
-                        .insert(t.station.clone(), newest.interval_end)
-                        .is_none();
+                    let first = last.is_none();
                     let c = |v: Option<wm_core::units::TempC>| {
                         v.map_or_else(
                             || "—".to_owned(),
@@ -1481,6 +1624,8 @@ async fn knmi_loop(
                         interval_end = %newest.interval_end,
                         mean = %c(newest.mean),
                         max = %c(newest.max),
+                        radiation_wm2 = ?newest.radiation,
+                        earlier = fresh.len() - 1,
                         delay_minutes = newest.delay_minutes(),
                         "{}",
                         if first {
@@ -1489,15 +1634,67 @@ async fn knmi_loop(
                             "KNMI ten-minute reading"
                         }
                     );
-                    let env = EventEnvelope::new(
-                        clock.now(),
-                        EventSource::Live,
-                        WeatherMachineEvent::NowcastUpdate(NowcastEvent {
-                            observation: newest,
-                        }),
-                    );
-                    if events.send(env).await.is_err() {
-                        return;
+                    for r in fresh {
+                        let env = EventEnvelope::new(
+                            clock.now(),
+                            EventSource::Live,
+                            WeatherMachineEvent::NowcastUpdate(NowcastEvent { observation: r }),
+                        );
+                        if events.send(env).await.is_err() {
+                            return;
+                        }
+                    }
+                    for n in &t.neighbours {
+                        let now = clock.now();
+                        let last = last_sent.get(&n.station).copied();
+                        let from = now
+                            - if last.is_some() {
+                                lookback
+                            } else {
+                                t.history.max(lookback)
+                            };
+                        let fetched = tokio::select! {
+                            r = client.fetch(&n.station, &n.location, from, now, wait, 1) => r,
+                            _ = shutdown.changed() => return,
+                        };
+                        match fetched {
+                            Ok(readings) => {
+                                neighbour_failing.insert(n.station.clone(), false);
+                                let fresh = new_readings(readings, last);
+                                if let Some(newest) = fresh.last() {
+                                    last_sent.insert(n.station.clone(), newest.interval_end);
+                                }
+                                for r in fresh {
+                                    let env = EventEnvelope::new(
+                                        clock.now(),
+                                        EventSource::Live,
+                                        WeatherMachineEvent::NowcastUpdate(NowcastEvent {
+                                            observation: r,
+                                        }),
+                                    );
+                                    if events.send(env).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(station = %n.station, error = %e, "KNMI neighbour readings unavailable");
+                                if !neighbour_failing
+                                    .insert(n.station.clone(), true)
+                                    .unwrap_or(false)
+                                {
+                                    with_side(&side, |s| {
+                                        s.alert(
+                                            "warning",
+                                            format!(
+                                                "KNMI readings of neighbour {} unavailable ({e}); the lab's L24 reads the others",
+                                                n.station
+                                            ),
+                                        )
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -1508,7 +1705,7 @@ async fn knmi_loop(
                             s.alert(
                                 "warning",
                                 format!(
-                                    "KNMI ten-minute readings unavailable ({e}); strategy K waits"
+                                    "KNMI ten-minute readings unavailable ({e}); strategy K and the lab's KNMI rules wait"
                                 ),
                             )
                         });
@@ -1728,7 +1925,12 @@ impl EngineLoopState {
                     a.clone(),
                 );
             }
-            for t in &out.trades {
+            // The lab's fills show on its own pages, not among the alerts.
+            for t in out
+                .trades
+                .iter()
+                .filter(|t| !wm_strategy::lab::is_lab_id(t.strategy.as_str()))
+            {
                 st.alert(
                     "info",
                     format!(

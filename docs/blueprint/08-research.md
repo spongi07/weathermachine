@@ -272,7 +272,7 @@ the days downloaded so far are studied.
   strategies (L1–L25, [reasoning and sources](../research/strategy-lab.md))
   on the same decisions and tape with G–K's fill rules, each with a variant
   or a control (51 rules), $20 a trade (L3 at F's 100 shares). Its own
-  inputs: the METAR's weather groups (`wm_weather::metar_wx`: wind,
+  inputs: the METAR's weather groups (`wm_core::metar_wx`: wind,
   visibility, present and recent weather, clouds, QNH, TREND) from the
   archived raw reports; the day-1 forecast also when the model does not use
   it; KNMI's global radiation and three neighbouring stations' temperatures
@@ -284,7 +284,12 @@ the days downloaded so far are studied.
   replayed. **Out of sample** as for G–K, per family; the last line names
   the families whose chosen rule held up on the later days (interval above
   zero over at least five trades on three days). Nothing in the lab trades
-  live.
+  money; since 2 October 2026 the same rules (`wm_strategy::lab`, with the
+  replay's thresholds; the clear-sky model, the takers' scores and the
+  names are shared code) also run in the live service as paper strategies
+  on books of their own
+  ([strategy lab §7](../research/strategy-lab.md#7-paper-trading-live-from-2-october-2026),
+  [§27j](06-strategy.md#27j-strategy-lab--l1l25-in-paper)).
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 

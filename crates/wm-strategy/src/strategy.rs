@@ -6,6 +6,7 @@
 //! They cannot place orders — proposals go through the risk engine.
 
 use crate::ev::{break_even_probability, ev_per_share};
+use crate::lab::LabInputs;
 use crate::peak::PeakAssessment;
 use crate::peak_times::PeakTimes;
 use crate::probability::IncrementDistribution;
@@ -51,6 +52,9 @@ pub struct StrategyContext<'a> {
     /// The station's latest ten-minute reading from a faster source than
     /// its METAR (KNMI), if one arrived.
     pub nowcast: Option<&'a TenMinuteObservation>,
+    /// What only the strategy lab's paper strategies read
+    /// ([`LabInputs::EMPTY`] where there is none).
+    pub lab: &'a LabInputs<'a>,
 }
 
 /// A strategy's trade proposal (becomes a `TradeIntent` after id assignment).

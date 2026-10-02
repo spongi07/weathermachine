@@ -121,6 +121,7 @@ intervals, never on win rate.
 | J | morning maker (§27h) | off (2 Oct) | replay 2 Oct: −$197.52 over 250 fills; its best variant lost $171.88 out of sample |
 | K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: every trade won (4 of 4, +$81.10); out of sample too |
 | U | unwind (§28) | **on** | the exit engine; leaves G–K alone |
+| L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`) | built on 2 Oct on request, so their live record grows beside the replay's; none trades money |
 
 A strategy switched off is not shown on the dashboard; its code stays,
 because `research market` replays A, B, E and F as baselines, and
@@ -762,6 +763,69 @@ the views or settlement.
 * `wm-app`: configuration validation of G–K (ranges, windows, caps each
   order must fit), the shipped values, `research market` with a KNMI mock
   (download, weekly cache, report section).
+
+## 27j. STRATEGY LAB — L1–L25 in paper
+
+**PURPOSE.** Let the strategy lab's 25 families
+([reasoning and replay](../research/strategy-lab.md)) build a live record
+beside the replay's — paper only, without touching A–K.
+
+**RULES** (`wm_strategy::lab`). `LabStrategy::new(family, cfg, f)` for
+families 1–25 (`IDS`: `L1_shielded_maker` … `L25_radiation`, letters `L1`
+… `L25`), dispatched to `knmi.rs` (L1–L7), `metar.rs` (L8–L13, L23),
+`forecast.rs` (L14–L17), `flow.rs` (L18–L22) and `sky.rs` (L24, L25) with
+the thresholds of the replay's main rules and variants
+([§3 of the lab](../research/strategy-lab.md#3-the-25-strategies)).
+`day.rs` holds what every family reads off the context and its three ways
+to trade: a taker buy at the ask (fill-and-kill, shares for the $20
+notional, no more than the ask offers, at least the market's minimum), a
+resting NO bid (good-till-date, one tick inside the spread unless the rule
+fixes the price) and L3's sale of its YES at the bid. `[strategies.lab]`:
+`enabled`, `disabled` and `variants` (family codes), the notional and the
+quotes' timing; `[strategies.lab.risk]`: each book's limits.
+
+**INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
+readings of the last 36 hours, the neighbours' readings with their
+bearings, today's METARs with their weather groups, the day-1 forecast
+(also when the model does not use it) and yesterday's error, today's taker
+trades, the takers' scores and the location's position. The engine keeps
+them (`LabState`) from `NowcastUpdate` (station and neighbours),
+`WeatherObservation`, `ForecastUpdate`, `TakerTrades` (each trade once, by
+id) and `WalletScores` events (where they come from:
+[ingestion](04-ingestion.md), `runtime/lab.rs`). A–K never read them.
+
+**OWN BOOKS.** The engine keeps a `PaperBook` per lab strategy beside the
+main one (A–K and the unwind engine): its positions, the strategy behind
+each, a `RiskEngine` with `lab_risk_config` (§30) and its realized P&L. A
+lab strategy is evaluated against its own book's positions and live
+orders, its proposals pass its own book's gates, its fills land in its own
+book, and settlement settles every book (the engine's settlement P&L stays
+the main book's). The unwind engine sees the main book only. The snapshot
+carries each book (`lab_books`) and the lab's inputs per location; the
+dashboard shows them in the lab panel and keeps the KPI strip, positions
+and orders to the main book.
+
+**FAIL CLOSED.** A missing input is a blocker on the dashboard, never a
+guess: no KNMI reading or one older than 15 minutes, no forecast, no
+takers' records yet. The main gates (kill switch, storage, weather health,
+data age, prices) gate every book.
+
+**TESTING.**
+* `wm-strategy/tests/lab.rs`: every family's signal and order (price,
+  size, time in force) in a scenario built for it, its variant, and the
+  condition that breaks it; the taker size and one trade a day; a stale
+  reading or book; every family without its inputs does nothing.
+* `wm-backtest/tests/lab_session.rs`: K, L2 and L7 buy the same NO in the
+  shared session loop, each on its own book, and settle apart; a restart
+  gives each fill back to its own book; yesterday's forecast error and
+  each taker trade counted once.
+* `wm-app`: `[strategies.lab]` and `[lab]` validation
+  (`lab_settings_are_validated`: unknown codes, stakes the books would
+  refuse, L3's stake against F's shares, timings, neighbours), the shipped
+  values and older files without the sections (lab off); the catalog lists
+  L1–L25 after the unwind engine; `/lite` and `report paper` keep the lab's
+  books apart (`lab_fills_are_reported_apart_from_the_main_book`); the
+  taker trades' hashing and ids and the scoring schedule (`runtime/lab.rs`).
 
 ## 28. UnwindEngine
 

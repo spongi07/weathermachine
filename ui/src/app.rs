@@ -2,7 +2,7 @@
 
 use crate::chart::{distribution_bars, temperature_chart};
 use crate::fmt::{self, DASH};
-use crate::strategies::{ReportsPanel, StrategiesPanel, StrategyPage};
+use crate::strategies::{LabPanel, ReportsPanel, StrategiesPanel, StrategyPage};
 use leptos::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -191,6 +191,7 @@ fn Dashboard(snap: Snap) -> impl IntoView {
     view! {
         <KpiStrip snap=snap />
         <StrategiesPanel snap=snap />
+        <LabPanel snap=snap />
         <Locations snap=snap />
         <div class="grid-2">
             <RiskPanel snap=snap />
@@ -332,7 +333,11 @@ fn KpiStrip(snap: Snap) -> impl IntoView {
             s.as_ref().map(|s| {
                 (
                     s.risk.clone(),
-                    s.positions.iter().filter(|p| p.shares > 0.0).count(),
+                    // The main book's: the lab's are counted on its panel.
+                    s.positions
+                        .iter()
+                        .filter(|p| p.shares > 0.0 && p.strategy.is_empty())
+                        .count(),
                     s.engine.approvals_total,
                     s.engine.rejections_total,
                     s.engine.fills_total,
@@ -713,7 +718,7 @@ fn RiskPanel(snap: Snap) -> impl IntoView {
             let events = if r.per_event.is_empty() {
                 view! { <tr><td colspan="2" class="empty">"No open exposure."</td></tr> }.into_any()
             } else {
-                r.per_event.iter().map(|(e, u)| view! { <tr><td class="small">{e.clone()}</td><td class="num">{fmt::usd(*u)}</td></tr> }).collect::<Vec<_>>().into_any()
+                r.per_event.iter().map(|(e, u)| view! { <tr><td class="small wrap">{e.clone()}</td><td class="num">{fmt::usd(*u)}</td></tr> }).collect::<Vec<_>>().into_any()
             };
             let blocked = r.checks.iter().filter(|c| !c.ok).count();
             view! {
@@ -792,8 +797,25 @@ fn ProvidersPanel(snap: Snap) -> impl IntoView {
 
 #[component]
 fn Blotter(snap: Snap) -> impl IntoView {
+    // The main book's positions and orders; the lab's are on its panel and
+    // its strategies' pages.
     let data = Memo::new(move |_| {
-        snap.with(|s| s.as_ref().map(|s| (s.positions.clone(), s.orders.clone())))
+        snap.with(|s| {
+            s.as_ref().map(|s| {
+                (
+                    s.positions
+                        .iter()
+                        .filter(|p| p.strategy.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    s.orders
+                        .iter()
+                        .filter(|o| !s.is_lab(&o.strategy))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+        })
     });
     move || {
         data.get().map(|(positions, orders)| {

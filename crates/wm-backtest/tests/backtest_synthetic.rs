@@ -89,6 +89,8 @@ fn config() -> BacktestConfig {
                 peak: PeakConfig::default(),
                 confirmed_filter: Some(ObservationFilter::AllRows),
                 routine_minutes: vec![25, 55],
+                position: None,
+                neighbours: Vec::new(),
             }],
             risk: RiskConfig {
                 max_spread: wm_core::units::Price::parse("0.05").unwrap(),
@@ -111,6 +113,8 @@ fn config() -> BacktestConfig {
             middle_fade: wm_strategy::MiddleFadeConfig::absent(),
             morning_maker: wm_strategy::MorningMakerConfig::absent(),
             knmi_nowcast: wm_strategy::KnmiNowcastConfig::absent(),
+            lab: wm_strategy::LabConfig::absent(),
+            lab_forecast: None,
             unwind: UnwindConfig::default(),
             evaluate_on_book_updates: true,
             decision_log_capacity: 1000,

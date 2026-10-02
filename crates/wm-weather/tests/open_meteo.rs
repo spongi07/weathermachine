@@ -56,7 +56,8 @@ async fn requests_the_fixed_lead_series_in_utc() {
         .and(query_param("hourly", "temperature_2m_previous_day1"))
         .and(query_param("models", "gfs_global"))
         .and(query_param("timezone", "GMT"))
-        .and(query_param("start_date", "2026-06-30"))
+        // Two UTC days back: yesterday's local day for the lab's forecast error.
+        .and(query_param("start_date", "2026-06-29"))
         .and(query_param("end_date", "2026-07-02"))
         .respond_with(ResponseTemplate::new(200).set_body_string(body(
             &["2026-07-01T12:00", "2026-07-01T13:00", "2026-07-01T14:00"],

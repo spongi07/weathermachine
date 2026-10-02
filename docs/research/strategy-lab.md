@@ -14,9 +14,11 @@ sky, the temperatures of upwind stations, and every taker's track record on
 the days before. They are built as a **lab**: `weather-machine research
 market` replays all of them at traded prices on the settled Amsterdam
 markets, each with a variant or a control, and judges each family out of
-sample. None trades live. A family that holds up on days it was not chosen
-on, and again on the next run's new days, goes live under its own letter
-with its own tests, as G–K did.
+sample. Since 2 October 2026 all 25 also run in the live service as
+**paper strategies**, each on a paper book of its own, so they never block
+A–K or each other (§7). None trades money: a family that holds up on days
+it was not chosen on, again on the next run's new days and in its paper
+record is a candidate, nothing more.
 
 ## 1. What others do — and what is left
 
@@ -60,7 +62,7 @@ G–K ([§9 of the edge research](edge-research.md#9-october-2026-five-new-strat
   one replayed; yesterday's forecast error only once yesterday is over; the
   forecast only from its knowledge time; F's exit only after its fill.
 * **Inputs.** The METAR's weather groups are parsed from the archived raw
-  reports ([`metar_wx`](../../crates/wm-weather/src/metar_wx.rs)); the day-1
+  reports ([`metar_wx`](../../crates/wm-core/src/metar_wx.rs)); the day-1
   forecast is read even when the installed model does not use it; with
   `WM_KNMI_API_KEY` set, KNMI's global radiation at Schiphol and the
   temperatures of Voorschoten (06215), De Bilt (06260) and Berkhout (06249)
@@ -318,8 +320,8 @@ families held up. To take one live:
    least five trades on three days) — and the main rule was not far
    behind;
 2. it holds up again on the next run's new days;
-3. it is built as a live strategy with its own tests and runs in paper
-   (`weather-machine report paper`) before any money.
+3. its paper record (§7, `weather-machine report paper`) agrees — before
+   any money, which would need its own decision and its own letter.
 
 ## 5. Caveats
 
@@ -358,10 +360,101 @@ days from 1 August, on which no rule was chosen.
 L2, L5, L6, L8, L11, L13, L15, L16, L22 and L25 traded too rarely to say
 anything (L11 and L13 wait for fog and fronts: autumn and winter).
 
-**Decisions.** Nothing from the lab goes live. L4 and L14's main rule get
+**Decisions.** Nothing from the lab trades money. L4 and L14's main rule get
 their confirmation on days no rule was chosen on: after about 20 new
 settled days, `research market --from 2026-10-02` replays only those days,
 and a rule that does not earn there is dropped. What works, here and in
 G–K, is one thing: KNMI's ten-minute readings ahead of the METAR (K, L7,
 L18, L1's shield). The market prices public weather information well; the
 edge is being earlier.
+
+On the operator's request the same day, all 25 families were built as
+paper strategies (§7): their live record now grows beside the replay's, at
+no cost and without touching A–K.
+
+## 7. Paper trading (live, from 2 October 2026)
+
+All 25 families run in the live service — **paper only**, like everything
+the service trades. They see the same markets, books, reports and KNMI
+readings as A–K, at the same moments, and their record is kept apart.
+
+**Own books.** Each lab strategy trades a paper book of its own: its
+positions (and the order that opened each), its live orders, its risk
+limits and counters and its realized P&L. A lab trade never counts toward
+the main book's caps (A–K and the unwind engine) or another lab strategy's,
+so none of them can block another: K and L7 may hold the same NO at once,
+each in its own book
+([`lab_session.rs`](../../crates/wm-backtest/tests/lab_session.rs)). The
+unwind engine exits the main book's positions only. A restart gives each
+fill back to the book of the strategy whose order it filled, with each lab
+strategy's new exposure of the day.
+
+**Rules.** Every threshold is the replay's main rule (§3): the same time
+windows, price bands and win probabilities
+([`wm-strategy/src/lab`](../../crates/wm-strategy/src/lab/mod.rs)).
+`variants = ["L2"]` runs a family's second rule instead, `disabled =
+["L19"]` switches a family off (`[strategies.lab]`). How they trade:
+
+* takers buy at the ask, fill-and-kill: shares for the notional ($20) at
+  the ask, no more than the book offers at that price, at least the
+  market's minimum order;
+* makers (L1, L2, L20, L22) rest a NO bid good-till-date — one tick inside
+  the NO book's spread (L20: offering the YES one tick under the price the
+  losing taker paid) — that expires as replayed and is held to settlement
+  once filled; paper fills follow the simulator's maker rule (a later trade
+  print at or through the price, after the queue ahead);
+* L3 enters as F does (F's slot, filters and 100 shares at up to 0.95) and
+  sells the YES at the bid, fill-and-kill, when KNMI's reading says the
+  next METAR will kill its bucket;
+* the rules that took one trade a day in the replay take one a day here,
+  and no rule holds a token twice.
+
+**Risk** (`[strategies.lab.risk]`, per book). $25 an order ($100 for L3),
+$120 in open positions and live orders, $120 of new exposure and $100 of
+loss a day, books up to 0.10 wide, 10 orders a minute. Everything else is
+the main `[risk]`: data freshness, prices 0.01–0.99, the kill switch, a
+stale or throttled weather source.
+
+**Inputs** (`[lab]`).
+
+| input | source | read by |
+|---|---|---|
+| Schiphol's ten-minute readings (180 minutes back at start) | KNMI EDR, `WM_KNMI_API_KEY` | L1, L2, L3's exit, L4–L7, L18, L21, L23, L24 |
+| global radiation `qg` against the clear sky | the same request | L25 |
+| Voorschoten, De Bilt, Berkhout | one KNMI request each after every new reading | L24 |
+| the METAR's wind, weather, cloud, pressure and TREND | the reports' raw text | L8–L13, L23, L24 |
+| the hourly day-1 forecast and yesterday's error | Open-Meteo, read even when the model does not use it | L14–L17 |
+| today's taker trades, wallets hashed as in `research market`'s cache | Data API, every 20 s | L18–L21 |
+| every taker's record on the last 60 settled days | Gamma and the Data API, at start and at 07:00 local | L19, L20 |
+
+Without the KNMI key the KNMI rules stay idle and L3 enters as F does
+without its exit; the dashboard says so. With the Data API off, L18–L21
+stay idle. L19 and L20 wait for the takers' records: the first scoring
+downloads up to 60 settled days into
+`<data_dir>/research/polymarket/<STATION>/`, the cache `research market`
+uses, so it takes a while once; every later morning adds a day.
+
+**Reading the results.**
+
+* The dashboard's panel *Strategy lab · paper · L1–L25*: each running
+  family's status now (its signal or its first blocker), its approvals,
+  rejections, orders and fills this run, and its own book's open positions
+  and realized P&L; above it, per location, what the lab reads (KNMI's
+  readings, the radiation and its share of the clear sky, the neighbours,
+  the latest METAR's weather, the forecast maximum, yesterday's error,
+  today's taker trades and the takers' records). The KPI strip, positions
+  and orders panels show the main book only.
+* Each family's page and copyable log (`/api/v1/strategies/L7/log`), with
+  its own book's positions.
+* The lite page (`/lite`) lists the lab's books; its positions table names
+  each position's book.
+* `weather-machine report paper`: the main book's settled P&L, and the
+  lab's apart, both split per strategy.
+
+**Caveats.** Paper fills are simulated: a taker fills against the live
+book after the simulator's latency, a maker only from later trade prints
+after the queue ahead — and no order reaches the market, so nobody reacts
+to it. One city, correlated days, and 25 rules on the same days are 25
+chances to look good by luck: a family's paper record counts only on days
+after its rule was fixed, and only together with the replay (§4).
+

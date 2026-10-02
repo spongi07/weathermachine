@@ -265,10 +265,14 @@ pub struct DayReport {
     pub proposals: Vec<ProposalRow>,
     pub orders: Vec<OrderRow>,
     pub fills: usize,
-    /// Paper P&L of this day's market, settled at the METAR high (`None`:
-    /// nothing traded, or the day is still open).
+    /// Paper P&L of this day's market on the main book (A–K and the unwind
+    /// engine), settled at the METAR high (`None`: nothing traded, or the
+    /// day is still open).
     pub pnl_usd: Option<f64>,
-    /// The same per strategy (engine id; fills of orders placed before the
+    /// The same for the strategy lab's paper strategies (L1–L25), each on
+    /// its own book (`None`: the lab traded nothing settled that day).
+    pub lab_pnl_usd: Option<f64>,
+    /// Both per strategy (engine id; fills of orders placed before the
     /// report's first day count as `?`).
     pub strategy_pnl: BTreeMap<String, f64>,
     pub providers: Vec<ProviderDay>,
@@ -466,9 +470,11 @@ pub struct Totals {
     pub approved: usize,
     pub orders: usize,
     pub fills: usize,
-    /// Settled paper P&L (days that are over).
+    /// Settled paper P&L of the main book (days that are over).
     pub pnl_usd: f64,
-    /// The same per strategy.
+    /// The same of the strategy lab's own books.
+    pub lab_pnl_usd: f64,
+    /// Both per strategy.
     pub pnl_by_strategy: BTreeMap<String, f64>,
     pub forecast_days: usize,
     pub forecast_mean_error_c: Option<f64>,
@@ -495,13 +501,37 @@ pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) 
     let highs: HashMap<NaiveDate, i32> = daily_highs(&inputs.observations, plan.tz)
         .into_iter()
         .collect();
-    let pnl = settle(&inputs.fills, &tokens, &highs, today);
+    // The main book's total leaves out the lab's fills: each lab strategy
+    // trades a paper book of its own (its P&L is listed apart).
+    let strategy_of: HashMap<&str, &str> = inputs
+        .orders
+        .iter()
+        .map(|o| (o.client_order_id.as_str(), o.strategy.as_str()))
+        .collect();
+    let main_fills: Vec<ReportFill> = inputs
+        .fills
+        .iter()
+        .filter(|f| {
+            !strategy_of
+                .get(f.client_order_id.as_str())
+                .is_some_and(|s| wm_strategy::lab::is_lab_id(s))
+        })
+        .cloned()
+        .collect();
+    let pnl = settle(&main_fills, &tokens, &highs, today);
     let by_strategy = settle_by_strategy(&inputs.fills, &inputs.orders, &tokens, &highs, today);
     let mut days = Vec::new();
     let mut date = plan.from;
     while date <= plan.to {
         let mut day = build_day(inputs, plan, date, date >= today, &tokens, &pnl);
         day.strategy_pnl = by_strategy.get(&date).cloned().unwrap_or_default();
+        let lab: Vec<f64> = day
+            .strategy_pnl
+            .iter()
+            .filter(|(k, _)| wm_strategy::lab::is_lab_id(k))
+            .map(|(_, v)| *v)
+            .collect();
+        day.lab_pnl_usd = (!lab.is_empty()).then(|| lab.iter().sum());
         days.push(day);
         match date.succ_opt() {
             Some(d) => date = d,
@@ -824,6 +854,7 @@ fn build_day(
         orders,
         fills,
         pnl_usd: pnl.get(&date).copied(),
+        lab_pnl_usd: None,
         strategy_pnl: BTreeMap::new(),
         providers,
         health_changes,
@@ -1322,6 +1353,7 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
         t.orders += d.orders.len();
         t.fills += d.fills;
         t.pnl_usd += d.pnl_usd.unwrap_or(0.0);
+        t.lab_pnl_usd += d.lab_pnl_usd.unwrap_or(0.0);
         for (k, v) in &d.strategy_pnl {
             *t.pnl_by_strategy.entry(k.clone()).or_default() += v;
         }
@@ -1370,6 +1402,14 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
 
 /// `$+1.20 (A_buy_yes_final_high $+1.20)`: a total with its split per
 /// strategy, when there is one.
+/// The main book's strategies and the lab's, apart.
+fn split_books(split: &BTreeMap<String, f64>) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
+    split
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .partition(|(k, _)| !wm_strategy::lab::is_lab_id(k))
+}
+
 fn with_split(total: String, split: &BTreeMap<String, f64>) -> String {
     if split.is_empty() {
         return total;
@@ -1479,8 +1519,16 @@ pub fn markdown(r: &PaperReport) -> String {
         t.approved,
         t.orders,
         t.fills,
-        with_split(usd(t.pnl_usd), &t.pnl_by_strategy)
+        with_split(usd(t.pnl_usd), &split_books(&t.pnl_by_strategy).0)
     );
+    let lab = split_books(&t.pnl_by_strategy).1;
+    if !lab.is_empty() {
+        let _ = writeln!(
+            s,
+            "- Strategy lab (paper, each strategy on its own book): settled P&L {}.",
+            with_split(usd(t.lab_pnl_usd), &lab)
+        );
+    }
     let _ = writeln!(
         s,
         "- Reports: {} known on time, median delay {}, 90th percentile {}, slowest {}; {} caught up after a restart or outage (left out).",
@@ -1564,7 +1612,14 @@ pub fn markdown(r: &PaperReport) -> String {
             d.proposals.iter().filter(|p| p.approved).count(),
             d.orders.len(),
             d.fills,
-            d.pnl_usd.map_or_else(|| "–".to_owned(), usd),
+            match (d.pnl_usd, d.lab_pnl_usd) {
+                (main, Some(lab)) => format!(
+                    "{} · lab {}",
+                    main.map_or_else(|| "–".to_owned(), usd),
+                    usd(lab)
+                ),
+                (main, None) => main.map_or_else(|| "–".to_owned(), usd),
+            },
         );
     }
     let _ = writeln!(s);
@@ -1813,11 +1868,19 @@ fn day_markdown(s: &mut String, d: &DayReport) {
         }
         let _ = writeln!(s);
     }
+    let (main, lab) = split_books(&d.strategy_pnl);
     if let Some(p) = d.pnl_usd {
         let _ = writeln!(
             s,
             "- **Settled paper P&L of this day's market:** {}",
-            with_split(usd(p), &d.strategy_pnl)
+            with_split(usd(p), &main)
+        );
+    }
+    if let Some(p) = d.lab_pnl_usd {
+        let _ = writeln!(
+            s,
+            "- Strategy lab, settled on its own books: {}",
+            with_split(usd(p), &lab)
         );
     }
     if !d.providers.is_empty() {
@@ -1872,6 +1935,116 @@ fn day_markdown(s: &mut String, d: &DayReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lab's fills settle on their own books: the main book's P&L
+    /// leaves them out and the lab's is listed apart, per strategy.
+    #[test]
+    fn lab_fills_are_reported_apart_from_the_main_book() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let outcome = |label: &str, value: i32, yes: &str, no: &str| ReportOutcome {
+            event_slug: "eham-oct-1".into(),
+            local_date: date,
+            label: label.into(),
+            lower: Some(value),
+            upper: Some(value),
+            yes_token: yes.into(),
+            no_token: no.into(),
+            taker_fee_rate_micros: 50_000,
+        };
+        let order = |id: &str, strategy: &str, token: &str| ReportOrder {
+            client_order_id: id.into(),
+            strategy: strategy.into(),
+            event_slug: "eham-oct-1".into(),
+            token_id: token.into(),
+            outcome_side: "NO".into(),
+            side: "BUY".into(),
+            kind: "open".into(),
+            limit_price_micros: 500_000,
+            shares_micros: 10_000_000,
+            status: "filled".into(),
+            filled_micros: 10_000_000,
+            avg_price_micros: None,
+            fees_micros: 0,
+            reason: None,
+            created_at: t("2026-10-01T11:00:00Z"),
+        };
+        let fill = |id: &str, token: &str, price_micros: i32| ReportFill {
+            client_order_id: id.into(),
+            token_id: token.into(),
+            side: "BUY".into(),
+            price_micros,
+            shares_micros: 10_000_000,
+            fee_micros: 0,
+            liquidity: "taker".into(),
+            ts: t("2026-10-01T11:00:01Z"),
+        };
+        let inputs = ReportInputs {
+            observations: vec![ReportObservation {
+                observed_at: t("2026-10-01T12:25:00Z"),
+                report_type: "METAR".into(),
+                version: 1,
+                temperature_dc: Some(180),
+                provider: "awc".into(),
+                fetched_at: t("2026-10-01T12:28:00Z"),
+                from_failover: false,
+            }],
+            outcomes: vec![
+                outcome("17°C", 17, "y17", "n17"),
+                outcome("18°C", 18, "y18", "n18"),
+            ],
+            // K and L7 buy the same NO on their own books; L2's NO loses.
+            orders: vec![
+                order("wm-k-1", "K_knmi_nowcast", "n17"),
+                order("wm-l7-1", "L7_knmi_slope", "n17"),
+                order("wm-l2-1", "L2_informed_maker", "n18"),
+            ],
+            fills: vec![
+                fill("wm-k-1", "n17", 400_000),
+                fill("wm-l7-1", "n17", 420_000),
+                fill("wm-l2-1", "n18", 410_000),
+            ],
+            ..ReportInputs::default()
+        };
+        let plan = PaperReportPlan {
+            location: "amsterdam".into(),
+            station: "EHAM".into(),
+            tz: chrono_tz::Europe::Amsterdam,
+            from: date,
+            to: date,
+        };
+        let r = build(&inputs, &plan, t("2026-10-02T08:00:00Z"));
+        let d = &r.days[0];
+        // The high is 18 °C: the NO of 17 °C wins, the NO of 18 °C loses.
+        assert!((d.pnl_usd.unwrap() - 6.0).abs() < 1e-9, "{:?}", d.pnl_usd);
+        assert!(
+            (d.lab_pnl_usd.unwrap() - 1.7).abs() < 1e-9,
+            "{:?}",
+            d.lab_pnl_usd
+        );
+        assert_eq!(d.strategy_pnl.len(), 3);
+        assert!((r.totals.pnl_usd - 6.0).abs() < 1e-9);
+        assert!((r.totals.lab_pnl_usd - 1.7).abs() < 1e-9);
+        let md = markdown(&r);
+        for needle in [
+            "settled paper P&L $6.00 (K_knmi_nowcast $6.00).",
+            "- Strategy lab (paper, each strategy on its own book): settled P&L $1.70 (L2_informed_maker −$4.10, L7_knmi_slope $5.80).",
+            "| $6.00 · lab $1.70 |",
+            "- **Settled paper P&L of this day's market:** $6.00 (K_knmi_nowcast $6.00)",
+            "- Strategy lab, settled on its own books: $1.70 (L2_informed_maker −$4.10, L7_knmi_slope $5.80)",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?} in\n{md}");
+        }
+        // Without the lab's fills, no lab line.
+        let main_only = ReportInputs {
+            orders: inputs.orders[..1].to_vec(),
+            fills: inputs.fills[..1].to_vec(),
+            ..inputs.clone()
+        };
+        let r = build(&main_only, &plan, t("2026-10-02T08:00:00Z"));
+        assert_eq!(r.days[0].lab_pnl_usd, None);
+        assert!(!markdown(&r).contains("Strategy lab"));
+    }
 
     #[test]
     fn evaluation_lines_parse() {

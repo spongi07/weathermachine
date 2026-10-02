@@ -48,9 +48,82 @@ pub struct DashboardSnapshot {
     /// Every strategy of the engine, for its page.
     #[serde(default)]
     pub strategies: Vec<StrategyDto>,
+    /// The strategy lab's paper strategies (L1–L25): their inputs and
+    /// their own books. `None` with the lab off.
+    #[serde(default)]
+    pub lab: Option<LabDto>,
+}
+
+/// The strategy lab at a glance.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabDto {
+    /// What the lab reads, per location.
+    pub inputs: Vec<LabInputsDto>,
+    /// Each lab strategy's own paper book, L1 first.
+    pub books: Vec<LabBookDto>,
+}
+
+/// What the lab reads at one location.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabInputsDto {
+    pub location: String,
+    /// KNMI readings of the station kept (the last 36 hours).
+    pub knmi_readings: usize,
+    pub radiation_wm2: Option<i32>,
+    /// The latest radiation as a share of the clear sky, percent.
+    pub clear_sky_pct: Option<f64>,
+    pub neighbours: Vec<LabNeighbourDto>,
+    /// Today's METARs read for their weather groups, and the latest.
+    pub reports: usize,
+    pub latest_weather: Option<String>,
+    pub forecast_max_c: Option<f64>,
+    pub yesterday_error_c: Option<f64>,
+    /// Today's market's taker trades received.
+    pub taker_trades: usize,
+    /// Settled days the takers' records cover (`None`: not loaded yet).
+    pub wallet_days: Option<u32>,
+    pub wallets_skilled: usize,
+    pub wallets_losing: usize,
+}
+
+/// A neighbouring KNMI station's latest reading.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabNeighbourDto {
+    pub name: String,
+    pub bearing_deg: f64,
+    pub interval_end_ms: Option<i64>,
+    pub mean_c: Option<f64>,
+}
+
+/// One lab strategy's own paper book.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabBookDto {
+    pub strategy: String,
+    pub open_positions: usize,
+    /// Cost of the open positions.
+    pub capital_usd: f64,
+    /// Worst-case loss of the open positions and live orders.
+    pub worst_case_usd: f64,
+    pub today_new_usd: f64,
+    pub today_realized_usd: f64,
+    pub realized_total_usd: f64,
 }
 
 impl DashboardSnapshot {
+    /// Whether `strategy` (an engine id) is one of the lab's paper
+    /// strategies, which trade their own books.
+    pub fn is_lab(&self, strategy: &str) -> bool {
+        self.strategies.iter().any(|s| s.lab && s.id == strategy)
+    }
+
+    /// The strategy a page or log asks for, by engine id or letter in any
+    /// case (`F_peak_slot`, `F`, `l7`), as the server's log route does.
+    pub fn strategy(&self, key: &str) -> Option<&StrategyDto> {
+        self.strategies
+            .iter()
+            .find(|s| s.id.eq_ignore_ascii_case(key) || s.letter.eq_ignore_ascii_case(key))
+    }
+
     /// A strategy's one-line status for its card: `(class, text)` — a
     /// signal, else strategy F's slot and the blocker on the high's bucket.
     pub fn strategy_status(&self, s: &StrategyDto) -> (&'static str, String) {
@@ -123,6 +196,9 @@ pub struct StrategyDto {
     /// Strategy F: its time slots.
     #[serde(default)]
     pub peak_slot: Option<PeakSlotDto>,
+    /// A strategy of the lab (L1–L25), trading its own paper book.
+    #[serde(default)]
+    pub lab: bool,
 }
 
 impl StrategyDto {
@@ -530,6 +606,10 @@ pub struct PositionDto {
     pub mark: Option<f64>,
     pub unrealized_usd: Option<f64>,
     pub realized_usd: f64,
+    /// The lab strategy whose own book holds it; empty for the main book
+    /// (strategies A–K).
+    #[serde(default)]
+    pub strategy: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -696,6 +776,37 @@ mod tests {
         let mut e = f();
         e.peak_slot = None;
         assert_eq!(with_evals(vec![]).strategy_status(&e).0, "muted");
+    }
+
+    #[test]
+    fn a_strategy_is_found_by_id_or_letter() {
+        let s = DashboardSnapshot {
+            strategies: vec![
+                StrategyDto {
+                    id: "F_peak_slot".into(),
+                    letter: "F".into(),
+                    ..Default::default()
+                },
+                StrategyDto {
+                    id: "L7_knmi_slope".into(),
+                    letter: "L7".into(),
+                    lab: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        for key in ["F", "f", "F_peak_slot", "f_peak_slot"] {
+            assert_eq!(s.strategy(key).map(|x| x.id.as_str()), Some("F_peak_slot"));
+        }
+        for key in ["L7", "l7", "L7_knmi_slope"] {
+            assert_eq!(
+                s.strategy(key).map(|x| x.id.as_str()),
+                Some("L7_knmi_slope")
+            );
+        }
+        assert!(s.strategy("L").is_none() && s.strategy("G").is_none());
+        assert!(s.is_lab("L7_knmi_slope") && !s.is_lab("F_peak_slot"));
     }
 
     #[test]

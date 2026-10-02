@@ -22,8 +22,9 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   HH:25/HH:55 reports: quick polls first, slower ones until the arrival
   window closes, and the standby source (TGFTP) is asked too while a report
   is missing. It never speeds up to chase limits. With a free KNMI key it
-  also reads the airport's ten-minute readings (KNMI EDR API) — strategy
-  K's input, never the observed high or settlement.
+  also reads the airport's ten-minute readings (KNMI EDR API), with global
+  radiation and three neighbouring stations for the strategy lab —
+  predictive inputs, never the observed high or settlement.
 * **Keeps everything.** Raw payloads, every request, observation versions
   and corrections, verbatim market rules (SHA-256), every decision with its
   inputs, orders and fills, and a replayable journal of every engine input.
@@ -61,8 +62,12 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   or a stop, the METAR's own weather groups and TREND (sea breeze, showers,
   fog, fronts), the forecast's hourly path, KNMI's global radiation and the
   temperatures of upwind stations, and every taker's record on the days
-  before. Each has a variant or a control and is judged out of sample; none
-  trades live until it holds up.
+  before. Each has a variant or a control and is judged out of sample.
+  Since 2 October 2026 all 25 also run live as **paper strategies**, each
+  on a paper book of its own — its own positions, limits and P&L — so none
+  of them ever blocks F–K or another lab strategy (`[strategies.lab]`:
+  `disabled`, `variants`). The dashboard's lab panel, each family's page
+  and `report paper` show their record apart from the main book's.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:
@@ -145,7 +150,7 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_FORECAST` | `false` never fetches or evaluates the day-1 forecast (default `true`) |
 | `WM_FORECAST_MODEL` | Open-Meteo model id for the day-1 forecast (default `gfs_global`) |
 | `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key; the free tier is for non-commercial use |
-| `WM_KNMI_API_KEY` | Free KNMI Data Platform key ([developer portal](https://developer.dataplatform.knmi.nl/)) for the ten-minute readings; sent only in the `Authorization` header. Without it strategy K does nothing |
+| `WM_KNMI_API_KEY` | Free KNMI Data Platform key ([developer portal](https://developer.dataplatform.knmi.nl/)) for the ten-minute readings; sent only in the `Authorization` header. Without it strategy K and the lab's KNMI rules do nothing |
 | `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
 | `WM_JOURNAL_RETENTION_DAYS` | Days of order-book updates kept in the replay journal (default 7; 0 = keep) |
 | `WM_BACKUP_JOURNAL` | Stack only: include the replay journal in nightly backups (default `false`) |

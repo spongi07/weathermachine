@@ -1,12 +1,13 @@
 //! The weather groups of a METAR: wind, visibility, present and recent
 //! weather, clouds, QNH and the TREND (`NOSIG`, `BECMG …`, `TEMPO …`).
 //!
-//! Context for the strategy lab (`wm_backtest::market_lab`): sea breezes,
+//! Context for the strategy lab (`wm_backtest::market_lab` replays it, the
+//! lab's paper strategies in `wm_strategy::lab` trade on it): sea breezes,
 //! showers, fog and fronts show here before they show in the temperature.
-//! The temperature itself stays with [`crate::metar`], whose exact parse the
-//! observations, the resolution check and every strategy rely on. This
-//! parser never fails: a group it does not recognise is skipped, so an odd
-//! report yields less context, never an error.
+//! The temperature itself stays with `wm_weather::metar`, whose exact parse
+//! the observations, the resolution check and every strategy rely on. This
+//! parser is pure (no I/O) and never fails: a group it does not recognise is
+//! skipped, so an odd report yields less context, never an error.
 //!
 //! Supported (WMO FM 15 as Schiphol writes it): wind `24012KT`, `21015G28KT`,
 //! `VRB03KT`, `00000KT`, `05005MPS`, its variation `180V250`; visibility
@@ -155,7 +156,74 @@ pub struct MetarWx {
     pub trend: Vec<TrendGroup>,
 }
 
+/// A group's weather in short words: `240°/10 kt`, `4000 m`, `-SHRA`,
+/// `BKN 1500 ft CB`.
+fn group_words(g: &WxGroups) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(w) = g.wind {
+        let gust = w
+            .gust_kt
+            .map(|x| format!(" gusting {x}"))
+            .unwrap_or_default();
+        out.push(match w.direction {
+            Some(d) => format!("{d:03}°/{} kt{gust}", w.speed_kt),
+            None => format!("variable/{} kt{gust}", w.speed_kt),
+        });
+    }
+    if g.cavok {
+        out.push("CAVOK".into());
+    } else if let Some(v) = g.visibility_m {
+        out.push(format!("{v} m"));
+    }
+    out.extend(g.weather.iter().cloned());
+    for c in &g.clouds {
+        let cover = match c.cover {
+            Cover::Few => "FEW",
+            Cover::Scattered => "SCT",
+            Cover::Broken => "BKN",
+            Cover::Overcast => "OVC",
+            Cover::Obscured => "VV",
+        };
+        let base = c.base_ft.map(|f| format!(" {f} ft")).unwrap_or_default();
+        let cb = if c.convective { " CB" } else { "" };
+        out.push(format!("{cover}{base}{cb}"));
+    }
+    if g.no_significant_cloud && !g.cavok {
+        out.push("no significant cloud".into());
+    }
+    if g.nsw {
+        out.push("NSW".into());
+    }
+    out
+}
+
 impl MetarWx {
+    /// The report's weather in short words, for logs and the dashboard:
+    /// `240°/10 kt · 4000 m · -SHRA · BKN 1500 ft CB · Q1013 · TEMPO SHRA`.
+    pub fn summary(&self) -> String {
+        let mut parts = group_words(&self.body);
+        if !self.recent.is_empty() {
+            parts.push(format!("recent {}", self.recent.join(" ")));
+        }
+        if let Some(q) = self.qnh_hpa {
+            parts.push(format!("Q{q}"));
+        }
+        for t in &self.trend {
+            let kind = match t.kind {
+                TrendKind::Nosig => "NOSIG",
+                TrendKind::Becoming => "BECMG",
+                TrendKind::Tempo => "TEMPO",
+            };
+            let words = group_words(&t.wx);
+            parts.push(if words.is_empty() {
+                kind.to_owned()
+            } else {
+                format!("{kind} {}", words.join(" "))
+            });
+        }
+        parts.join(" · ")
+    }
+
     pub fn wind(&self) -> Option<Wind> {
         self.body.wind
     }
@@ -423,7 +491,7 @@ fn read_group(token: &str, g: &mut WxGroups) -> bool {
 /// The weather groups of a METAR or SPECI. Never fails: unknown groups are
 /// skipped.
 pub fn parse_wx(raw: &str) -> MetarWx {
-    let normalized = wm_core::hash::normalize_report_text(raw);
+    let normalized = crate::hash::normalize_report_text(raw);
     let tokens: Vec<&str> = normalized.split(' ').filter(|t| !t.is_empty()).collect();
     let mut wx = MetarWx::default();
     // Skip the type, COR, station and time: the body starts after the
@@ -518,6 +586,22 @@ pub fn parse_wx(raw: &str) -> MetarWx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_report_reads_back_in_short_words() {
+        let wx = parse_wx(
+            "EHAM 011255Z 25015G25KT 4000 -SHRA BKN015CB 20/17 Q1013 RETS TEMPO 27020KT SHRA",
+        );
+        assert_eq!(
+            wx.summary(),
+            "250°/15 kt gusting 25 · 4000 m · -SHRA · BKN 1500 ft CB · recent TS · Q1013 · TEMPO 270°/20 kt SHRA"
+        );
+        assert_eq!(
+            parse_wx("EHAM 010855Z 12008KT CAVOK 22/10 Q1022 NOSIG").summary(),
+            "120°/8 kt · CAVOK · Q1022 · NOSIG"
+        );
+        assert_eq!(parse_wx("").summary(), "");
+    }
     use proptest::prelude::*;
 
     #[test]

@@ -68,15 +68,31 @@ nothing (fail closed). K enabled without a key raises a warning and stays
 idle. At 30 s the loop makes about 2,900 requests a day, under the budget
 of 4,000.
 
-**Research-only inputs of the strategy lab.** `KnmiTenMinute::fetch_series`
-asks the same collection for any parameters of any station (`qg`, global
-radiation in W/m², at Schiphol; `ta` at Voorschoten, De Bilt and Berkhout)
-and returns them unconverted; only `research market` calls it, a week at a
-time. `wm_weather::metar_wx` reads a report's weather groups — wind and its
-variation, visibility, present and recent weather, clouds, QNH and the
-TREND groups — from the raw text the archive keeps. It never fails: an
-unknown group is skipped. Neither feeds the live system, the observed high
-or settlement.
+With the strategy lab on (`[strategies.lab]`), the same loop also asks for
+global radiation (`[lab].radiation_parameter`, `qg`) in the same request,
+reads `[lab].knmi_history_minutes` (180) back at start instead of 40, hands
+every new reading to the engine oldest first, and after each new reading of
+the station asks once for each of `[lab].neighbours` (Voorschoten 06215, De
+Bilt 06260, Berkhout 06249; a failing neighbour raises one alert of its own
+and is retried after the next reading). That adds about 430 requests a day
+(about 3,330 in all, under the budget of 4,000).
+
+**Inputs of the strategy lab.** `KnmiTenMinute::fetch_series` asks the
+same collection for any parameters of any station (`qg`, global radiation
+in W/m², at Schiphol; `ta` at Voorschoten, De Bilt and Berkhout) and returns
+them unconverted; only `research market` calls it, a week at a time.
+`wm_core::metar_wx` (re-exported by `wm-weather`) reads a report's weather
+groups — wind and its variation, visibility, present and recent weather,
+clouds, QNH and the TREND groups — from the raw text the archive keeps. It
+never fails: an unknown group is skipped. Live, the engine parses every new
+METAR it receives the same way, and two read-only loops feed the lab's
+paper strategies from Polymarket's public Data API (`runtime/lab.rs`):
+today's taker trades every `[lab].taker_poll_seconds` (20; wallets hashed
+as in `research market`'s cache, each trade passed on once) for L18–L21,
+and every taker's record on the last `[lab].wallet_history_days` (60)
+settled days, scored at start and at 07:00 local from the cache under
+`research/polymarket/<STATION>/`, for L19 and L20. None of these feeds A–K,
+the observed high or settlement.
 
 ## 10. Adaptive PollingPolicy
 

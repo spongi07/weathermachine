@@ -88,9 +88,16 @@ impl KnmiTenMinute {
         self.fetcher.provider()
     }
 
-    fn query(&self, location: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    fn query(
+        &self,
+        location: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        radiation: Option<&str>,
+    ) -> String {
+        let extra = radiation.map(|r| format!(",{r}")).unwrap_or_default();
         format!(
-            "/locations/{location}?datetime={}/{}&parameter-name={},{}",
+            "/locations/{location}?datetime={}/{}&parameter-name={},{}{extra}",
             from.format("%Y-%m-%dT%H:%M:%SZ"),
             to.format("%Y-%m-%dT%H:%M:%SZ"),
             self.mean_parameter,
@@ -109,18 +116,61 @@ impl KnmiTenMinute {
         max_gate_wait: Duration,
         attempts: u32,
     ) -> Result<Vec<TenMinuteObservation>, KnmiError> {
-        let query = self.query(location, from, to);
+        self.fetch_readings(station, location, from, to, None, max_gate_wait, attempts)
+            .await
+    }
+
+    /// [`fetch`](Self::fetch), with the global radiation of
+    /// `radiation_parameter` (`qg`, W/m²) in each reading as well — the
+    /// strategy lab's L25 compares it with the clear sky. One request, as
+    /// without it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fetch_with_radiation(
+        &self,
+        station: &StationId,
+        location: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        radiation_parameter: &str,
+        max_gate_wait: Duration,
+        attempts: u32,
+    ) -> Result<Vec<TenMinuteObservation>, KnmiError> {
+        self.fetch_readings(
+            station,
+            location,
+            from,
+            to,
+            Some(radiation_parameter),
+            max_gate_wait,
+            attempts,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_readings(
+        &self,
+        station: &StationId,
+        location: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        radiation: Option<&str>,
+        max_gate_wait: Duration,
+        attempts: u32,
+    ) -> Result<Vec<TenMinuteObservation>, KnmiError> {
+        let query = self.query(location, from, to, radiation);
         let req = FetchRequest::get(format!("{}{query}", self.base_url), query)
             .accept("application/json")
             .authorization(self.api_key.clone())
             .max_gate_wait(max_gate_wait)
             .unconditional();
         let resp = self.fetcher.get_retrying(&req, attempts.max(1)).await?;
-        parse_coverage(
+        parse_readings(
             &resp.body,
             station,
             &self.mean_parameter,
             &self.max_parameter,
+            radiation,
             resp.fetched_at,
         )
         .map_err(KnmiError::Malformed)
@@ -268,6 +318,10 @@ fn tenths(v: Option<f64>) -> Option<TempC> {
         .map(|c| TempC::from_tenths((c * 10.0).round() as i32))
 }
 
+/// Physically plausible global radiation (W/m²); the sensor reads a few
+/// W/m² below zero at night.
+const PLAUSIBLE_WM2: std::ops::RangeInclusive<f64> = -50.0..=1_500.0;
+
 /// The readings in a CoverageJSON response (a `CoverageCollection` or a
 /// single `Coverage`): one per time on the `t` axis, the mean from
 /// `mean_parameter` and the maximum from `max_parameter`, both in °C. Times
@@ -277,6 +331,26 @@ pub fn parse_coverage(
     station: &StationId,
     mean_parameter: &str,
     max_parameter: &str,
+    received_at: DateTime<Utc>,
+) -> Result<Vec<TenMinuteObservation>, String> {
+    parse_readings(
+        body,
+        station,
+        mean_parameter,
+        max_parameter,
+        None,
+        received_at,
+    )
+}
+
+/// [`parse_coverage`], with the global radiation of `radiation_parameter`
+/// (W/m², rounded) in each reading when given.
+pub fn parse_readings(
+    body: &[u8],
+    station: &StationId,
+    mean_parameter: &str,
+    max_parameter: &str,
+    radiation_parameter: Option<&str>,
     received_at: DateTime<Utc>,
 ) -> Result<Vec<TenMinuteObservation>, String> {
     let doc: CoverageDoc =
@@ -303,6 +377,10 @@ pub fn parse_coverage(
             }
         };
         let (mean, max) = (series(mean_parameter)?, series(max_parameter)?);
+        let radiation = match radiation_parameter {
+            Some(r) => series(r)?,
+            None => vec![None; times.len()],
+        };
         for (k, t) in times.iter().enumerate() {
             let at = DateTime::parse_from_rfc3339(t)
                 .map_err(|e| format!("time '{t}': {e}"))?
@@ -311,12 +389,17 @@ pub fn parse_coverage(
             if mean.is_none() && max.is_none() {
                 continue;
             }
+            #[allow(clippy::cast_possible_truncation)]
+            let radiation = radiation[k]
+                .filter(|v| v.is_finite() && PLAUSIBLE_WM2.contains(v))
+                .map(|v| v.round() as i32);
             out.push(TenMinuteObservation {
                 station: station.clone(),
                 provider: ProviderId::knmi(),
                 interval_end: at,
                 mean,
                 max,
+                radiation,
                 received_at,
             });
         }
@@ -413,6 +496,36 @@ mod tests {
         );
         assert!(
             parse_coverage(b"<html>", &eham(), "ta", "tx", utc("2026-07-01T12:00:00Z")).is_err()
+        );
+    }
+
+    #[test]
+    fn radiation_rides_along_when_asked_for() {
+        let body = r#"{
+          "type": "Coverage",
+          "domain": {"axes": {"t": {"values": ["2026-07-01T11:50:00Z", "2026-07-01T12:00:00Z", "2026-07-01T12:10:00Z"]}}},
+          "ranges": {
+            "ta": {"values": [19.0, 19.2, 19.4]},
+            "tx": {"values": [19.3, 19.5, 19.6]},
+            "qg": {"values": [612.6, null, 9999.0]}
+          }
+        }"#;
+        let at = utc("2026-07-01T12:14:00Z");
+        let got = parse_readings(body.as_bytes(), &eham(), "ta", "tx", Some("qg"), at).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].radiation, Some(613), "W/m², rounded");
+        assert_eq!(got[1].radiation, None, "a null is no value");
+        assert_eq!(got[2].radiation, None, "9999 W/m² is not sunlight");
+        assert_eq!(got[2].mean, Some(TempC::from_tenths(194)));
+        // Without asking, no radiation, even when the response carries it.
+        let plain = parse_coverage(body.as_bytes(), &eham(), "ta", "tx", at).unwrap();
+        assert!(plain.iter().all(|r| r.radiation.is_none()));
+        // Radiation alone is no reading: the temperature decides.
+        let dark = r#"{"domain":{"axes":{"t":{"values":["2026-07-01T23:50:00Z"]}}},"ranges":{"qg":{"values":[-2.0]}}}"#;
+        assert!(
+            parse_readings(dark.as_bytes(), &eham(), "ta", "tx", Some("qg"), at)
+                .unwrap()
+                .is_empty()
         );
     }
 

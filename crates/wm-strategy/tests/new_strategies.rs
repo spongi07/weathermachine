@@ -150,6 +150,7 @@ impl World {
             peak_times: None,
             routine_minutes: &[25, 55],
             nowcast: self.nowcast.as_ref(),
+            lab: &wm_strategy::LabInputs::EMPTY,
         };
         s.evaluate(&ctx)
     }
@@ -564,6 +565,7 @@ fn reading(end: &str, mean: i32, max: i32) -> TenMinuteObservation {
         interval_end: utc(end),
         mean: Some(TempC::from_tenths(mean)),
         max: Some(TempC::from_tenths(max)),
+        radiation: None,
         received_at: utc(end) + Duration::minutes(4),
     }
 }

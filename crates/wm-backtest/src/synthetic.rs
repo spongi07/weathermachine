@@ -121,6 +121,7 @@ impl SyntheticDay {
                 interval_end: t,
                 mean: Some(mean),
                 max: Some(max),
+                radiation: None,
                 received_at: t + delay,
             });
             t += Duration::minutes(10);

@@ -15,7 +15,6 @@ pub mod history;
 pub mod knmi;
 pub mod ledger;
 pub mod metar;
-pub mod metar_wx;
 pub mod open_meteo;
 pub mod polling;
 pub mod providers;
@@ -28,7 +27,6 @@ pub use health::{HealthConfig, HealthTracker};
 pub use history::{HistoryError, HistoryYear, IemArchive};
 pub use knmi::{KnmiError, KnmiTenMinute, SeriesPoint};
 pub use ledger::{Classified, ObservationLedger};
-pub use metar_wx::{MetarWx, parse_wx};
 pub use open_meteo::{ForecastSeries, OpenMeteoError, OpenMeteoPreviousRuns};
 pub use polling::{
     CadenceModel, PollDecision, PollingHints, PollingMode, PollingParams, PollingPolicy,
@@ -36,3 +34,7 @@ pub use polling::{
 pub use providers::{AwcMetarSource, NwsApiSource, TgftpMetarSource};
 pub use registry::{AlreadyRunning, CollectorClaim, CollectorRegistry};
 pub use source::{ObservationSource, ParsedReport, SourceError, SourceFetch};
+/// The METAR's weather groups (pure parsing, in `wm_core` so that the
+/// engine and the strategies read them too).
+pub use wm_core::metar_wx;
+pub use wm_core::metar_wx::{MetarWx, parse_wx};

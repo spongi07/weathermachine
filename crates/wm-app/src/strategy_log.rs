@@ -112,6 +112,7 @@ pub fn render(snap: &DashboardSnapshot, strategy: &StrategyDto, history: History
     );
     settings(&mut s, strategy);
     peak_slot(&mut s, strategy);
+    lab_book(&mut s, snap, strategy);
     for l in &snap.locations {
         now(&mut s, snap, l, strategy);
     }
@@ -135,6 +136,105 @@ fn settings(s: &mut String, strategy: &StrategyDto) {
     s.push_str("## Settings\n\n| setting | value |\n|---|---|\n");
     for (k, v) in &strategy.settings {
         let _ = writeln!(s, "| {} | {} |", cell(k), cell(v));
+    }
+    s.push('\n');
+}
+
+/// A lab strategy's own paper book, and what the lab reads.
+fn lab_book(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
+    if !strategy.lab {
+        return;
+    }
+    s.push_str(
+        "## Its own paper book
+
+",
+    );
+    let book = snap
+        .lab
+        .as_ref()
+        .and_then(|l| l.books.iter().find(|b| b.strategy == strategy.id));
+    match book {
+        None => s.push_str(
+            "Not running: no book this run.
+
+",
+        ),
+        Some(b) => {
+            let _ = writeln!(
+                s,
+                "{} open position(s), capital {}, worst case {}; today new {} and realized {}; realized this run {}.\n",
+                b.open_positions,
+                paper_report::usd(b.capital_usd),
+                paper_report::usd(b.worst_case_usd),
+                paper_report::usd(b.today_new_usd),
+                paper_report::usd(b.today_realized_usd),
+                paper_report::usd(b.realized_total_usd)
+            );
+        }
+    }
+    let mine: Vec<_> = snap
+        .positions
+        .iter()
+        .filter(|p| p.strategy == strategy.id)
+        .collect();
+    if !mine.is_empty() {
+        s.push_str("| market | bucket | side | shares | cost | mark | unrealized | realized |\n|---|---|---|---:|---:|---:|---:|---:|\n");
+        for p in mine {
+            let _ = writeln!(
+                s,
+                "| {} | {} | {} | {:.0} | {} | {} | {} | {} |",
+                cell(&p.event_slug),
+                cell(&p.bucket),
+                p.side,
+                p.shares,
+                paper_report::usd(p.cost_usd),
+                opt(p.mark, 3),
+                p.unrealized_usd
+                    .map_or_else(|| "–".to_owned(), paper_report::usd),
+                paper_report::usd(p.realized_usd)
+            );
+        }
+        s.push('\n');
+    }
+    for i in snap.lab.iter().flat_map(|l| l.inputs.iter()) {
+        let _ = writeln!(
+            s,
+            "- Lab inputs at {}: {} KNMI reading(s){}; neighbours {}; {} METAR(s) today{}; forecast max {} °C, yesterday's error {} °C; {} taker trade(s) today; takers' records {}.",
+            i.location,
+            i.knmi_readings,
+            i.radiation_wm2
+                .map(|r| format!(
+                    ", radiation {r} W/m² ({} of the clear sky)",
+                    i.clear_sky_pct
+                        .map_or_else(|| "–".to_owned(), |p| format!("{p:.0} %"))
+                ))
+                .unwrap_or_default(),
+            if i.neighbours.is_empty() {
+                "none".to_owned()
+            } else {
+                i.neighbours
+                    .iter()
+                    .map(|n| format!("{} {} °C", n.name, opt(n.mean_c, 1)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            i.reports,
+            i.latest_weather
+                .as_deref()
+                .map(|w| format!(" (latest {w})"))
+                .unwrap_or_default(),
+            opt(i.forecast_max_c, 1),
+            signed(i.yesterday_error_c, 1),
+            i.taker_trades,
+            i.wallet_days.map_or_else(
+                || "not loaded yet".to_owned(),
+                |d| format!(
+                    "{d} settled day(s), {} skilled and {} losing takers",
+                    i.wallets_skilled, i.wallets_losing
+                )
+            )
+        );
     }
     s.push('\n');
 }
@@ -517,6 +617,7 @@ mod tests {
                     later_than_slot: Some(0.1),
                 }],
             }),
+            lab: false,
         }
     }
 

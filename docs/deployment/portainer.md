@@ -61,7 +61,7 @@ shown. Optional variables: `WM_DEMO_SPEED` (default 60 = one day in 24 min),
 | `WM_FORECAST` | no | `true` (default): fetch the day-1 forecast and evaluate it at every training (§4). `false`: never fetched or evaluated. |
 | `WM_FORECAST_MODEL` | no | Open-Meteo model id (default `gfs_global`, the longest archive). Changing it triggers a retraining. |
 | `WM_OPEN_METEO_API_KEY` | no | Open-Meteo subscription key. The free tier is for **non-commercial** use; for real-money trading use a subscription. |
-| `WM_KNMI_API_KEY` | for strategy K | Free key from the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*). The airport's ten-minute readings, strategy K's input; without it K does nothing and the dashboard says so. Sent only in the `Authorization` header, never logged. |
+| `WM_KNMI_API_KEY` | for strategy K and the lab's KNMI rules | Free key from the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*). The airport's ten-minute readings (with global radiation and three neighbouring stations for the strategy lab), the input of K and of most lab strategies; without it they do nothing and the dashboard says so. Sent only in the `Authorization` header, never logged. |
 
 Optionally enable **GitOps updates** (polling, or the webhook Portainer shows
 after creation; store it as the repository secret `PORTAINER_WEBHOOK_URL` and
@@ -292,8 +292,9 @@ the key.
 
 **The strategy lab (L1–L25)** (since 2 October 2026) is the report's
 section *Strategy lab: L1–L25 at traded prices*: 25 new strategies, each
-with a variant or a control, none of them live
-([what each does and why](../research/strategy-lab.md)). It reads the
+with a variant or a control, which the service also runs in paper on books
+of their own (see *The strategy lab in paper* below;
+[what each does and why](../research/strategy-lab.md)). It reads the
 day-1 forecast even when the installed model does not use it, the METAR's
 weather groups from the archived reports, and — with the KNMI key — KNMI's
 global radiation at Schiphol and the ten-minute temperatures of Voorschoten,
@@ -304,8 +305,8 @@ once final. A station or parameter KNMI refuses twice in a row is given up
 lab's **out of sample** lines and its last line, *Strategy lab: held up on
 the later days …*, which the verdict repeats. A family named there is a
 candidate, not a switch: it needs the same result on the next run's new
-days, and then its own live strategy. Paste the lab's lines when you want
-one built.
+days, and a paper record that agrees. Paste the lab's lines when you want
+one judged.
 
 ### Strategy pages and logs to paste
 
@@ -336,6 +337,43 @@ The **Reports to paste** panel at the bottom copies, downloads or opens:
 On plain `http://` in the LAN the browser has no clipboard API. The button
 then copies another way, or opens the text selected: press Ctrl+C (⌘C).
 Without JavaScript, `/lite` lists every strategy with links to its log.
+
+### The strategy lab in paper (L1–L25)
+
+Since 2 October 2026 the 25 lab strategies run in the service as paper
+strategies, switched on by `[strategies.lab]` in the shipped configuration.
+Each trades a paper book of its own — its own positions, limits ($25 an
+order, $100 for L3, which buys F's 100 shares; $120 open; $100 of loss a
+day) and P&L — so none of them ever blocks F–K, the unwind exits or another
+lab strategy, and F–K's caps and P&L do not change. Nothing to set up
+beyond the KNMI key:
+
+* **KNMI** (`WM_KNMI_API_KEY`): Schiphol's ten-minute readings with global
+  radiation, and after each new reading one request each for Voorschoten,
+  De Bilt and Berkhout — about 140 requests an hour in all, well inside a
+  registered key's 1,000. Without the key the KNMI rules stay idle (one
+  alert says so).
+* **Polymarket Data API** (public, no key): today's taker trades every
+  20 s for L18–L21, and once a day the settled markets on which every taker
+  is scored for L19 and L20. The first scoring after a start downloads up
+  to 60 settled days into `/data/research/polymarket/EHAM/` — the cache
+  `research market` uses, so a host that ran the study already has most of
+  it — and takes a few minutes; until then L19 and L20 show "no taker
+  records yet". Every morning at 07:00 local adds the day before.
+
+The dashboard's **Strategy lab · paper · L1–L25** panel, below the
+strategy cards, lists every running lab strategy with its status now, this
+run's counts, and its own book's open positions and realized P&L; a line
+above the table shows what the lab reads. The letters link to each
+strategy's page, whose **Copy log** works as for F–K. The KPI strip and the
+positions and orders panels show the main book only; `/lite` lists the
+lab's books, and `report paper` gives the lab's settled P&L apart from the
+main book's.
+
+To switch families off or run a family's variant, set `disabled` or
+`variants` in `[strategies.lab]` (codes `L1` … `L25`, e.g.
+`disabled = ["L19", "L20"]`) and redeploy; `enabled = false` switches the
+whole lab off, and with it the extra KNMI and Data API requests.
 
 ### The paper-run report
 
@@ -432,8 +470,12 @@ path prefix.
 | **forecast not used** | The evaluation did not show a clear improvement from the forecast (hover for the numbers; details in the report). Nothing to fix — the model trades without it. |
 | **FORECAST WAITING** | The forecast is adopted, but today's series is not usable yet: before 08:00 local, or Open-Meteo unreachable (alert "day-1 forecast unavailable"). The model trades without it meanwhile. |
 | Alert "day-1 forecast unavailable (HTTP status 429 …)" | Open-Meteo's free daily limit (shared by every client on your IP) was reached. The service backs off; consider `WM_OPEN_METEO_API_KEY`. |
-| Alert "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY …" | K is switched on without a key. Request a free key at the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*), set `WM_KNMI_API_KEY` and redeploy — or set `enabled = false` in `[strategies.knmi_nowcast]`. |
-| Alert "KNMI ten-minute readings unavailable (…); strategy K waits" | The KNMI API refused or did not answer (HTTP 401/403: wrong or expired key; otherwise an outage). K does nothing meanwhile; "KNMI ten-minute readings available again" follows on recovery. |
+| Alert "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY …" (or "strategy K and the lab's KNMI rules …", "the lab's KNMI rules …") | K or the lab is switched on without a key. Request a free key at the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*), set `WM_KNMI_API_KEY` and redeploy — or set `enabled = false` in `[strategies.knmi_nowcast]` and `[strategies.lab]`. |
+| Alert "KNMI ten-minute readings unavailable (…); strategy K and the lab's KNMI rules wait" | The KNMI API refused or did not answer (HTTP 401/403: wrong or expired key; otherwise an outage). K and the lab's KNMI rules do nothing meanwhile; "KNMI ten-minute readings available again" follows on recovery. |
+| Alert "KNMI readings of neighbour 06215 unavailable (…); the lab's L24 reads the others" | KNMI did not serve one neighbouring station; only L24 is affected. It is retried after every new Schiphol reading. |
+| Alert "taker trades (Data API) unavailable (…); the lab's flow rules L18–L21 wait" | The Data API refused or did not answer; the service backs off and says "available again" on recovery. Nothing else waits for it. |
+| Alert "the strategy lab's flow rules (L18–L21) need the Data API …" | `[providers.polymarket_data]` is switched off: L18–L21 stay idle. Switch it on, or disable those families. |
+| Alert "takers' records incomplete: settled days would not download …" | Three settled days in a row would not download for the takers' scores; L19 and L20 use the days that loaded, and the next morning tries again. |
 | Report says "not evaluated: …" | The forecast history could not be downloaded (e.g. `previous-runs-api.open-meteo.com` blocked); training is retried after 6 h. A "rejected by Open-Meteo" reason naming the model means `WM_FORECAST_MODEL` is not a valid model id. |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |

@@ -6,7 +6,7 @@
 //! ```text
 //! event → state (temperature / markets / books / orders / health)
 //!       → per-view peak assessment + probability model
-//!       → strategies A/B/C + unwind → proposals
+//!       → strategies A–K, the lab's L1–L25 + unwind → proposals
 //!       → risk engine → approved intents (→ execution)
 //!       → decision audit records, polling hints, dashboard snapshot
 //! ```
@@ -18,8 +18,11 @@ mod restore;
 mod snapshot;
 
 pub use engine::{
-    Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, StationHint,
-    default_rejection_dedup_secs,
+    Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, NeighbourStation, StationHint,
+    default_rejection_dedup_secs, lab_risk_config,
 };
 pub use restore::{RestoreState, RestoreSummary, RestoredFill};
-pub use snapshot::{EngineSnapshot, ForecastSnapshot, LocationSnapshot, ViewSnapshot};
+pub use snapshot::{
+    EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LocationSnapshot,
+    NeighbourSnapshot, ViewSnapshot,
+};

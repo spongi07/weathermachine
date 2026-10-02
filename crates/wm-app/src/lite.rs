@@ -220,6 +220,64 @@ fn strategies(out: &mut String, s: &DashboardSnapshot) {
     out.push_str("</table><p class=\"note\">Reports to paste: <a href=\"/api/v1/research/market\">replay at traded prices (research market)</a> · <a href=\"/api/v1/research/training\">model training</a> · <a href=\"/api/v1/report/paper\">paper run day by day</a></p></section>");
 }
 
+/// The strategy lab's paper strategies: each one's own book.
+fn lab(out: &mut String, s: &DashboardSnapshot) {
+    let Some(lab) = &s.lab else {
+        return;
+    };
+    out.push_str("<section><h2>Strategy lab · paper, each on its own book</h2><table><tr><th>Strategy</th><th>Open</th><th>Capital $</th><th>Worst case $</th><th>New today $</th><th>Realized today $</th><th>Realized total $</th></tr>");
+    for b in &lab.books {
+        let name = s
+            .strategies
+            .iter()
+            .find(|x| x.id == b.strategy)
+            .map_or_else(
+                || b.strategy.clone(),
+                |x| format!("{} · {}", x.letter, x.name),
+            );
+        let _ = write!(
+            out,
+            "<tr><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td class=\"{}\">{:+.2}</td><td class=\"{}\">{:+.2}</td></tr>",
+            esc(&name),
+            b.open_positions,
+            b.capital_usd,
+            b.worst_case_usd,
+            b.today_new_usd,
+            if b.today_realized_usd >= 0.0 {
+                "ok"
+            } else {
+                "bad"
+            },
+            b.today_realized_usd,
+            if b.realized_total_usd >= 0.0 {
+                "ok"
+            } else {
+                "bad"
+            },
+            b.realized_total_usd,
+        );
+    }
+    out.push_str("</table>");
+    for i in &lab.inputs {
+        let _ = write!(
+            out,
+            "<p class=\"note\">{}: {} KNMI reading(s), radiation {}, {} neighbour(s), {} METAR(s) today, {} taker trade(s) today, takers' records {}</p>",
+            esc(&i.location),
+            i.knmi_readings,
+            i.radiation_wm2
+                .map_or_else(|| "—".to_owned(), |r| format!("{r} W/m²")),
+            i.neighbours.iter().filter(|n| n.mean_c.is_some()).count(),
+            i.reports,
+            i.taker_trades,
+            i.wallet_days.map_or_else(
+                || "not loaded yet".to_owned(),
+                |d| format!("over {d} day(s)")
+            ),
+        );
+    }
+    out.push_str("</section>");
+}
+
 /// Render the page.
 pub fn render(s: &DashboardSnapshot) -> String {
     let mut out = String::with_capacity(32 * 1024);
@@ -274,6 +332,7 @@ pub fn render(s: &DashboardSnapshot) -> String {
     }
     out.push_str("<main>");
     strategies(&mut out, s);
+    lab(&mut out, s);
     let r = &s.risk;
     let _ = write!(
         out,
@@ -334,11 +393,16 @@ pub fn render(s: &DashboardSnapshot) -> String {
         );
     }
     out.push_str("</table></section>");
-    out.push_str("<section><h2>Positions</h2><table><tr><th>Event</th><th>Bucket</th><th>Side</th><th>Shares</th><th>Avg</th><th>Mark</th><th>Cost $</th><th>Unrealized $</th><th>Realized $</th></tr>");
+    out.push_str("<section><h2>Positions</h2><table><tr><th>Book</th><th>Event</th><th>Bucket</th><th>Side</th><th>Shares</th><th>Avg</th><th>Mark</th><th>Cost $</th><th>Unrealized $</th><th>Realized $</th></tr>");
     for p in &s.positions {
         let _ = write!(
             out,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.3}</td><td>{}</td><td>{:.2}</td><td>{}</td><td>{:+.2}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.3}</td><td>{}</td><td>{:.2}</td><td>{}</td><td>{:+.2}</td></tr>",
+            if p.strategy.is_empty() {
+                "main".to_owned()
+            } else {
+                esc(&p.strategy)
+            },
             esc(&p.event_slug),
             esc(&p.bucket),
             esc(&p.side),
@@ -477,5 +541,70 @@ mod tests {
         assert!(html.contains("/api/v1/research/market"));
         // Nothing without strategies.
         assert!(!render(&DashboardSnapshot::default()).contains("<h2>Strategies</h2>"));
+    }
+
+    #[test]
+    fn the_lab_shows_its_own_books_and_positions_name_their_book() {
+        let s = DashboardSnapshot {
+            strategies: vec![wm_dashboard_api::StrategyDto {
+                id: "L7_knmi_slope".into(),
+                letter: "L7".into(),
+                name: "KNMI slope: K one reading early".into(),
+                enabled: true,
+                lab: true,
+                ..Default::default()
+            }],
+            lab: Some(wm_dashboard_api::LabDto {
+                inputs: vec![wm_dashboard_api::LabInputsDto {
+                    location: "amsterdam".into(),
+                    knmi_readings: 18,
+                    radiation_wm2: Some(412),
+                    reports: 25,
+                    taker_trades: 7,
+                    ..Default::default()
+                }],
+                books: vec![wm_dashboard_api::LabBookDto {
+                    strategy: "L7_knmi_slope".into(),
+                    open_positions: 1,
+                    capital_usd: 19.74,
+                    today_realized_usd: -1.5,
+                    ..Default::default()
+                }],
+            }),
+            positions: vec![
+                wm_dashboard_api::PositionDto {
+                    event_slug: "eham-main".into(),
+                    ..Default::default()
+                },
+                wm_dashboard_api::PositionDto {
+                    event_slug: "eham-lab".into(),
+                    strategy: "L7_knmi_slope".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let html = render(&s);
+        assert!(html.contains("Strategy lab · paper"), "{html}");
+        assert!(
+            html.contains("<td>L7 · KNMI slope: K one reading early</td><td>1</td><td>19.74</td>"),
+            "{html}"
+        );
+        assert!(html.contains("<td class=\"bad\">-1.50</td>"), "{html}");
+        assert!(
+            html.contains("amsterdam: 18 KNMI reading(s), radiation 412 W/m²"),
+            "{html}"
+        );
+        assert!(html.contains("takers' records not loaded yet"), "{html}");
+        assert!(
+            html.contains("<tr><td>main</td><td>eham-main</td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<tr><td>L7_knmi_slope</td><td>eham-lab</td>"),
+            "{html}"
+        );
+        // No lab, no section.
+        assert!(!render(&DashboardSnapshot::default()).contains("Strategy lab"));
     }
 }

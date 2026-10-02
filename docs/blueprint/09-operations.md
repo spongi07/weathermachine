@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (286 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (560 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |

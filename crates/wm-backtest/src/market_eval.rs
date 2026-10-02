@@ -880,7 +880,7 @@ pub fn market_study_lab(
                 };
                 // Takers are judged on the days before, never on the day
                 // replayed.
-                wallets.add_day(&per_bucket, md.winner, cfg.taker_fee_rate);
+                market_lab::learn_day(&mut wallets, &per_bucket, md.winner, cfg.taker_fee_rate);
                 report.sim_trades.extend(trades);
                 report.sim_trades.extend(lab_trades);
                 latency(md, &states, cfg, &mut report);

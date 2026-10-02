@@ -282,10 +282,13 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                     (Some(p), Some(a)) => Some(ev_per_share(p, a, &fee, slip)),
                     _ => None,
                 };
+                // The ladder shows the main book's strategies; the lab's
+                // evaluations live on their own pages.
                 let evals: Vec<_> = l
                     .evaluations
                     .iter()
                     .filter(|e| e.bucket_label == o.label)
+                    .filter(|e| !wm_strategy::lab::is_lab_id(e.strategy.as_str()))
                     .collect();
                 let signals = evals
                     .iter()
@@ -496,11 +499,18 @@ pub fn build(
         .flat_map(|l| l.books.iter())
         .map(|b| (&b.token, b))
         .collect();
+    // The main book's positions, then each lab strategy's own.
     let positions = snap
         .positions
         .iter()
-        .filter(|p| p.shares.micros() > 0 || !p.realized_pnl.is_zero())
-        .map(|p| {
+        .map(|p| (p, String::new()))
+        .chain(
+            snap.lab_books
+                .iter()
+                .flat_map(|b| b.positions.iter().map(move |p| (p, b.strategy.to_string()))),
+        )
+        .filter(|(p, _)| p.shares.micros() > 0 || !p.realized_pnl.is_zero())
+        .map(|(p, strategy)| {
             let mark = books
                 .get(&p.instrument.token)
                 .and_then(|b| b.best_bid())
@@ -515,6 +525,7 @@ pub fn build(
                 mark,
                 unrealized_usd: mark.map(|m| m * p.shares.as_f64() - p.cost_basis.as_f64()),
                 realized_usd: p.realized_pnl.as_f64(),
+                strategy,
             }
         })
         .collect();
@@ -757,7 +768,62 @@ pub fn build(
             })
             .collect(),
         strategies,
+        lab: lab_dto(snap),
     }
+}
+
+/// The strategy lab: its inputs per location and each strategy's own book
+/// (`None` with the lab off).
+fn lab_dto(snap: &EngineSnapshot) -> Option<LabDto> {
+    let inputs: Vec<LabInputsDto> = snap
+        .locations
+        .iter()
+        .filter_map(|l| {
+            let lab = l.lab.as_ref()?;
+            let c = |t: i32| f64::from(t) / 10.0;
+            Some(LabInputsDto {
+                location: l.location.to_string(),
+                knmi_readings: lab.knmi_readings,
+                radiation_wm2: lab.radiation_wm2,
+                clear_sky_pct: lab.clear_sky_index.map(|k| 100.0 * k),
+                neighbours: lab
+                    .neighbours
+                    .iter()
+                    .map(|n| LabNeighbourDto {
+                        name: n.name.clone(),
+                        bearing_deg: n.bearing_deg,
+                        interval_end_ms: n.interval_end.map(ms),
+                        mean_c: n.mean_tenths.map(c),
+                    })
+                    .collect(),
+                reports: lab.reports,
+                latest_weather: lab.latest_weather.clone(),
+                forecast_max_c: lab.forecast_day_max_tenths.map(c),
+                yesterday_error_c: lab.yesterday_error_tenths.map(c),
+                taker_trades: lab.taker_trades,
+                wallet_days: lab.wallet_days,
+                wallets_skilled: lab.wallets_skilled,
+                wallets_losing: lab.wallets_losing,
+            })
+        })
+        .collect();
+    if inputs.is_empty() && snap.lab_books.is_empty() {
+        return None;
+    }
+    let books = snap
+        .lab_books
+        .iter()
+        .map(|b| LabBookDto {
+            strategy: b.strategy.to_string(),
+            open_positions: b.positions.iter().filter(|p| p.shares.micros() > 0).count(),
+            capital_usd: b.exposure.capital_deployed.as_f64(),
+            worst_case_usd: b.exposure.global_worst_case.as_f64(),
+            today_new_usd: b.daily_new_exposure.as_f64(),
+            today_realized_usd: b.daily_realized_pnl.as_f64(),
+            realized_total_usd: b.realized_pnl_total.as_f64(),
+        })
+        .collect();
+    Some(LabDto { inputs, books })
 }
 
 #[cfg(test)]

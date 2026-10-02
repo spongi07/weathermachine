@@ -10,7 +10,7 @@ use wm_core::ids::{LocationId, ProviderId, RunId, StationId};
 use wm_core::market::FeeSchedule;
 use wm_core::time::Clock;
 use wm_core::trading::RunMode;
-use wm_engine::{EngineConfig, EngineLocation};
+use wm_engine::{EngineConfig, EngineLocation, NeighbourStation};
 use wm_net::{HttpFetcher, ProviderGate};
 use wm_polymarket::LocationMarketSpec;
 use wm_strategy::{EmpiricalPeakModel, NoEdgeModel, PeakConfig, ProbabilityModel};
@@ -73,6 +73,32 @@ pub fn market_spec(l: &LocationFile) -> Result<LocationMarketSpec> {
     })
 }
 
+/// The KNMI stations around a location that the lab's L24 reads: the
+/// configured neighbours, for a station KNMI reads at all.
+pub fn lab_neighbours(cfg: &AppConfig, l: &LocationFile) -> Result<Vec<NeighbourStation>> {
+    if !cfg.file.strategies.lab.enabled || knmi_location(cfg, l).is_none() {
+        return Ok(Vec::new());
+    }
+    cfg.file
+        .lab
+        .neighbours
+        .iter()
+        .map(|n| {
+            Ok(NeighbourStation {
+                station: StationId::new(n.wmo.clone())
+                    .with_context(|| format!("[lab].neighbours: {}", n.wmo))?,
+                name: n.name.clone(),
+                bearing_deg: wm_strategy::lab::solar::bearing(
+                    l.station.latitude,
+                    l.station.longitude,
+                    n.latitude,
+                    n.longitude,
+                ),
+            })
+        })
+        .collect()
+}
+
 /// Engine configuration for a run.
 pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<EngineConfig> {
     let mut locations = Vec::new();
@@ -85,6 +111,8 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
             peak: peak_config(l),
             confirmed_filter: l.market.confirmed_filter.map(|f| f.filter()),
             routine_minutes: l.station.routine_minutes.clone(),
+            position: Some((l.station.latitude, l.station.longitude)),
+            neighbours: lab_neighbours(cfg, l)?,
         });
     }
     Ok(EngineConfig {
@@ -103,6 +131,8 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
         middle_fade: cfg.file.strategies.middle_fade.clone(),
         morning_maker: cfg.file.strategies.morning_maker.clone(),
         knmi_nowcast: cfg.file.strategies.knmi_nowcast.clone(),
+        lab: cfg.file.strategies.lab.clone(),
+        lab_forecast: cfg.forecast_product(),
         unwind: cfg.file.strategies.unwind.clone(),
         evaluate_on_book_updates: true,
         decision_log_capacity: 2_000,

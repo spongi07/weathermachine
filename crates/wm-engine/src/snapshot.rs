@@ -4,7 +4,7 @@ use crate::engine::{EngineStats, StationHint};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use wm_core::health::ProviderHealthSnapshot;
-use wm_core::ids::{LocationId, RunId, StationId};
+use wm_core::ids::{LocationId, RunId, StationId, StrategyId};
 use wm_core::market::{DailyTemperatureMarket, OrderBook};
 use wm_core::portfolio::Position;
 use wm_core::trading::{DecisionRecord, RunMode};
@@ -61,6 +61,54 @@ pub struct LocationSnapshot {
     /// The station's latest ten-minute reading (KNMI), if one arrived.
     #[serde(default)]
     pub nowcast: Option<wm_core::weather::TenMinuteObservation>,
+    /// What the strategy lab reads (`None` with the lab off).
+    #[serde(default)]
+    pub lab: Option<LabInputsSnapshot>,
+}
+
+/// A neighbouring KNMI station's latest reading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeighbourSnapshot {
+    pub name: String,
+    pub bearing_deg: f64,
+    pub interval_end: Option<DateTime<Utc>>,
+    pub mean_tenths: Option<i32>,
+}
+
+/// The strategy lab's inputs at a location, for the dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabInputsSnapshot {
+    /// KNMI readings of the station kept (the last 36 hours).
+    pub knmi_readings: usize,
+    /// The latest reading's global radiation (W/m²) and its share of the
+    /// clear sky.
+    pub radiation_wm2: Option<i32>,
+    pub clear_sky_index: Option<f64>,
+    pub neighbours: Vec<NeighbourSnapshot>,
+    /// Today's METARs with their weather groups, and the latest in words.
+    pub reports: usize,
+    pub latest_weather: Option<String>,
+    /// Today's day-1 forecast maximum (tenths), when usable.
+    pub forecast_day_max_tenths: Option<i32>,
+    pub yesterday_error_tenths: Option<i32>,
+    /// Today's market's taker trades received.
+    pub taker_trades: usize,
+    /// Takers' records: settled days scored (`None`: not loaded yet), and
+    /// how many count as skilled (t ≥ 2) and as losing.
+    pub wallet_days: Option<u32>,
+    pub wallets_skilled: usize,
+    pub wallets_losing: usize,
+}
+
+/// One lab strategy's own paper book.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabBookSnapshot {
+    pub strategy: StrategyId,
+    pub positions: Vec<Position>,
+    pub exposure: ExposureSummary,
+    pub daily_new_exposure: Usd,
+    pub daily_realized_pnl: Usd,
+    pub realized_pnl_total: Usd,
 }
 
 /// Full engine snapshot.
@@ -84,4 +132,7 @@ pub struct EngineSnapshot {
     pub daily_realized_pnl: Usd,
     pub realized_pnl_total: Usd,
     pub decisions: Vec<DecisionRecord>,
+    /// Each lab strategy's own book (the fields above are the main book's).
+    #[serde(default)]
+    pub lab_books: Vec<LabBookSnapshot>,
 }

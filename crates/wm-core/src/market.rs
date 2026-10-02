@@ -358,6 +358,25 @@ pub struct TradePrint {
     pub ts: DateTime<Utc>,
 }
 
+/// A taker's trade with who made it, from the public trade history
+/// (Polymarket's Data API) rather than the market feed, whose prints do not
+/// say who traded. The strategy lab's flow rules (L18–L21) read it; the
+/// wallet is kept only as a short hash, to tell takers apart and to look up
+/// their record on earlier days.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TakerTrade {
+    pub token: TokenId,
+    /// The taker's side on `token`.
+    pub side: Side,
+    pub price: f64,
+    pub size: f64,
+    pub at: DateTime<Utc>,
+    /// Short hash of the taker's wallet (`None`: not reported).
+    pub taker: Option<String>,
+    /// Identifies the trade across overlapping polls.
+    pub id: String,
+}
+
 /// Fee schedule of a market. Polymarket (2026) charges takers
 /// `fee = shares × rate × p × (1 − p)`; makers pay zero.
 /// The rate is configuration/API supplied — never assumed to be zero.

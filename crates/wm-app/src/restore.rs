@@ -106,16 +106,28 @@ pub async fn load(
     }
     // Oldest first across markets (stable: the query's order within a time).
     state.fills.sort_by_key(|f| f.fill.ts);
-    state.new_exposure_today = store
+    // Today's new exposure: the main book's together, each lab strategy's
+    // on its own (each counts toward its own book's limit).
+    for (strategy, price, filled) in store
         .opening_orders_since(today_utc)
         .await
         .context("loading today's orders")?
-        .into_iter()
-        .filter_map(|(price, filled)| {
-            let p = Price::from_micros(u32::try_from(price).ok()?).ok()?;
-            Some(notional(p, Shares::from_micros(filled), Rounding::Up))
-        })
-        .sum();
+    {
+        let Some(cost) = Price::from_micros(u32::try_from(price).unwrap_or(u32::MAX))
+            .ok()
+            .map(|p| notional(p, Shares::from_micros(filled), Rounding::Up))
+        else {
+            continue;
+        };
+        if wm_strategy::lab::is_lab_id(&strategy) {
+            *state
+                .lab_new_exposure_today
+                .entry(StrategyId::from_static_string(strategy))
+                .or_insert(Usd::ZERO) += cost;
+        } else {
+            state.new_exposure_today += cost;
+        }
+    }
     Ok((state, warnings))
 }
 

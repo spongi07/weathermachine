@@ -45,6 +45,8 @@ fn config() -> EngineConfig {
             peak: PeakConfig::default(),
             confirmed_filter: None,
             routine_minutes: vec![25, 55],
+            position: None,
+            neighbours: Vec::new(),
         }],
         risk: RiskConfig::default(),
         buy_yes: BuyYesConfig::default(),
@@ -58,6 +60,8 @@ fn config() -> EngineConfig {
         middle_fade: wm_strategy::MiddleFadeConfig::absent(),
         morning_maker: wm_strategy::MorningMakerConfig::absent(),
         knmi_nowcast: wm_strategy::KnmiNowcastConfig::absent(),
+        lab: wm_strategy::LabConfig::absent(),
+        lab_forecast: None,
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: false,
         decision_log_capacity: 100,
@@ -166,6 +170,7 @@ fn a_restored_position_of_a_finished_day_settles_at_the_next_step() {
         markets: vec![yesterday.clone()],
         fills: vec![yes_fill(&yesterday, 18, "0.90", 10)],
         new_exposure_today: Usd::ZERO,
+        lab_new_exposure_today: Default::default(),
     };
     let summary = session.restore(&state, now);
     assert_eq!((summary.open_positions, summary.fills), (1, 1));
@@ -219,6 +224,7 @@ fn a_restored_position_of_today_stays_open_until_its_day_is_over() {
         markets: vec![today.clone()],
         fills: vec![yes_fill(&today, 15, "0.40", 10)],
         new_exposure_today: Usd::from_whole(4),
+        lab_new_exposure_today: Default::default(),
     };
     session.restore(&state, now);
     let out = session.run_until(now + Duration::hours(6));

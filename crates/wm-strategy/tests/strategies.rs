@@ -161,6 +161,7 @@ fn ctx<'a>(
         peak_times: None,
         routine_minutes: &[25, 55],
         nowcast: None,
+        lab: &wm_strategy::LabInputs::EMPTY,
     }
 }
 

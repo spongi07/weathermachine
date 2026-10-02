@@ -65,6 +65,8 @@ fn config(mode: RunMode) -> EngineConfig {
             peak: PeakConfig::default(),
             confirmed_filter: None,
             routine_minutes: vec![25, 55],
+            position: None,
+            neighbours: Vec::new(),
         }],
         risk: RiskConfig::default(),
         buy_yes: BuyYesConfig::default(),
@@ -78,6 +80,8 @@ fn config(mode: RunMode) -> EngineConfig {
         middle_fade: wm_strategy::MiddleFadeConfig::absent(),
         morning_maker: wm_strategy::MorningMakerConfig::absent(),
         knmi_nowcast: wm_strategy::KnmiNowcastConfig::absent(),
+        lab: wm_strategy::LabConfig::absent(),
+        lab_forecast: None,
         unwind: UnwindConfig::default(),
         evaluate_on_book_updates: false,
         decision_log_capacity: 500,
@@ -1294,6 +1298,7 @@ fn a_restored_book_keeps_f_to_one_position_a_day() {
             "2026-07-01T13:40:00Z",
         )],
         new_exposure_today: Usd::from_whole(94),
+        lab_new_exposure_today: Default::default(),
     };
     // The day up to the 13:25Z report; then a book on `value` and the 13:55Z
     // report at `last` (known 13:58Z, 15:58 local, inside the slot).
@@ -1447,6 +1452,7 @@ fn restored_sales_count_toward_today_only() {
             ),
         ],
         new_exposure_today: Usd::from_whole(5),
+        lab_new_exposure_today: Default::default(),
     };
     let s = engine.restore(&state, utc("2026-07-01T12:00:00Z"));
     let minus_half = Usd::from_micros(-500_000);

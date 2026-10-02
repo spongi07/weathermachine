@@ -570,8 +570,10 @@ shows, decides how much K can do.
 internet: new combinations, with the internet as inspiration.
 
 Twenty-five strategies, L1–L25, are replayed by `research market` as a
-lab, each with a variant or a control and judged out of sample; none trades
-live. They combine inputs the public bots do not: KNMI's ten-minute
+lab, each with a variant or a control and judged out of sample; since 2
+October 2026 they also run live as paper strategies on books of their own
+([§7 there](strategy-lab.md#7-paper-trading-live-from-2-october-2026)),
+none with money. They combine inputs the public bots do not: KNMI's ten-minute
 readings as a maker's shield (L1), a maker's signal (L2), F's stop (L3), a
 cooling lock (L4, L5) or an early warning (L6, L7); the METAR's weather
 groups and its two-hour TREND (L8–L13); the forecast's hourly path, its own
@@ -583,7 +585,7 @@ reasoning, rules, variants and sources of each:
 [strategy lab](strategy-lab.md).
 
 The first run (2 October 2026, [§6 there](strategy-lab.md#6-the-first-run-2-october-2026))
-put nothing live: L4 (KNMI cooling lock) held up on the later days after
+put nothing on money: L4 (KNMI cooling lock) held up on the later days after
 losing in June–July, and L14 (the morning's departure from the hourly
 forecast) earned in both halves without a clear interval; both are judged
 again on new days. Six ideas were refuted outright, and what did work —
