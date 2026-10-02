@@ -290,6 +290,23 @@ lower bound, 0.94). A week KNMI refuses is left out and the log names it;
 only when no week downloads is K listed as not replayed — as it is without
 the key.
 
+**The strategy lab (L1–L25)** (since 2 October 2026) is the report's
+section *Strategy lab: L1–L25 at traded prices*: 25 new strategies, each
+with a variant or a control, none of them live
+([what each does and why](../research/strategy-lab.md)). It reads the
+day-1 forecast even when the installed model does not use it, the METAR's
+weather groups from the archived reports, and — with the KNMI key — KNMI's
+global radiation at Schiphol and the ten-minute temperatures of Valkenburg,
+De Bilt and Berkhout: about 72 extra requests for four months, a few
+minutes at KNMI's request spacing, cached in `/data/research/knmi-series/`
+once final. A station or parameter KNMI refuses twice in a row is given up
+(the log says which); its strategies are listed as not replayed. Read the
+lab's **out of sample** lines and its last line, *Strategy lab: held up on
+the later days …*, which the verdict repeats. A family named there is a
+candidate, not a switch: it needs the same result on the next run's new
+days, and then its own live strategy. Paste the lab's lines when you want
+one built.
+
 ### Strategy pages and logs to paste
 
 The dashboard's **Strategies** panel has a card per strategy that is

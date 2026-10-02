@@ -8,13 +8,18 @@
 //!    Gamma body and the trades): they never change, so a rerun asks the
 //!    network only for new days. Wallets are stored as short hashes — they
 //!    are used only to count distinct traders.
-//! 4. The METAR history (and the forecast history, when the installed model
-//!    uses the forecast) comes from the training caches, downloaded the same
-//!    way when missing. With `WM_KNMI_API_KEY` set, KNMI's ten-minute readings
-//!    of the station are downloaded a week at a time (cached once a week is
-//!    more than eight days old: KNMI may fill gaps for seven) for strategy K.
-//! 5. [`wm_backtest::market_study`] replays it all prequentially; the report
-//!    is written as Markdown and JSON.
+//! 4. The METAR history and the forecast history come from the training
+//!    caches, downloaded the same way when missing; the model is evaluated
+//!    with the forecast only when the installed model uses it, the strategy
+//!    lab reads it either way. With `WM_KNMI_API_KEY` set, KNMI's ten-minute
+//!    readings of the station are downloaded a week at a time (cached once a
+//!    week is more than eight days old: KNMI may fill gaps for seven) for
+//!    strategy K, and for the lab its global radiation and, at Schiphol, the
+//!    temperatures of three neighbouring stations. A week that will not
+//!    download costs only that week; an input that will not download at all
+//!    leaves its strategies unreplayed.
+//! 5. [`wm_backtest::market_study_lab`] replays it all prequentially; the
+//!    report is written as Markdown and JSON.
 //!
 //! Read-only: nothing here trades or changes the model.
 
@@ -22,11 +27,12 @@ use crate::training::{self, Progress, TrainPlan};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 use wm_backtest::{
-    ForecastHistory, KnmiHistory, MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade,
-    market_study_with,
+    ForecastHistory, KnmiHistory, LabInputs, MarketDay, MarketStudyConfig, MarketStudyReport,
+    MarketTrade, SeriesHistory, market_study_lab,
 };
 use wm_core::ids::ConditionId;
 use wm_core::market::{DailyTemperatureMarket, OutcomeSide, Side};
@@ -36,7 +42,8 @@ use wm_polymarket::{
     DataApiClient, GammaClient, GammaEvent, LocationMarketSpec, build_market, event_slug,
     parse_events,
 };
-use wm_weather::{IemArchive, KnmiTenMinute, OpenMeteoPreviousRuns};
+use wm_weather::knmi::wigos_id;
+use wm_weather::{IemArchive, KnmiError, KnmiTenMinute, OpenMeteoPreviousRuns, SeriesPoint};
 
 /// Longest wait for a gate per request.
 const MAX_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -93,6 +100,13 @@ pub enum ResearchProgress {
     History(Progress),
     /// KNMI readings of the week from `from` (cached or downloading).
     Knmi {
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    /// The strategy lab's KNMI readings (`what`: radiation, a neighbour) of
+    /// the week from `from`.
+    KnmiSeries {
+        what: String,
         from: NaiveDate,
         to: NaiveDate,
     },
@@ -408,6 +422,16 @@ pub async fn run(
         }
         _ => None,
     };
+    let lab = lab_inputs(
+        clients,
+        plan,
+        forecasts.is_some(),
+        now,
+        &hist_progress,
+        progress,
+        shutdown,
+    )
+    .await?;
     progress(ResearchProgress::Studying {
         market_days: days.len(),
     });
@@ -416,10 +440,11 @@ pub async fn run(
     let study = plan.study.clone();
     let report = tokio::task::spawn_blocking(move || -> Result<MarketStudyReport> {
         let observations = training::import_all(&paths, &station)?;
-        Ok(market_study_with(
+        Ok(market_study_lab(
             &observations,
             forecasts.as_ref(),
             knmi.as_ref(),
+            &lab,
             &days,
             &study,
         ))
@@ -442,7 +467,10 @@ pub async fn run(
     md.push_str(&format!(
         "\nSources: Polymarket Gamma events (`{}`), Polymarket Data API trades (taker side), IEM METAR archive{}; generated {}.\n",
         plan.spec.slug_template,
-        if report.knmi_days > 0 {
+        if report.knmi_days > 0
+            || report.lab_coverage.radiation_days > 0
+            || report.lab_coverage.neighbour_days > 0
+        {
             ", KNMI Data Platform ten-minute observations (EDR API)"
         } else {
             ""
@@ -468,69 +496,91 @@ const KNMI_CHUNK_DAYS: i64 = 7;
 /// add missing observations for seven days.
 const KNMI_FINAL_AFTER_DAYS: i64 = 8;
 
-/// KNMI's ten-minute readings of the plan's days, by local date: a week per
-/// request, cached once final. A week that fails to download is left out
-/// (logged); only when no week came is it an error.
-async fn knmi_history(
-    client: &KnmiTenMinute,
-    plan: &MarketResearchPlan,
-    location: &str,
-    now: DateTime<Utc>,
-    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<KnmiHistory> {
-    let tz = plan.spec.timezone;
-    let station = &plan.train.station;
-    let dir = plan
-        .cache_dir
+/// Where the research caches live (`research/`).
+fn research_root(plan: &MarketResearchPlan) -> PathBuf {
+    plan.cache_dir
         .parent()
         .and_then(Path::parent)
         .map_or_else(|| plan.cache_dir.clone(), Path::to_path_buf)
-        .join("knmi")
-        .join(station.as_str());
+}
+
+/// One series of KNMI downloads.
+struct KnmiWeeks<'a> {
+    /// Cache directory of the weeks.
+    dir: PathBuf,
+    /// What the readings are for, in the logs.
+    what: &'a str,
+    /// Give up after this many weeks in a row failed (`None`: never): a
+    /// station or parameter the API does not know fails every week.
+    give_up_after: Option<usize>,
+}
+
+/// KNMI readings of the plan's days, by local date of their interval's end:
+/// a week per request, cached once final. A week that fails to download is
+/// left out (logged); only when no week came is it an error.
+#[allow(clippy::too_many_arguments)]
+async fn knmi_weeks<T, F, Fut>(
+    plan: &MarketResearchPlan,
+    weeks: KnmiWeeks<'_>,
+    now: DateTime<Utc>,
+    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
+    event: &dyn Fn(NaiveDate, NaiveDate) -> ResearchProgress,
+    shutdown: &mut watch::Receiver<bool>,
+    fetch: F,
+    end_of: fn(&T) -> DateTime<Utc>,
+) -> Result<BTreeMap<NaiveDate, Vec<T>>>
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+    F: Fn(DateTime<Utc>, DateTime<Utc>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>, KnmiError>>,
+{
+    let tz = plan.spec.timezone;
     let today = wm_core::time::local_date(now, tz);
-    let mut history = KnmiHistory::new();
+    let mut history: BTreeMap<NaiveDate, Vec<T>> = BTreeMap::new();
     let mut failed: Vec<String> = Vec::new();
+    let mut failed_in_a_row = 0usize;
     let mut start = plan.from;
     while start <= plan.to {
         let end = (start + Duration::days(KNMI_CHUNK_DAYS - 1)).min(plan.to);
-        progress(ResearchProgress::Knmi {
-            from: start,
-            to: end,
-        });
-        let path = dir.join(format!("{start}_{end}.json"));
-        let cached: Option<Vec<TenMinuteObservation>> = read_json(&path);
+        progress(event(start, end));
+        let path = weeks.dir.join(format!("{start}_{end}.json"));
+        let cached: Option<Vec<T>> = read_json(&path);
         let readings = match cached {
             Some(r) => r,
             None => {
                 let (from, _) = local_day_bounds(start, tz);
                 let (_, to) = local_day_bounds(end, tz);
                 let fetched = tokio::select! {
-                    r = client.fetch(station, location, from, to, MAX_GATE_WAIT, 3) => r,
+                    r = fetch(from, to) => r,
                     _ = shutdown.changed() => bail!("shutting down"),
                 };
-                // A week that will not download costs K that week, not the
+                // A week that will not download costs that week, not the
                 // whole replay.
                 let r = match fetched {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!(from = %start, to = %end, error = %e, "KNMI readings of a week unavailable: strategy K is replayed without them");
+                        tracing::warn!(from = %start, to = %end, what = weeks.what, error = %e, "KNMI readings of a week unavailable: replayed without them");
                         failed.push(format!("{start} → {end}: {e}"));
+                        failed_in_a_row += 1;
+                        if weeks.give_up_after.is_some_and(|n| failed_in_a_row >= n) {
+                            break;
+                        }
                         start = end + Duration::days(1);
                         continue;
                     }
                 };
                 if (today - end).num_days() >= KNMI_FINAL_AFTER_DAYS {
-                    std::fs::create_dir_all(&dir)
-                        .with_context(|| format!("creating {}", dir.display()))?;
+                    std::fs::create_dir_all(&weeks.dir)
+                        .with_context(|| format!("creating {}", weeks.dir.display()))?;
                     training::write_atomic(&path, &serde_json::to_vec(&r)?)?;
                 }
                 r
             }
         };
+        failed_in_a_row = 0;
         for r in readings {
             history
-                .entry(wm_core::time::local_date(r.interval_end, tz))
+                .entry(wm_core::time::local_date(end_of(&r), tz))
                 .or_default()
                 .push(r);
         }
@@ -540,13 +590,188 @@ async fn knmi_history(
         && let Some(first) = failed.first()
     {
         bail!(
-            "no week of KNMI readings could be downloaded ({} failed; the first: {first})",
+            "no week of KNMI readings ({}) could be downloaded ({} failed; the first: {first})",
+            weeks.what,
             failed.len()
         );
     }
+    Ok(history)
+}
+
+/// KNMI's ten-minute readings of the plan's days for strategy K, by local
+/// date.
+async fn knmi_history(
+    client: &KnmiTenMinute,
+    plan: &MarketResearchPlan,
+    location: &str,
+    now: DateTime<Utc>,
+    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<KnmiHistory> {
+    let station = &plan.train.station;
+    let weeks = KnmiWeeks {
+        dir: research_root(plan).join("knmi").join(station.as_str()),
+        what: "strategy K",
+        give_up_after: None,
+    };
+    let mut history = knmi_weeks(
+        plan,
+        weeks,
+        now,
+        progress,
+        &|from, to| ResearchProgress::Knmi { from, to },
+        shutdown,
+        |from, to| client.fetch(station, location, from, to, MAX_GATE_WAIT, 3),
+        |r: &TenMinuteObservation| r.interval_end,
+    )
+    .await?;
     for v in history.values_mut() {
         v.sort_by_key(|r| r.interval_end);
         v.dedup_by_key(|r| r.interval_end);
     }
     Ok(history)
+}
+
+/// KNMI readings of other parameters or stations for the strategy lab.
+#[allow(clippy::too_many_arguments)]
+async fn knmi_series(
+    client: &KnmiTenMinute,
+    plan: &MarketResearchPlan,
+    location: &str,
+    parameters: &[&str],
+    what: &str,
+    now: DateTime<Utc>,
+    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<SeriesHistory> {
+    let weeks = KnmiWeeks {
+        dir: research_root(plan)
+            .join("knmi-series")
+            .join(location)
+            .join(parameters.join("-")),
+        what,
+        give_up_after: Some(2),
+    };
+    let mut history = knmi_weeks(
+        plan,
+        weeks,
+        now,
+        progress,
+        &|from, to| ResearchProgress::KnmiSeries {
+            what: what.to_owned(),
+            from,
+            to,
+        },
+        shutdown,
+        |from, to| client.fetch_series(location, parameters, from, to, MAX_GATE_WAIT, 3),
+        |p: &SeriesPoint| p.interval_end,
+    )
+    .await?;
+    for v in history.values_mut() {
+        v.sort_by_key(|p| p.interval_end);
+        v.dedup_by_key(|p| p.interval_end);
+    }
+    history.retain(|_, v| !v.is_empty());
+    Ok(history)
+}
+
+/// The strategy lab's own inputs, each optional: the day-1 forecast when the
+/// model's evaluation did not load it, KNMI's global radiation at the
+/// station and, at Schiphol, the neighbouring stations' temperatures. One
+/// that will not download is logged and leaves its strategies unreplayed.
+#[allow(clippy::too_many_arguments)]
+async fn lab_inputs(
+    clients: &MarketResearchClients<'_>,
+    plan: &MarketResearchPlan,
+    model_has_forecast: bool,
+    now: DateTime<Utc>,
+    hist_progress: &(dyn Fn(Progress) + Send + Sync),
+    progress: &(dyn Fn(ResearchProgress) + Send + Sync),
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<LabInputs> {
+    let mut lab = LabInputs::default();
+    if !model_has_forecast
+        && let (Some(fp), Some(client)) = (&plan.train.forecast, clients.forecast)
+    {
+        match training::forecast_history(client, &plan.train, fp, None, hist_progress, shutdown)
+            .await
+        {
+            Ok(f) => {
+                lab.forecasts = Some(ForecastHistory::from_hourly(
+                    fp.product.clone(),
+                    plan.train.tz,
+                    &f.hourly,
+                ));
+            }
+            Err(e) => {
+                if *shutdown.borrow() {
+                    bail!("shutting down");
+                }
+                tracing::warn!(error = %format!("{e:#}"), "forecast history unavailable: the lab's forecast strategies (L14–L17) are not replayed");
+            }
+        }
+    }
+    let (Some(client), Some(location)) = (clients.knmi, plan.knmi_location.as_deref()) else {
+        return Ok(lab);
+    };
+    let lab_sim = &plan.study.sim.lab;
+    let radiation = lab_sim.radiation_parameter.as_str();
+    match knmi_series(
+        client,
+        plan,
+        location,
+        &[radiation],
+        "global radiation",
+        now,
+        progress,
+        shutdown,
+    )
+    .await
+    {
+        Ok(h) if !h.is_empty() => lab.radiation = Some(h),
+        Ok(_) => tracing::warn!(
+            parameter = radiation,
+            "KNMI returned no radiation readings: L25 is not replayed"
+        ),
+        Err(e) => {
+            if *shutdown.borrow() {
+                bail!("shutting down");
+            }
+            tracing::warn!(error = %format!("{e:#}"), "KNMI radiation readings unavailable: L25 is not replayed");
+        }
+    }
+    // The neighbours and their bearings are Schiphol's.
+    if location != wigos_id("06240") {
+        return Ok(lab);
+    }
+    let temperature = lab_sim.neighbour_parameter.as_str();
+    for n in &lab_sim.neighbours {
+        let what = format!("{} ({})", n.name, n.wmo);
+        match knmi_series(
+            client,
+            plan,
+            &wigos_id(&n.wmo),
+            &[temperature],
+            &what,
+            now,
+            progress,
+            shutdown,
+        )
+        .await
+        {
+            Ok(h) if !h.is_empty() => {
+                lab.neighbours.insert(n.wmo.clone(), h);
+            }
+            Ok(_) => {
+                tracing::warn!(station = %what, "KNMI returned no readings of a neighbour: L24 is replayed without it")
+            }
+            Err(e) => {
+                if *shutdown.borrow() {
+                    bail!("shutting down");
+                }
+                tracing::warn!(station = %what, error = %format!("{e:#}"), "KNMI readings of a neighbour unavailable: L24 is replayed without it");
+            }
+        }
+    }
+    Ok(lab)
 }

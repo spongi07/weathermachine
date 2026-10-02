@@ -268,6 +268,22 @@ the days downloaded so far are studied.
   METAR* counts, per bin of the last mean's distance above the high's
   rounding edge (high + 0.5 °C), how often the next routine METAR raised the
   high — the table that sets K's `p_new_high`.
+* **The strategy lab (`wm-backtest::market_lab`).** Twenty-five new
+  strategies (L1–L25, [reasoning and sources](../research/strategy-lab.md))
+  on the same decisions and tape with G–K's fill rules, each with a variant
+  or a control (51 rules), $20 a trade (L3 at F's 100 shares). Its own
+  inputs: the METAR's weather groups (`wm_weather::metar_wx`: wind,
+  visibility, present and recent weather, clouds, QNH, TREND) from the
+  archived raw reports; the day-1 forecast also when the model does not use
+  it; KNMI's global radiation and three neighbouring stations' temperatures
+  (`KnmiTenMinute::fetch_series`, a week per request, cached under
+  `research/knmi-series/`, a series refused twice in a row given up); every
+  taker's P&L a share on the market days before (scored after each day is
+  replayed, never on it); and F's replayed trades (L3 sells them before the
+  METAR on a KNMI signal). A rule whose input is missing is reported as not
+  replayed. **Out of sample** as for G–K, per family; the last line names
+  the families whose chosen rule held up on the later days (interval above
+  zero). Nothing in the lab trades live.
 
 **OUTPUTS** (`/data/research/<station>-market.md` and `.json`):
 
@@ -307,6 +323,10 @@ the days downloaded so far are studied.
   the configured rule's own result on the second half — F's line too) and,
   with the KNMI key, the KNMI accuracy table; without it, "Strategy K: not
   replayed";
+* the strategy lab (L1–L25): the inputs each market day had, a line per
+  family (its main rule and its variant or control, or why a rule was not
+  replayed), the out-of-sample lines and the families that held up (that
+  last line also in the main verdict), and a table of every replayed rule;
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
   both clocks, the forecast rise and headroom, both structures' cells and
   P(high stays), the market and ask of the high's bucket, its taker flow
@@ -372,6 +392,18 @@ read-only and changes nothing.
   degrees, with or without the veto, 0.75 or 0.85); the out-of-sample line
   also judges the configured rule when another was chosen. `with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached`
   runs the study end to end with a mock KNMI server.
+* the strategy lab (`market_lab` unit tests): every family (L1–L25) trades
+  in a scenario built for it and stays out of the one that breaks its
+  condition (the shield breached, the dew point flat, no pressure rise, a
+  dry report, the wind from another station …), at the exact price and
+  P&L; F's escape hatch never exits on a signal known before its fill;
+  wallets are scored only on settled earlier trades; clear-sky radiation,
+  bearings and the KNMI window helpers are exact; rules without their input
+  are reported as not replayed; the out-of-sample line chooses on the first
+  half and names what held up. `metar_wx` parses Schiphol's wind, weather,
+  cloud and TREND groups exactly and never panics (property tests);
+  `the_lab_reads_knmi_radiation_and_neighbours_and_gives_up_on_a_refused_station`
+  runs the downloads end to end against a mock KNMI server.
 
 Data API paging, the offset cap, window splitting, dedup and the request
 budget are tested against a mock server. An end-to-end run against mock

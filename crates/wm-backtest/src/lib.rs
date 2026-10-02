@@ -9,6 +9,7 @@ pub mod forecast_eval;
 pub mod historical;
 pub mod market_eval;
 pub mod market_gk;
+pub mod market_lab;
 pub mod market_makers;
 pub mod market_peak;
 pub mod market_sim;
@@ -23,9 +24,11 @@ pub use forecast_eval::{
 };
 pub use historical::{ImportStats, import_iem_csv};
 pub use market_eval::{
-    MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade, market_study, market_study_with,
+    MarketDay, MarketStudyConfig, MarketStudyReport, MarketTrade, market_study, market_study_lab,
+    market_study_with,
 };
 pub use market_gk::{GkSim, KnmiAccuracyRow, KnmiHistory};
+pub use market_lab::{LabCoverage, LabInputs, LabSim, Neighbour, SeriesHistory};
 pub use market_makers::{FlowRow, MakerSim, MakerTakerStudy};
 pub use market_peak::PeakSlotSim;
 pub use market_sim::{

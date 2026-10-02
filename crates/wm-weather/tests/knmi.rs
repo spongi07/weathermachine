@@ -89,3 +89,37 @@ async fn a_rejected_key_is_an_error_not_an_empty_answer() {
     assert!(err.to_string().contains("401"), "{err}");
     assert!(!err.to_string().contains("test-key"));
 }
+
+#[tokio::test]
+async fn a_series_request_names_its_parameters_and_keeps_the_key_in_the_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06210"))
+        .and(query_param(
+            "datetime",
+            "2026-07-01T11:00:00Z/2026-07-01T11:45:00Z",
+        ))
+        .and(query_param("parameter-name", "ta,qg"))
+        .and(header("authorization", "test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"type":"CoverageCollection","coverages":[{"domain":{"axes":{"t":{"values":["2026-07-01T11:30:00Z","2026-07-01T11:40:00Z"]}}},"ranges":{"ta":{"values":[17.4,null]},"qg":{"values":[540.0,610.0]}}}]}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let got = client(&server.uri())
+        .fetch_series(
+            "0-20000-0-06210",
+            &["ta", "qg"],
+            utc("2026-07-01T11:00:00Z"),
+            utc("2026-07-01T11:45:00Z"),
+            Duration::from_secs(5),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].get("ta"), Some(17.4));
+    assert_eq!(got[1].get("ta"), None);
+    assert_eq!(got[1].get("qg"), Some(610.0));
+}

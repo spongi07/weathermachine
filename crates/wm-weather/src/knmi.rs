@@ -17,8 +17,8 @@
 //! METAR.
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use wm_core::ids::{ProviderId, StationId};
@@ -125,6 +125,104 @@ impl KnmiTenMinute {
         )
         .map_err(KnmiError::Malformed)
     }
+
+    /// Any of the collection's parameters (`qg`, `ta`, `dd`, …) of
+    /// `location` whose intervals end in `[from, to]`, oldest first, in the
+    /// collection's units. Research input: the strategy lab reads global
+    /// radiation and the temperatures of neighbouring stations this way.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fetch_series(
+        &self,
+        location: &str,
+        parameters: &[&str],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        max_gate_wait: Duration,
+        attempts: u32,
+    ) -> Result<Vec<SeriesPoint>, KnmiError> {
+        let query = format!(
+            "/locations/{location}?datetime={}/{}&parameter-name={}",
+            from.format("%Y-%m-%dT%H:%M:%SZ"),
+            to.format("%Y-%m-%dT%H:%M:%SZ"),
+            parameters.join(",")
+        );
+        let req = FetchRequest::get(format!("{}{query}", self.base_url), query)
+            .accept("application/json")
+            .authorization(self.api_key.clone())
+            .max_gate_wait(max_gate_wait)
+            .unconditional();
+        let resp = self.fetcher.get_retrying(&req, attempts.max(1)).await?;
+        parse_series(&resp.body, parameters).map_err(KnmiError::Malformed)
+    }
+}
+
+/// One ten-minute interval's values of any parameters, in the collection's
+/// units (W/m² for `qg`, °C for `ta`, degrees for `dd`, …).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeriesPoint {
+    /// End of the interval (UTC).
+    pub interval_end: DateTime<Utc>,
+    /// The parameters with a finite value at this time.
+    pub values: BTreeMap<String, f64>,
+}
+
+impl SeriesPoint {
+    pub fn get(&self, parameter: &str) -> Option<f64> {
+        self.values.get(parameter).copied()
+    }
+}
+
+/// The points of a CoverageJSON response (a `CoverageCollection` or a
+/// single `Coverage`) for `parameters`: one per time on the `t` axis that
+/// has a finite value of at least one of them.
+pub fn parse_series(body: &[u8], parameters: &[&str]) -> Result<Vec<SeriesPoint>, String> {
+    let doc: CoverageDoc =
+        serde_json::from_slice(body).map_err(|e| format!("not CoverageJSON: {e}"))?;
+    let mut coverages = doc.coverages;
+    if let Some(domain) = doc.domain {
+        coverages.push(Coverage {
+            domain,
+            ranges: doc.ranges.unwrap_or_default(),
+        });
+    }
+    let mut out: Vec<SeriesPoint> = Vec::new();
+    for c in coverages {
+        let times = &c.domain.axes.t.values;
+        let mut columns: Vec<(&str, &[Option<f64>])> = Vec::new();
+        for name in parameters {
+            if let Some(r) = c.ranges.get(*name) {
+                if r.values.len() != times.len() {
+                    return Err(format!(
+                        "{name} has {} values for {} times",
+                        r.values.len(),
+                        times.len()
+                    ));
+                }
+                columns.push((name, &r.values));
+            }
+        }
+        for (k, t) in times.iter().enumerate() {
+            let at = DateTime::parse_from_rfc3339(t)
+                .map_err(|e| format!("time '{t}': {e}"))?
+                .with_timezone(&Utc);
+            let values: BTreeMap<String, f64> = columns
+                .iter()
+                .filter_map(|(name, v)| {
+                    v[k].filter(|x| x.is_finite())
+                        .map(|x| ((*name).to_owned(), x))
+                })
+                .collect();
+            if !values.is_empty() {
+                out.push(SeriesPoint {
+                    interval_end: at,
+                    values,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|p| p.interval_end);
+    out.dedup_by_key(|p| p.interval_end);
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -315,6 +413,43 @@ mod tests {
         );
         assert!(
             parse_coverage(b"<html>", &eham(), "ta", "tx", utc("2026-07-01T12:00:00Z")).is_err()
+        );
+    }
+
+    #[test]
+    fn any_parameters_become_series_points() {
+        let body = r#"{
+          "type": "CoverageCollection",
+          "coverages": [{
+            "domain": {"axes": {"t": {"values": ["2026-07-01T11:20:00Z", "2026-07-01T11:30:00Z", "2026-07-01T11:40:00Z"]}}},
+            "ranges": {
+              "qg": {"values": [612.5, null, 88.0]},
+              "dd": {"values": [240.0, 250.0, null]}
+            }
+          }]
+        }"#;
+        let got = parse_series(body.as_bytes(), &["qg", "dd", "ff"]).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].get("qg"), Some(612.5));
+        assert_eq!(got[0].get("dd"), Some(240.0));
+        assert_eq!(got[1].get("qg"), None, "a null is no value");
+        assert_eq!(got[1].get("dd"), Some(250.0));
+        assert_eq!(got[2].get("dd"), None);
+        assert_eq!(got[2].interval_end, utc("2026-07-01T11:40:00Z"));
+        // No value at all leaves the time out; a parameter not asked for is
+        // ignored; a length mismatch is an error.
+        let sparse = r#"{"domain":{"axes":{"t":{"values":["2026-07-01T11:50:00Z","2026-07-01T12:00:00Z"]}}},"ranges":{"qg":{"values":[null,10.0]},"ta":{"values":[1.0,2.0]}}}"#;
+        let got = parse_series(sparse.as_bytes(), &["qg"]).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].values.len(), 1);
+        let bad = r#"{"coverages":[{"domain":{"axes":{"t":{"values":["2026-07-01T11:50:00Z"]}}},"ranges":{"qg":{"values":[1.0,2.0]}}}]}"#;
+        assert!(parse_series(bad.as_bytes(), &["qg"]).is_err());
+        assert!(parse_series(b"<html>", &["qg"]).is_err());
+        // Round trip through the research cache.
+        let json = serde_json::to_string(&got).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<SeriesPoint>>(&json).unwrap(),
+            got
         );
     }
 

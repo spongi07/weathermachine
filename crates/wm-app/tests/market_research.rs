@@ -733,3 +733,162 @@ async fn a_knmi_week_that_will_not_download_costs_only_that_week() {
     assert_eq!(o.report.knmi_days, 0);
     assert_eq!(o.report.market_days, 3);
 }
+
+/// A CoverageJSON body with a value every ten minutes of the request's
+/// window for each `(parameter, value)`.
+fn series_body(req: &Request, ranges: &[(&str, &str)]) -> ResponseTemplate {
+    let q: BTreeMap<String, String> = req.url.query_pairs().into_owned().collect();
+    let (from, to) = q["datetime"].split_once('/').unwrap();
+    let parse = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+    let (mut t, to) = (parse(from), parse(to));
+    let mut times = Vec::new();
+    while t <= to {
+        times.push(format!("\"{}\"", t.format("%Y-%m-%dT%H:%M:%SZ")));
+        t += Duration::minutes(10);
+    }
+    let n = times.len();
+    let ranges: Vec<String> = ranges
+        .iter()
+        .map(|(name, v)| format!(r#""{name}":{{"values":[{}]}}"#, vec![*v; n].join(",")))
+        .collect();
+    ResponseTemplate::new(200).set_body_string(format!(
+        r#"{{"type":"CoverageCollection","coverages":[{{"type":"Coverage","domain":{{"axes":{{"t":{{"values":[{}]}}}}}},"ranges":{{{}}}}}]}}"#,
+        times.join(","),
+        ranges.join(",")
+    ))
+}
+
+/// KNMI for K and the lab: Schiphol's ta/tx and qg, Valkenburg's ta; De
+/// Bilt refuses every request (asked twice, then given up); Berkhout is
+/// unknown (404).
+async fn lab_knmi_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06240"))
+        .and(query_param("parameter-name", "ta,tx"))
+        .respond_with(|req: &Request| series_body(req, &[("ta", "15.4"), ("tx", "15.6")]))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06240"))
+        .and(query_param("parameter-name", "qg"))
+        .respond_with(|req: &Request| series_body(req, &[("qg", "420.0")]))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06210"))
+        .and(query_param("parameter-name", "ta"))
+        .respond_with(|req: &Request| series_body(req, &[("ta", "16.1")]))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06260"))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(2)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn the_lab_reads_knmi_radiation_and_neighbours_and_gives_up_on_a_refused_station() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    let knmi_srv = lab_knmi_server().await;
+    let dir = tempdir("lab");
+    let mut plan = plan(&dir);
+    plan.knmi_location = Some("0-20000-0-06240".into());
+    // Three weeks: a station refused twice in a row is given up.
+    plan.from = d(2025, 3, 27);
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let data = DataApiClient::new(fetcher(ProviderId::polymarket_data(), 2), s.data.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let knmi = KnmiTenMinute::new(
+        fetcher(ProviderId::knmi(), 4),
+        knmi_srv.uri(),
+        "test-key",
+        "ta",
+        "tx",
+    );
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+        knmi: Some(&knmi),
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let seen = std::sync::Mutex::new(Vec::new());
+    let progress = |p: market_research::ResearchProgress| {
+        if let market_research::ResearchProgress::KnmiSeries { what, .. } = p {
+            seen.lock().unwrap().push(what);
+        }
+    };
+    // Every week is final on 30 April: all are cached.
+    let now = at(d(2025, 4, 30), 12, 0);
+    let o = market_research::run(&clients, &plan, now, &progress, &mut stop_rx)
+        .await
+        .unwrap();
+    let c = &o.report.lab_coverage;
+    assert_eq!((c.days, c.knmi_days), (3, 3), "{c:?}");
+    assert_eq!(c.radiation_days, 3, "{c:?}");
+    assert_eq!(c.neighbour_days, 3, "Valkenburg's readings: {c:?}");
+    assert_eq!(c.forecast_days, 0, "no forecast client");
+    assert!(c.weather_reports > 0, "{c:?}");
+    let v = &o.report.lab_verdict;
+    assert_eq!(v.len(), 25);
+    assert!(
+        !v[23].contains("not replayed") && !v[24].contains("not replayed"),
+        "{v:?}"
+    );
+    assert!(
+        v[13].contains("*L14* not replayed: no day-1 forecast"),
+        "{}",
+        v[13]
+    );
+    let md = std::fs::read_to_string(&o.markdown).unwrap();
+    assert!(
+        md.contains("## Strategy lab: L1–L25 at traded prices"),
+        "{md}"
+    );
+    assert!(
+        md.contains("KNMI radiation on 3, neighbouring stations on 3"),
+        "{md}"
+    );
+    let seen = seen.into_inner().unwrap();
+    for what in [
+        "global radiation",
+        "Valkenburg (06210)",
+        "De Bilt (06260)",
+        "Berkhout (06249)",
+    ] {
+        assert!(seen.iter().any(|w| w == what), "{what} not asked: {seen:?}");
+    }
+    assert_eq!(
+        seen.iter().filter(|w| *w == "De Bilt (06260)").count(),
+        2,
+        "given up after two refused weeks"
+    );
+    let series = dir.join("research/knmi-series");
+    assert!(
+        series
+            .join("0-20000-0-06240/qg/2025-04-10_2025-04-14.json")
+            .exists()
+    );
+    assert!(
+        series
+            .join("0-20000-0-06210/ta/2025-03-27_2025-04-02.json")
+            .exists()
+    );
+    assert!(
+        !series.join("0-20000-0-06260").exists(),
+        "nothing cached for a refused station"
+    );
+    let cached: Vec<wm_weather::SeriesPoint> = serde_json::from_slice(
+        &std::fs::read(series.join("0-20000-0-06240/qg/2025-04-10_2025-04-14.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cached[0].get("qg"), Some(420.0));
+    // Dropping the server checks that De Bilt was asked exactly twice.
+    drop(knmi_srv);
+}

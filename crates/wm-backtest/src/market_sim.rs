@@ -61,6 +61,8 @@ pub struct MarketSimConfig {
     pub maker: MakerSim,
     /// Strategies G–K (and their variants).
     pub gk: crate::market_gk::GkSim,
+    /// The strategy lab (L1–L25).
+    pub lab: crate::market_lab::LabSim,
 }
 
 impl Default for MarketSimConfig {
@@ -79,6 +81,7 @@ impl Default for MarketSimConfig {
             f: PeakSlotSim::default(),
             maker: MakerSim::default(),
             gk: crate::market_gk::GkSim::default(),
+            lab: crate::market_lab::LabSim::default(),
         }
     }
 }

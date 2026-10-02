@@ -563,3 +563,21 @@ shows, decides how much K can do.
   off, and why G's, H's and I's model conditions change little (I made
   +$62.35 without it).
 * The METAR high matched the resolved bucket on all 123 days.
+
+## 10. October 2026: the strategy lab
+
+*Question (2 October 2026).* Invent 25 good strategies that are not on the
+internet: new combinations, with the internet as inspiration.
+
+Twenty-five strategies, L1–L25, are replayed by `research market` as a
+lab, each with a variant or a control and judged out of sample; none trades
+live. They combine inputs the public bots do not: KNMI's ten-minute
+readings as a maker's shield (L1), a maker's signal (L2), F's stop (L3), a
+cooling lock (L4, L5) or an early warning (L6, L7); the METAR's weather
+groups and its two-hour TREND (L8–L13); the forecast's hourly path, its own
+peak hour and yesterday's error (L14–L17); bursts of flow confirmed by
+KNMI, takers' records on earlier days and the overreaction to a new high
+(L18–L22); and the weather that changes during the day — the recovery after
+a shower, upwind stations, radiation against the clear sky (L23–L25). The
+reasoning, rules, variants and sources of each:
+[strategy lab](strategy-lab.md).

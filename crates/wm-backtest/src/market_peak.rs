@@ -205,7 +205,7 @@ pub(crate) const STRUCTURE: &str = "–";
 const MIN_SPLIT_DAYS: usize = 20;
 
 /// The UTC instant of a local minute of `date` (`None` in a DST gap).
-fn local_to_utc(date: NaiveDate, minute: u16, tz: Tz) -> Option<DateTime<Utc>> {
+pub(crate) fn local_to_utc(date: NaiveDate, minute: u16, tz: Tz) -> Option<DateTime<Utc>> {
     let naive = date.and_hms_opt(0, 0, 0)? + Duration::minutes(i64::from(minute));
     tz.from_local_datetime(&naive)
         .earliest()

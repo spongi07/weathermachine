@@ -33,6 +33,9 @@
 //!   history before each market day) and F's peak-slot rule with its
 //!   variants at traded prices, one variant chosen out of sample
 //!   ([`crate::market_peak`]).
+//! * **Strategies G–K** ([`crate::market_gk`]) and **the strategy lab**,
+//!   25 new strategies with their variants and controls, none live
+//!   ([`crate::market_lab`]); each family judged out of sample.
 //!
 //! Market prices come from executed trades, not quotes: the midpoint of the
 //! latest taker buy and taker sell of YES (ask and bid proxies), each at most
@@ -41,6 +44,7 @@
 
 use crate::forecast_eval::{ForecastHistory, ratio_ci};
 use crate::market_gk::{self, GkDay, KnmiAccuracy, KnmiAccuracyRow, KnmiHistory};
+use crate::market_lab::{self, LabCoverage, LabDay, LabInputs, WalletBook};
 use crate::market_makers::{self, FlowCollector, MakerTakerStudy};
 use crate::market_peak;
 use crate::market_sim::{
@@ -358,6 +362,18 @@ pub struct MarketStudyReport {
     /// Market days with KNMI readings.
     #[serde(default)]
     pub knmi_days: u64,
+    /// The strategy lab's rules at traded prices (L1–L25, their own stakes).
+    #[serde(default)]
+    pub lab_strategies: Vec<StrategyRow>,
+    #[serde(default)]
+    pub lab_verdict: Vec<String>,
+    /// Per family: the rule best on the first half, on the second; then the
+    /// families that held up.
+    #[serde(default)]
+    pub lab_out_of_sample: Vec<String>,
+    /// How much of each lab input the market days had.
+    #[serde(default)]
+    pub lab_coverage: LabCoverage,
     /// Plain-language conclusions.
     pub verdict: Vec<String>,
 }
@@ -506,6 +522,28 @@ pub fn market_study_with(
     days: &[MarketDay],
     cfg: &MarketStudyConfig,
 ) -> MarketStudyReport {
+    market_study_lab(
+        observations,
+        forecasts,
+        knmi,
+        &LabInputs::default(),
+        days,
+        cfg,
+    )
+}
+
+/// [`market_study_with`] with the strategy lab's own inputs (L1–L25): the
+/// day-1 forecast even when the model does not use it, KNMI's radiation and
+/// the neighbouring stations' readings. The lab falls back to `forecasts`
+/// when `lab.forecasts` is empty.
+pub fn market_study_lab(
+    observations: &[Observation],
+    forecasts: Option<&ForecastHistory>,
+    knmi: Option<&KnmiHistory>,
+    lab: &LabInputs,
+    days: &[MarketDay],
+    cfg: &MarketStudyConfig,
+) -> MarketStudyReport {
     let view = ViewKind::All;
     let mut engine = TemperatureStateEngine::new(3);
     engine.register_station(cfg.station.clone(), cfg.tz);
@@ -588,6 +626,10 @@ pub fn market_study_with(
         gk_out_of_sample: Vec::new(),
         knmi_accuracy: Vec::new(),
         knmi_days: 0,
+        lab_strategies: Vec::new(),
+        lab_verdict: Vec::new(),
+        lab_out_of_sample: Vec::new(),
+        lab_coverage: LabCoverage::default(),
         verdict: Vec::new(),
     };
     let mut knmi_accuracy = KnmiAccuracy::default();
@@ -598,6 +640,12 @@ pub fn market_study_with(
     // Peak times of the days before the current one (strategy F's slots).
     let mut peaks = PeakTimesBuilder::new();
     let mut f_days: Vec<NaiveDate> = Vec::new();
+    // The lab: every taker's record on the market days before, the day
+    // before's final high (L17) and what each input covered.
+    let lab_forecasts = lab.forecasts.as_ref().or(forecasts);
+    let mut wallets = WalletBook::default();
+    let mut previous_high: Option<(NaiveDate, i32)> = None;
+    let mut coverage = LabCoverage::default();
 
     for (date, obs) in &by_day {
         for o in obs {
@@ -751,7 +799,90 @@ pub fn market_study_with(
                         cfg.tz,
                     ));
                 }
+                // The strategy lab, on the same decisions and tape.
+                let lab_trades = {
+                    let wx = market_lab::weather_of(&all_day, obs);
+                    let fc_today = lab_forecasts.and_then(|h| h.days.get(date));
+                    let yesterday_error_tenths = previous_high
+                        .filter(|(d, _)| d.succ_opt() == Some(*date))
+                        .and_then(|(d, high)| {
+                            lab_forecasts
+                                .and_then(|h| h.days.get(&d))
+                                .and_then(|f| f.day_max_tenths())
+                                .map(|m| high * 10 - m)
+                        });
+                    let radiation = lab
+                        .radiation
+                        .as_ref()
+                        .and_then(|h| h.get(date))
+                        .map(Vec::as_slice)
+                        .filter(|v| !v.is_empty());
+                    let neighbours: Vec<(
+                        &market_lab::Neighbour,
+                        f64,
+                        &[wm_weather::knmi::SeriesPoint],
+                    )> = cfg
+                        .sim
+                        .lab
+                        .neighbours
+                        .iter()
+                        .filter_map(|n| {
+                            lab.neighbours
+                                .get(&n.wmo)
+                                .and_then(|h| h.get(date))
+                                .filter(|v| !v.is_empty())
+                                .map(|v| (n, cfg.sim.lab.bearing_to(n), v.as_slice()))
+                        })
+                        .collect();
+                    let knmi_today = readings.filter(|r| !r.is_empty());
+                    let f_today: Vec<SimTrade> = trades
+                        .iter()
+                        .filter(|t| t.strategy == "F")
+                        .cloned()
+                        .collect();
+                    coverage.days += 1;
+                    coverage.knmi_days += u64::from(knmi_today.is_some());
+                    coverage.forecast_days += u64::from(fc_today.is_some());
+                    coverage.forecast_pairs +=
+                        u64::from(fc_today.is_some() && yesterday_error_tenths.is_some());
+                    coverage.radiation_days += u64::from(radiation.is_some());
+                    coverage.neighbour_days += u64::from(!neighbours.is_empty());
+                    coverage.weather_reports += wx.iter().filter(|w| w.is_some()).count() as u64;
+                    if knmi_today.is_some() {
+                        coverage.f_trades += f_today.len() as u64;
+                    }
+                    market_lab::simulate_lab(
+                        &LabDay {
+                            date: md.date,
+                            buckets: &md.buckets,
+                            labels: &md.labels,
+                            winner: md.winner,
+                            decisions: &all_day,
+                            wx: &wx,
+                            per_bucket: &per_bucket,
+                            peak: &peak_before,
+                            knmi: knmi_today,
+                            radiation,
+                            neighbours: &neighbours,
+                            forecast: fc_today,
+                            yesterday_error_tenths,
+                            wallets: &wallets,
+                            f_trades: &f_today,
+                            tz: cfg.tz,
+                        },
+                        &market_lab::Ctx {
+                            sim: &cfg.sim,
+                            fee_rate: cfg.taker_fee_rate,
+                            routine: &cfg.routine_minutes,
+                            metar_delay: cfg.knowledge_delay,
+                        },
+                    )
+                };
+                // Takers are judged on the days before, never on the day
+                // replayed.
+                wallets.add_day(&per_bucket, md.winner, cfg.taker_fee_rate);
                 report.sim_trades.extend(trades);
+                report.sim_trades.extend(lab_trades);
                 latency(md, &states, cfg, &mut report);
                 if points.len() > before {
                     scored_dates.push(*date);
@@ -774,6 +905,7 @@ pub fn market_study_with(
             &final_state.points,
             final_high,
         );
+        previous_high = Some((*date, final_high));
         engine.prune(*date);
     }
     for d in days {
@@ -868,6 +1000,24 @@ pub fn market_study_with(
         cfg.bootstrap_iterations,
         cfg.seed ^ 0x56,
     );
+    let (scored, skilled, losing) = wallets.counts();
+    coverage.wallets = scored;
+    coverage.skilled = skilled;
+    coverage.unskilled = losing;
+    report.lab_strategies = market_lab::lab_rows(
+        &report.sim_trades,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x57,
+    );
+    report.lab_verdict = market_lab::verdict(&report.lab_strategies, &coverage, &cfg.sim);
+    report.lab_out_of_sample = market_lab::out_of_sample(
+        &report.sim_trades,
+        &f_days,
+        &coverage,
+        cfg.bootstrap_iterations,
+        cfg.seed ^ 0x58,
+    );
+    report.lab_coverage = coverage;
     report.maker_taker = flows.finish(
         cfg.taker_fee_rate,
         cfg.sim.maker.rebate_share,
@@ -1452,6 +1602,10 @@ fn verdict(r: &MarketStudyReport) -> Vec<String> {
         v.push(line.clone());
     }
     v.extend(r.gk_out_of_sample.iter().cloned());
+    // The lab's summary: which families held up on the later days.
+    if let Some(line) = r.lab_out_of_sample.last() {
+        v.push(line.clone());
+    }
     if r.resolution_checked > 0 {
         v.push(format!(
             "The METAR high matched the resolved bucket on {} of {} days.",
@@ -1627,6 +1781,15 @@ impl MarketStudyReport {
             &self.knmi_accuracy,
             self.knmi_days,
         ));
+        if self.lab_coverage.days > 0 {
+            s.push_str(&market_lab::markdown(
+                &self.lab_strategies,
+                &self.sim,
+                &self.lab_coverage,
+                &self.lab_verdict,
+                &self.lab_out_of_sample,
+            ));
+        }
         s.push_str(&market_makers::maker_taker_markdown(&self.maker_taker));
         for t in &self.timelines {
             s.push_str(&market_sim::timeline_markdown(t, self.knowledge_delay_s));
@@ -2625,6 +2788,73 @@ mod tests {
         let older: MarketStudyReport = serde_json::from_value(older).unwrap();
         assert!(older.gk_strategies.is_empty() && older.knmi_days == 0);
         assert_eq!(older.sim.gk, crate::market_gk::GkSim::default());
+
+        // The strategy lab: a row per rule, a line per family, the KNMI
+        // rules (and F's escape hatch) not replayed without readings, the
+        // METAR rules replayed on every day; its trades never in the
+        // timelines, which show only the replayed strategies.
+        assert_eq!(r.lab_strategies.len(), crate::market_lab::rules().len());
+        assert_eq!(r.lab_verdict.len(), 25, "{:?}", r.lab_verdict);
+        assert_eq!(r.lab_coverage.days, 30);
+        assert_eq!(r.lab_coverage.knmi_days, 0);
+        assert_eq!(r.lab_coverage.forecast_days, 0);
+        assert!(
+            r.lab_coverage.weather_reports >= 30 * 40,
+            "{:?}",
+            r.lab_coverage
+        );
+        assert!(
+            r.lab_verdict[0].contains("*L1* not replayed: no KNMI ten-minute readings"),
+            "{}",
+            r.lab_verdict[0]
+        );
+        assert!(
+            r.lab_verdict[2].contains("*L3* not replayed"),
+            "{}",
+            r.lab_verdict[2]
+        );
+        assert!(
+            r.lab_verdict[7].starts_with("L8 Sea-breeze lock")
+                && !r.lab_verdict[7].contains("not replayed"),
+            "{}",
+            r.lab_verdict[7]
+        );
+        assert!(r.lab_out_of_sample.len() >= 2, "{:?}", r.lab_out_of_sample);
+        let summary = r.lab_out_of_sample.last().unwrap();
+        assert!(summary.starts_with("Strategy lab: "), "{summary}");
+        assert!(r.verdict.iter().any(|v| v == summary), "{:?}", r.verdict);
+        assert!(
+            r.sim_trades
+                .iter()
+                .filter(|t| t.structure == "lab")
+                .all(|t| t.strategy.starts_with('L'))
+        );
+        assert!(r.timelines.iter().all(|x| {
+            x.rows
+                .iter()
+                .all(|row| row.trades.iter().all(|t| !t.starts_with('L')))
+        }));
+        assert!(
+            md.contains("## Strategy lab: L1–L25 at traded prices"),
+            "{md}"
+        );
+        assert!(pos("## Strategies G–K") < pos("## Strategy lab"));
+        // Reports written before the lab still load.
+        let mut pre_lab = serde_json::to_value(&r).unwrap();
+        let o = pre_lab.as_object_mut().unwrap();
+        for k in [
+            "lab_strategies",
+            "lab_verdict",
+            "lab_out_of_sample",
+            "lab_coverage",
+        ] {
+            o.remove(k);
+        }
+        o["sim"].as_object_mut().unwrap().remove("lab");
+        let pre_lab: MarketStudyReport = serde_json::from_value(pre_lab).unwrap();
+        assert!(pre_lab.lab_strategies.is_empty() && pre_lab.lab_coverage.days == 0);
+        assert_eq!(pre_lab.sim.lab, crate::market_lab::LabSim::default());
+        assert!(!pre_lab.to_markdown().contains("## Strategy lab"));
     }
 
     #[test]

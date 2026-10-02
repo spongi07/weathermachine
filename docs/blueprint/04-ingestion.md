@@ -68,6 +68,16 @@ nothing (fail closed). K enabled without a key raises a warning and stays
 idle. At 30 s the loop makes about 2,900 requests a day, under the budget
 of 4,000.
 
+**Research-only inputs of the strategy lab.** `KnmiTenMinute::fetch_series`
+asks the same collection for any parameters of any station (`qg`, global
+radiation in W/m², at Schiphol; `ta` at Valkenburg, De Bilt and Berkhout)
+and returns them unconverted; only `research market` calls it, a week at a
+time. `wm_weather::metar_wx` reads a report's weather groups — wind and its
+variation, visibility, present and recent weather, clouds, QNH and the
+TREND groups — from the raw text the archive keeps. It never fails: an
+unknown group is skipped. Neither feeds the live system, the observed high
+or settlement.
+
 ## 10. Adaptive PollingPolicy
 
 **PURPOSE.** Decide *when* to ask, from what is expected, not from what is possible.

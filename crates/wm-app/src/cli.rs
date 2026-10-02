@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::{
-    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, GkSim, MakerSim, MarketSimConfig,
-    MarketStudyConfig, PeakSlotSim, StudyConfig, import_iem_csv, run_backtest, study,
+    BacktestConfig, BacktestReport, BookConfirmedSim, Fidelity, GkSim, LabSim, MakerSim,
+    MarketSimConfig, MarketStudyConfig, PeakSlotSim, StudyConfig, import_iem_csv, run_backtest,
+    study,
 };
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{RunId, StationId};
@@ -683,6 +684,12 @@ async fn research_market(
                 &cfg.file.strategies.morning_maker,
                 &cfg.file.strategies.knmi_nowcast,
             ),
+            // The lab's clear sky and bearings at the station's position.
+            lab: LabSim {
+                latitude: loc.station.latitude,
+                longitude: loc.station.longitude,
+                ..LabSim::default()
+            },
         },
         routine_minutes: loc.station.routine_minutes.clone(),
         timeline_days: days,
@@ -731,6 +738,9 @@ async fn research_market(
         ResearchProgress::Knmi { from, to } => {
             println!("KNMI ten-minute readings {from} → {to}: cached or downloading");
         }
+        ResearchProgress::KnmiSeries { what, from, to } => {
+            println!("KNMI {what} (strategy lab) {from} → {to}: cached or downloading");
+        }
         ResearchProgress::Studying { market_days } => {
             println!("replaying the history and scoring {market_days} settled market days…");
         }
@@ -738,7 +748,9 @@ async fn research_market(
     let (_stop_tx, mut stop_rx) = watch::channel(false);
     let knmi = setup::knmi_client(&cfg, &providers);
     if knmi.is_none() {
-        println!("no KNMI readings (set WM_KNMI_API_KEY to replay strategy K): K is not replayed");
+        println!(
+            "no KNMI readings (set WM_KNMI_API_KEY to replay strategy K): K and the lab's KNMI strategies are not replayed"
+        );
     }
     let clients = MarketResearchClients {
         gamma: &gamma,
@@ -762,6 +774,14 @@ async fn research_market(
         .chain(&o.report.strategy_verdict)
         .chain(&o.report.f_verdict)
         .chain(&o.report.gk_verdict)
+        .chain(&o.report.lab_verdict)
+        // The lab's last line (what held up) is in the verdict already.
+        .chain(
+            o.report
+                .lab_out_of_sample
+                .split_last()
+                .map_or(&[][..], |(_, rest)| rest),
+        )
     {
         println!("• {line}");
     }

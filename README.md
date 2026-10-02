@@ -55,6 +55,14 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   and J (morning quotes on both sides) — H and J lost in the replay, also
   out of sample. A and B pool the model with the market's price: the book
   can veto a trade, never create one.
+* **Tries more than it trades.** `research market` also replays a
+  [strategy lab](docs/research/strategy-lab.md) of 25 new strategies
+  (L1–L25) at traded prices: KNMI's ten-minute readings as a maker's shield
+  or a stop, the METAR's own weather groups and TREND (sea breeze, showers,
+  fog, fronts), the forecast's hourly path, KNMI's global radiation and the
+  temperatures of upwind stations, and every taker's record on the days
+  before. Each has a variant or a control and is judged out of sample; none
+  trades live until it holds up.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:
@@ -112,7 +120,7 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine collect [--once] [--no-db]` | Phase-0 data experiment: collectors only, zero trades |
 | `weather-machine model train` | Download METAR history from IEM and day-1 forecast history from Open-Meteo (rate-limited, cached), train both model structures, evaluate the forecast and pick the structure, and learn per season when the day's high is first reported (strategy F's slots); `run` does this automatically |
 | `weather-machine research peak-survival --csv … --model-out …` | P(high is final \| N min) with Wilson CIs from a CSV; trains the model |
-| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices and as limit orders, when each season's high is first reported and strategy F with its variants at traded prices (one chosen out of sample), what makers earned on the other side of every trade, strategies G–K with their variants at traded prices (the best of each judged out of sample), with a KNMI key how often the next METAR followed KNMI's ten-minute mean, a report-by-report replay of each `--day`, resolution check |
+| `weather-machine research market [--from --to --delay-secs --day … --print]` | Model versus market on settled markets (Polymarket Data API trades, cached): who predicts better (both structures), the best `market_weight`, who is sure first, how fast dead buckets reprice, strategies A/B/E at traded prices and as limit orders, when each season's high is first reported and strategy F with its variants at traded prices (one chosen out of sample), what makers earned on the other side of every trade, strategies G–K with their variants at traded prices (the best of each judged out of sample), with a KNMI key how often the next METAR followed KNMI's ten-minute mean, the strategy lab's 25 new strategies (L1–L25) with their variants and controls (each family judged out of sample), a report-by-report replay of each `--day`, resolution check |
 | `weather-machine report paper [--from --to --print]` | The paper run day by day, from the database: METAR high, report delays and which source delivered first, the day-1 forecast's error, every evaluation's blockers per strategy, the closest calls and how they ended, model against market on the winning bucket, proposals, orders, fills, P&L, provider health. The running service also serves it at `/api/v1/report/paper` |
 | `weather-machine backtest --synthetic-days N` / `--journal <run-id>` | Backtests with fidelity labels |
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules, and any liquidity-reward pools (read-only) |

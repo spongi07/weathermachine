@@ -549,7 +549,7 @@ fn cap(micros: u32) -> wm_core::units::Price {
     wm_core::units::Price::saturating_from_micros(micros)
 }
 
-fn tick(p: f64) -> f64 {
+pub(crate) fn tick(p: f64) -> f64 {
     if !(0.04..=0.96).contains(&p) {
         0.001
     } else {
@@ -604,7 +604,7 @@ impl Costs<'_> {
 /// buying YES for a YES purchase, selling YES for a NO purchase) when it is
 /// at most `fresh` old and acceptable, else the first acceptable one in
 /// `(at, until]`. With its time when later than `at`.
-fn taker_price(
+pub(crate) fn taker_price(
     trades: &[&MarketTrade],
     at: DateTime<Utc>,
     until: DateTime<Utc>,
@@ -637,7 +637,7 @@ fn taker_price(
 }
 
 /// The latest taker buy and sell of YES, each at most `fresh` old.
-fn fresh_quote(
+pub(crate) fn fresh_quote(
     trades: &[&MarketTrade],
     at: DateTime<Utc>,
     fresh: Duration,
