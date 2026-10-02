@@ -469,7 +469,8 @@ const KNMI_CHUNK_DAYS: i64 = 7;
 const KNMI_FINAL_AFTER_DAYS: i64 = 8;
 
 /// KNMI's ten-minute readings of the plan's days, by local date: a week per
-/// request, cached once final.
+/// request, cached once final. A week that fails to download is left out
+/// (logged); only when no week came is it an error.
 async fn knmi_history(
     client: &KnmiTenMinute,
     plan: &MarketResearchPlan,
@@ -489,6 +490,7 @@ async fn knmi_history(
         .join(station.as_str());
     let today = wm_core::time::local_date(now, tz);
     let mut history = KnmiHistory::new();
+    let mut failed: Vec<String> = Vec::new();
     let mut start = plan.from;
     while start <= plan.to {
         let end = (start + Duration::days(KNMI_CHUNK_DAYS - 1)).min(plan.to);
@@ -503,11 +505,21 @@ async fn knmi_history(
             None => {
                 let (from, _) = local_day_bounds(start, tz);
                 let (_, to) = local_day_bounds(end, tz);
-                let r = tokio::select! {
+                let fetched = tokio::select! {
                     r = client.fetch(station, location, from, to, MAX_GATE_WAIT, 3) => r,
                     _ = shutdown.changed() => bail!("shutting down"),
-                }
-                .with_context(|| format!("KNMI readings {start} → {end}"))?;
+                };
+                // A week that will not download costs K that week, not the
+                // whole replay.
+                let r = match fetched {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(from = %start, to = %end, error = %e, "KNMI readings of a week unavailable: strategy K is replayed without them");
+                        failed.push(format!("{start} → {end}: {e}"));
+                        start = end + Duration::days(1);
+                        continue;
+                    }
+                };
                 if (today - end).num_days() >= KNMI_FINAL_AFTER_DAYS {
                     std::fs::create_dir_all(&dir)
                         .with_context(|| format!("creating {}", dir.display()))?;
@@ -523,6 +535,14 @@ async fn knmi_history(
                 .push(r);
         }
         start = end + Duration::days(1);
+    }
+    if history.is_empty()
+        && let Some(first) = failed.first()
+    {
+        bail!(
+            "no week of KNMI readings could be downloaded ({} failed; the first: {first})",
+            failed.len()
+        );
     }
     for v in history.values_mut() {
         v.sort_by_key(|r| r.interval_end);

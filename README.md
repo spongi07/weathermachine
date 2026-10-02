@@ -32,28 +32,28 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   → probability model trained on real EHAM history (downloaded from IEM and
   trained automatically on first start, retrained every 30 days in the
   background and swapped in without a restart) → strategies → risk engine
-  → simulated venue. Switched on in the shipped configuration (1 October
-  2026; each one a hypothesis that `research market` judges out of sample):
+  → simulated venue. Switched on in the shipped configuration (2 October
+  2026, after the first replay of G–K at traded prices; each one a
+  hypothesis that `research market` judges out of sample):
   * **F** peak slot: 100 shares of YES on the high's bucket inside the
     season's peak slot (the 75th to 95th percentile of the local time at
     which the station's history first reported its day's high), once that
     bucket is offered above 0.90, at most 0.95;
   * **G** tail seller: resting NO bids (the YES offered at 1–8¢) on buckets
-    two or more degrees above the high, withdrawn before each report;
-  * **H** next degree: the cheap YES of high + 1 while the day can still
-    warm and the model rates it at least its price;
+    three or more degrees above the high, withdrawn before each report;
   * **I** middle fade: the NO of buckets priced 0.30–0.70 that the model
     also rates lower — the middle of the ladder is overpriced;
-  * **J** morning maker: YES and NO bids inside the spread from midnight to
-    11:00, when resting orders were paid, withdrawn before each report;
   * **K** KNMI nowcast: the NO of the high's bucket when KNMI's ten-minute
-    mean is already above the next degree, before the METAR is published.
+    mean is already above the next degree, before the METAR is published
+    (in the replay: 4 of 4 won, and 4 of 4 out of sample).
 
   Switched off, code kept as research baselines (`enabled = true` brings one
   back): A (YES of the final-high bucket), B (NO above it), C (split and
   unwind), D (outcomes the observations have already decided), E (YES of
-  the high's bucket once the book confirms it). A and B pool the model with
-  the market's price: the book can veto a trade, never create one.
+  the high's bucket once the book confirms it), H (the cheap YES of high + 1)
+  and J (morning quotes on both sides) — H and J lost in the replay, also
+  out of sample. A and B pool the model with the market's price: the book
+  can veto a trade, never create one.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:

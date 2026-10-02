@@ -185,10 +185,20 @@ for strategy D (decided outcomes) after faster traders? Run the study on the
 settled markets (read-only: it trades nothing and changes nothing):
 
 ```sh
-docker run --rm -e WM_CONTACT=you@example.org -v weather-machine_wmdata:/data \
+docker run --rm -e WM_CONTACT=you@example.org -e WM_KNMI_API_KEY \
+  -v weather-machine_wmdata:/data \
   ghcr.io/spongi07/weathermachine:latest \
-  research market --from 2026-06-01 --to 2026-09-28 --day 2026-09-28 --print
+  research market --from 2026-06-01 --to 2026-10-01 --print
 ```
+
+Mount the stack's own data volume. Portainer names it after the stack
+(`<stack name>_wmdata`; `docker volume ls | grep wmdata` lists them), and
+`docker run` silently creates an empty volume for a name that does not
+exist. On the wrong volume the study finds no installed model — it prints
+*no installed model: evaluated without the forecast* — and the dashboard's
+*Reports to paste* panel does not see the report. `-e WM_KNMI_API_KEY`
+without a value passes the key from your shell (`read -rs WM_KNMI_API_KEY &&
+export WM_KNMI_API_KEY`), so it never appears on the command line.
 
 Besides model versus market, the report replays strategies A and B at the
 prices the market actually traded. It also shows what resting (maker)
@@ -258,7 +268,9 @@ known after 2 or 8 minutes). Makers fill only when a later trade goes
 through their price, takers pay the fee. Read the lines **Strategy G out
 of sample** … **Strategy K out of sample** in the verdict first: the best
 variant of each strategy on the first half of the days, scored on the
-second half (with its 95 % interval). A negative one means
+second half (with its 95 % interval) — and, when that variant is not the
+configured one, the configured rule's own result on the second half. That
+last part decides whether a strategy stays on. A negative one means
 `enabled = false` in that strategy's section; a better variant can be
 switched to in the same section.
 
@@ -270,13 +282,16 @@ gaps for up to seven days) and adds the table
 *KNMI's ten-minute mean before the METAR*: how often the next METAR raised
 the high, by how far the last mean before it stood above the high's rounding
 edge. Set K's `p_new_high` from the row of its margin (shipped: +0.3 °C,
-assumed 0.80). Without the key, K is listed as not replayed.
+assumed 0.80, measured 0.975 on 2 October 2026; the shipped value is its
+lower bound, 0.94). A week KNMI refuses is left out and the log names it;
+only when no week downloads is K listed as not replayed — as it is without
+the key.
 
 ### Strategy pages and logs to paste
 
 The dashboard's **Strategies** panel has a card per strategy that is
-switched on (F–K and the unwind exits; a strategy with `enabled = false` is
-not shown). Each card shows what the strategy is doing now, for example
+switched on (F, G, I, K and the unwind exits since 2 October 2026; a
+strategy with `enabled = false` is not shown). Each card shows what the strategy is doing now, for example
 "autumn slot 13:25–15:26: before the slot: it starts in 2 h 13 min", or the
 blocker on the high's bucket. It also shows this run's proposals and orders,
 with two buttons:

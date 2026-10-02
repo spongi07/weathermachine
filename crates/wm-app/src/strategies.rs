@@ -324,16 +324,14 @@ mod tests {
             [
                 "F_peak_slot",
                 "G_tail_seller",
-                "H_next_degree",
                 "I_middle_fade",
-                "J_morning_maker",
                 "K_knmi_nowcast",
                 "U_unwind"
             ]
         );
         let letters: String = c.iter().map(|s| s.letter.as_str()).collect();
-        assert_eq!(letters, "FGHIJKU");
-        // A–E are off and not shown; switched on again they come back.
+        assert_eq!(letters, "FGIKU");
+        // A–E, H and J are off and not shown; switched on again they come back.
         let all: String = every_strategy(&cfg)
             .iter()
             .map(|s| s.letter.as_str())

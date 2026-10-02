@@ -258,7 +258,8 @@ the days downloaded so far are studied.
   better than the latest trade on their side and fill only when a later
   trade goes through that price before the order expires, 10 minutes before
   the next routine report; no fee, the rebate earned. *K* uses KNMI's
-  ten-minute readings for the day (downloaded with `WM_KNMI_API_KEY`), each
+  ten-minute readings for the day (downloaded with `WM_KNMI_API_KEY` a week
+  per request; a week that fails is left out and logged), each
   known 5 minutes after its interval (an assumption; variants 2 and 8), and
   a price at most a minute old. At most one trade per rule, day and bucket
   (J: per side). Each strategy is replayed as configured and with variants;
@@ -301,7 +302,9 @@ the days downloaded so far are studied.
   line, the out-of-sample line (also in the main verdict) and its losing
   trades, with the time of fills from the tape;
 * strategies G–K: each family's rows (configured rule first), a verdict
-  line per family, the out-of-sample lines (also in the main verdict) and,
+  line per family, the out-of-sample lines (also in the main verdict; when
+  the rule chosen on the first half is not the configured one, each adds
+  the configured rule's own result on the second half — F's line too) and,
   with the KNMI key, the KNMI accuracy table; without it, "Strategy K: not
   replayed";
 * with `--day YYYY-MM-DD` (repeatable): that day report by report. It shows
@@ -355,15 +358,18 @@ read-only and changes nothing.
   unit tests in `market_peak` cover the ask at the report and from the tape,
   the price edges (above 0.90, at most the cap), the slot end, the data-age
   limit, the fallback slot, the drop variant, the maker's bid, cancel and
-  rebate, the out-of-sample choice (ties keep the configured rule) and the
-  variant list.
+  rebate, the out-of-sample choice (ties keep the configured rule, and the
+  configured rule's own later days are reported beside the chosen one) and
+  the variant list.
 
 * strategies G–K (`market_gk` unit tests): G sells a far tail when a later
   buyer pays through its offer; H buys the next degree from the tape and I
   needs a fresh midpoint; J earns the spread when both sides fill; K buys
   the high's NO before the METAR, also on the reading known as its report
   is taken, and the accuracy table counts it; the configured rules come
-  first and duplicates are dropped. `with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached`
+  first and duplicates are dropped (G's distance variant is the other of two
+  and three degrees); the out-of-sample line also judges the configured rule
+  when another was chosen. `with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached`
   runs the study end to end with a mock KNMI server.
 
 Data API paging, the offset cap, window splitting, dedup and the request

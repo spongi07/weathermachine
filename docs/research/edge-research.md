@@ -421,6 +421,11 @@ is a hypothesis with replay evidence, judged out of sample by `research
 market`, to run in paper first. A, B and D (no trade on 30 September – 1
 October) are switched off, C and E were already off.
 
+*Update, 2 October 2026.* The first replay of G–K with KNMI's readings
+(§9.5) kept K — 4 of 4 won in- and out of sample — and switched H and J
+off; G now starts three degrees above the high, and I waits for its
+configured rule's own out-of-sample result.
+
 ### 9.1 What others found
 
 | Source | Finding | Used in |
@@ -465,6 +470,8 @@ Full rules, risks and tests: [strategy blueprint §27e–§27i](../blueprint/06-
 | **J** morning maker | YES and NO bids inside the spread, 00:00–11:00, midpoint 0.10–0.90, spread 2–5¢; good till 10 min before each report; no model | $10 a side, $80 | spread capture when makers are paid |
 | **K** KNMI nowcast | NO of the high's bucket when KNMI's ten-minute mean is ≥ high + 0.8 °C (maximum ≥ high + 0.5 °C) before the METAR is published; NO ask 0.02–0.75, EV at p = 0.80 ≥ 0.05; FAK | $25, $50; spread ≤ 0.10 | minutes ahead of the report |
 
+H and J were switched off on 2 October 2026 (§9.5).
+
 **How the configuration was chosen.** Each threshold sits where the replay
 tables change sign (G's distance 2 and its 8¢ cap, J's 11:00 end, the
 cancel 10 minutes before a report); sizes keep every strategy's worst case
@@ -497,3 +504,47 @@ the earlier attempts lost on (§2).
   ten-minute mean before the METAR* before relying on it. Without the key K
   does nothing.
 * Paper first: `weather-machine report paper` per strategy before any money.
+
+### 9.5 The replay of 2 October 2026
+
+`research market` over 123 settled days (1 June – 1 October 2026) with
+KNMI's ten-minute readings. *Out of sample*: the rule that did best on
+June–July (61 days), scored on August–September (62 days).
+
+| | configured rule, all days | best on June–July | that rule in August–September | decision |
+|---|---|---|---|---|
+| F | 80 trades, 75 won, +$11.13 | maker, +$27.72 | 11 trades, 10 won, −$18.76 | on for now: about break-even with ~$93 at risk a trade; its own August–September result decides |
+| G | 37 trades, 35 won, −$18.04 | three above, +$16.46 | 1 trade, won, +$2.28 | from three degrees above (15 of 15 won, +$18.74 over all days) |
+| H | 169 trades, 38 won, −$77.18 | maker, +$159.31 | 48 trades, 5 won, −$92.20 | **off** |
+| I | 90 trades, 51 won, +$58.79 | maker, +$87.81 | 28 trades, 11 won, −$74.85 | on for now; its own August–September result decides |
+| J | 250 fills, 111 won, −$197.52 | YES bids, +$28.88 | 56 fills, 14 won, −$171.88 (95 % CI −5.87 … −0.22 a fill) | **off** |
+| K | 4 trades, 4 won, +$81.10 | reading known after 2′, +$91.43 | 4 trades, 4 won, +$56.41 (95 % CI +10.72 … +17.01 a trade) | on; `p_new_high` 0.94 (measured), NO up to 0.85 |
+
+The best rule on June–July is not always the configured one, so from this
+release each out-of-sample line also gives the configured rule's own
+result on the later days.
+
+**What the numbers say.**
+
+* **K is the one clear edge: being minutes ahead of the METAR.** After a
+  ten-minute reading 0.3–0.5 °C above the high's rounding edge the next
+  report raised the high 194 times out of 199 (0.975, 95 % CI
+  0.943 … 0.989), and after all 137 readings further above it
+  ([blueprint §27i](../blueprint/06-strategy.md#27i-knmi-nowcast--strategy-k)).
+  When K bought, the market still priced the high's bucket NO at 0.565 on
+  average. Speed matters: with the reading known after 2 minutes instead of
+  5, K made 7 trades (+$147.84) instead of 4.
+* **The calibration edges are real but small.** The middle of the ladder is
+  overpriced (YES at 0.30–0.70 won 45.4 % at 48.5 %, 95 % CI of the win rate
+  42.8 … 48.0 %), and so are the far tails (0.1 % at 0.4 %). After the fee
+  and the spread little is left: I made +$0.65 a trade with an interval
+  spanning zero, and the variant chosen in June–July did not hold up.
+* **Quotes that rest into informed flow lose.** H's and J's resting orders
+  were filled mostly when the taker knew better; the market's makers on the
+  high's bucket lost 1.18¢ a share in the last five minutes before a report
+  (95 % CI −1.95 … −0.40).
+* **The model adds nothing to the market's prices** (log loss +0.0752 a
+  decision against the market, 95 % CI +0.0562 … +0.0942): why A and B are
+  off, and why G's, H's and I's model conditions change little (I made
+  +$62.35 without it).
+* The METAR high matched the resolved bucket on all 123 days.

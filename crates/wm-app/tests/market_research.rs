@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::watch;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_contains};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use wm_app::market_research::{self, MarketResearchClients, MarketResearchPlan};
 use wm_app::training::TrainPlan;
@@ -647,4 +647,89 @@ async fn with_a_knmi_key_strategy_k_is_replayed_and_the_readings_cached() {
         serde_json::from_slice(&std::fs::read(&cached).unwrap()).unwrap();
     assert!(rows.len() > 5 * 144 - 10, "{}", rows.len());
     assert_eq!(rows[0].mean, Some(wm_core::units::TempC::from_tenths(154)));
+}
+
+#[tokio::test]
+async fn a_knmi_week_that_will_not_download_costs_only_that_week() {
+    let (csv, highs) = history();
+    let s = servers(&highs, &csv).await;
+    let knmi_srv = knmi_server().await;
+    // The second week (17–18 April, local) is refused.
+    Mock::given(method("GET"))
+        .and(path("/locations/0-20000-0-06240"))
+        .and(query_param_contains("datetime", "2025-04-16T22:00:00Z/"))
+        .respond_with(ResponseTemplate::new(400))
+        .with_priority(1)
+        .mount(&knmi_srv)
+        .await;
+    let dir = tempdir("knmi-gap");
+    let mut plan = plan(&dir);
+    plan.knmi_location = Some("0-20000-0-06240".into());
+    plan.to = d(2025, 4, 18);
+    let gamma = GammaClient::new(fetcher(ProviderId::polymarket_gamma(), 1), s.gamma.uri());
+    let data = DataApiClient::new(fetcher(ProviderId::polymarket_data(), 2), s.data.uri());
+    let archive = IemArchive::new(fetcher(ProviderId::iem(), 3), s.iem.uri());
+    let knmi = KnmiTenMinute::new(
+        fetcher(ProviderId::knmi(), 4),
+        knmi_srv.uri(),
+        "test-key",
+        "ta",
+        "tx",
+    );
+    let clients = MarketResearchClients {
+        gamma: &gamma,
+        data: &data,
+        archive: &archive,
+        forecast: None,
+        knmi: Some(&knmi),
+    };
+    let (_stop, mut stop_rx) = watch::channel(false);
+    let o = market_research::run(
+        &clients,
+        &plan,
+        at(d(2025, 4, 19), 12, 0),
+        &|_| {},
+        &mut stop_rx,
+    )
+    .await
+    .unwrap();
+    // The first week (10–16 April) holds the three settled days: K is
+    // replayed on all of them.
+    assert_eq!(o.report.knmi_days, 3);
+    assert!(
+        !o.report
+            .gk_verdict
+            .iter()
+            .any(|v| v.contains("not replayed")),
+        "{:?}",
+        o.report.gk_verdict
+    );
+    // Every week refused: K is not replayed, the rest of the study is.
+    let all_refused = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&all_refused)
+        .await;
+    let refused = KnmiTenMinute::new(
+        fetcher(ProviderId::knmi(), 5),
+        all_refused.uri(),
+        "test-key",
+        "ta",
+        "tx",
+    );
+    let clients = MarketResearchClients {
+        knmi: Some(&refused),
+        ..clients
+    };
+    let o = market_research::run(
+        &clients,
+        &plan,
+        at(d(2025, 4, 19), 12, 0),
+        &|_| {},
+        &mut stop_rx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(o.report.knmi_days, 0);
+    assert_eq!(o.report.market_days, 3);
 }

@@ -311,9 +311,10 @@ throttle_memory_secs = 1800
 # ---------------------------------------------------------------------------
 [risk]
 position_size_usd = "10.00"          # any strategy without its own caps
-# F ≤ $110 + G $120 + H $30 + I $30 + J $80 + K $50 = $420 of capital at
-# most. The worst-case loss counts the worst outcome of each market, where
-# legs of different buckets hedge each other, so it stays below that.
+# F ≤ $110 + G $120 + I $30 + K $50 = $310 of capital at most (H's $30
+# and J's $80 more if they are switched back on). The worst-case loss counts
+# the worst outcome of each market, where legs of different buckets hedge
+# each other, so it stays below that.
 global_max_exposure_usd = "400.00"
 max_market_exposure_usd = "400.00"   # one market a day: the same as the location
 max_location_exposure_usd = "400.00"
@@ -501,9 +502,13 @@ max_data_age_minutes = 40
 # 0.00–0.02 won 0.1 % at a mean price of 0.4 %, and the makers facing the
 # takers who bought them earned +0.34¢ a share (95 % CI +0.26 … +0.41),
 # +1.04¢ on buckets two above the high (−0.06 … +2.27).
+# Replay of 2 October 2026 (123 days at traded prices): from two degrees
+# above the high G lost $18.04 over 37 trades (two of those tails won);
+# from three above all 15 trades won, +$18.74, and so did its one trade in
+# August–September (the out-of-sample half). A small earner, not a big one.
 [strategies.tail_seller]
 enabled = true
-min_distance = 2                  # every value of the bucket ≥ high + 2
+min_distance = 3                  # every value of the bucket ≥ high + 3
 min_yes_price = "0.01"            # the YES offered (1 − the NO bid) …
 max_yes_price = "0.08"            # … in this range
 max_model_ratio = 1.0             # the model's probability ≤ 1.0 × that price
@@ -519,8 +524,11 @@ max_book_age_ms = 15000
 # can still warm. On that bucket takers gained +0.78¢ a share and the makers
 # against them lost 0.68¢ (95 % CI −1.27 … −0.10); B, buying the NO above the
 # high, lost at every setting; YES at 0.10–0.30 won 21.0 % at 18.7 %.
+# Switched off on 2 October 2026: in the replay (123 days at traded prices)
+# H lost $77.18 over 169 trades, and its best variant on June–July (as a
+# resting bid, +$159.31) lost $92.20 on August–September.
 [strategies.next_degree]
-enabled = true
+enabled = false
 min_price = "0.05"                # the ask of the next degree …
 max_price = "0.35"                # … and the whole size at or below this
 start_local_minute = 600          # 10:00 local …
@@ -558,8 +566,12 @@ slippage_allowance = "0.005"
 # before, +0.61¢ from 00:00 to 09:00 and +0.47¢ from 09:00 to 12:00 (each
 # interval spans zero) and lost in the afternoon and before reports, so the
 # quotes stop at 11:00 and expire 10′ before each report.
+# Switched off on 2 October 2026: in the replay J lost $197.52 over 250
+# filled quotes, and its best variant on June–July (YES bids only, +$28.88)
+# lost $171.88 on August–September (95 % CI −5.87 … −0.22 a trade): its
+# fills come mostly from takers who know better.
 [strategies.morning_maker]
-enabled = true
+enabled = false
 start_local_minute = 0
 end_local_minute = 660            # 11:00 local (exclusive)
 min_mid = 0.10
@@ -576,9 +588,12 @@ max_book_age_ms = 15000
 # METAR is 0.8 °C above the high (the rounding edge plus 0.3), buy the NO of
 # the high's bucket before the METAR reports the new high. In the replay,
 # takers sold soon-dead buckets for $3,330 of profit in the ten minutes
-# before such reports. p_new_high is an assumption until `research market`
-# (with the key) measures how often the METAR followed. Needs
-# WM_KNMI_API_KEY; idle without it.
+# before such reports. Needs WM_KNMI_API_KEY; idle without it.
+# Replay of 2 October 2026 (123 days with KNMI's readings): 4 trades, all
+# won, +$81.10; the best variant on June–July won all 4 of its trades in
+# August–September (+$56.41). The next METAR raised the high after 194 of
+# 199 readings 0.3–0.5 °C above the rounding edge (0.975, 95 % CI 0.943 …
+# 0.989) and after all 137 readings further above it.
 [strategies.knmi_nowcast]
 enabled = true
 mean_margin_tenths = 3            # ten-minute mean ≥ high + 0.5 + 0.3 °C
@@ -586,8 +601,8 @@ require_max_at_edge = true        # and the ten-minute maximum ≥ high + 0.5 °
 max_age_minutes = 12              # the reading's interval ended ≤ 12′ ago …
 max_lead_minutes = 16             # … and ≤ 16′ before the report it anticipates
 min_price = "0.02"                # the NO of the high's bucket …
-max_price = "0.75"                # … at most this
-p_new_high = 0.80                 # ASSUMPTION until research market measures it
+max_price = "0.85"                # … at most this (the EV rule binds near 0.87)
+p_new_high = 0.94                 # measured: the lower 95 % bound at this margin
 min_edge = 0.05                   # EV per share at p_new_high, after fee and slippage
 notional = "25.00"
 max_data_age_minutes = 40

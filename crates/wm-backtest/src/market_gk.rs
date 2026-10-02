@@ -355,11 +355,17 @@ pub(crate) fn rules(sim: &GkSim) -> Vec<GkRule> {
                 ..g.clone()
             },
         ),
+        // The other distance: 3 when the configured rule starts at 2 (or
+        // closer), 2 when it starts at 3 or more.
         (
-            "G · ≥ 3 above",
+            if g.min_distance >= 3 {
+                "G · ≥ 2 above"
+            } else {
+                "G · ≥ 3 above"
+            },
             false,
             TailSellerConfig {
-                min_distance: g.min_distance.max(3),
+                min_distance: if g.min_distance >= 3 { 2 } else { 3 },
                 ..g.clone()
             },
         ),
@@ -1241,7 +1247,9 @@ pub(crate) fn verdict(rows: &[StrategyRow], sim: &MarketSimConfig, knmi_days: u6
 }
 
 /// Per family: the rule with the best P&L on the first half of the replayed
-/// market days (the configured one on a tie), judged on the second half.
+/// market days (the configured one on a tie), judged on the second half;
+/// when that is not the configured rule, the configured rule's second half
+/// too.
 pub(crate) fn out_of_sample(
     trades: &[SimTrade],
     sim: &MarketSimConfig,
@@ -1308,8 +1316,34 @@ pub(crate) fn out_of_sample(
             iterations,
             seed,
         );
+        // The configured rule (each family's first) on the same later days,
+        // when another one was chosen: what deciding about it needs.
+        let configured = match rules.iter().find(|r| r.family() == family) {
+            Some(c) if c.label() != best.label() => {
+                let later = half(c.label(), true);
+                if later.is_empty() {
+                    format!(
+                        " The configured rule *{}* made no trade on those later days.",
+                        c.label()
+                    )
+                } else {
+                    let c = row(&later, c.key(), false, iterations, seed);
+                    format!(
+                        " The configured rule *{}* made {} trades there, {} won, ${:+.2} (${:+.2} per trade, 95% CI {:+.2} … {:+.2}).",
+                        c.strategy,
+                        c.trades,
+                        c.wins,
+                        c.total_usd,
+                        c.pnl_per_trade,
+                        c.ci_low,
+                        c.ci_high
+                    )
+                }
+            }
+            _ => String::new(),
+        };
         v.push(format!(
-            "Strategy {family} out of sample: on the first {before} market days ({} → {}) the best {family} rule was *{}* ({} trades, {} won, ${:+.2}); on the {} later days ({} → {}) it made {} trades, {} won, ${:+.2} (${:+.2} per trade, 95% CI {:+.2} … {:+.2}).",
+            "Strategy {family} out of sample: on the first {before} market days ({} → {}) the best {family} rule was *{}* ({} trades, {} won, ${:+.2}); on the {} later days ({} → {}) it made {} trades, {} won, ${:+.2} (${:+.2} per trade, 95% CI {:+.2} … {:+.2}).{configured}",
             dates[0],
             dates[before - 1],
             best.label(),
@@ -1704,5 +1738,104 @@ mod tests {
         let mut s = GkSim::default();
         s.g.max_yes_price = wm_core::units::Price::saturating_from_micros(30_000);
         assert!(!rules(&s).iter().any(|x| x.label() == "G · ≤ 3¢"));
+        // A G configured from three above compares with two above instead.
+        let mut s = GkSim::default();
+        s.g.min_distance = 3;
+        let labels: Vec<String> = rules(&s)
+            .iter()
+            .filter(|x| x.family() == 'G')
+            .map(|x| x.label().to_owned())
+            .collect();
+        assert!(labels.contains(&"G · ≥ 2 above".to_owned()), "{labels:?}");
+        assert!(!labels.contains(&"G · ≥ 3 above".to_owned()), "{labels:?}");
+    }
+
+    /// A trade of the default rule `label`, as the replay records it.
+    fn sim_trade(d: NaiveDate, label: &str, pnl: f64) -> SimTrade {
+        let rule = rules(&GkSim::default())
+            .into_iter()
+            .find(|r| r.label() == label)
+            .unwrap();
+        SimTrade {
+            date: d,
+            report: "15:55".into(),
+            structure: STRUCTURE.into(),
+            strategy: label.into(),
+            window: 0,
+            range: rule.range(),
+            bucket: "22°C".into(),
+            side: "NO".into(),
+            price: 0.96,
+            p_model: 0.0,
+            p_used: 0.0,
+            won: pnl > 0.0,
+            pnl_usd: pnl,
+            resolved: "19°C".into(),
+            filled: None,
+        }
+    }
+
+    #[test]
+    fn out_of_sample_also_judges_the_configured_rule() {
+        let sim = MarketSimConfig::default();
+        let dates: Vec<NaiveDate> = (0..40).map(|i| date() + Duration::days(i)).collect();
+        let mut trades = Vec::new();
+        for (i, d) in dates.iter().enumerate() {
+            // G gains a little every day; "G · ≤ 3¢" gains more early and
+            // loses later.
+            trades.push(sim_trade(*d, "G", 1.0));
+            trades.push(sim_trade(*d, "G · ≤ 3¢", if i < 20 { 2.0 } else { -3.0 }));
+        }
+        let lines = out_of_sample(&trades, &sim, &dates, 0, 200, 1);
+        let g = lines
+            .iter()
+            .find(|l| l.starts_with("Strategy G out of sample"))
+            .unwrap();
+        assert!(
+            g.contains("the best G rule was *G · ≤ 3¢* (20 trades, 20 won, $+40.00)"),
+            "{g}"
+        );
+        assert!(g.contains("it made 20 trades, 0 won, $-60.00"), "{g}");
+        assert!(
+            g.contains(
+                "The configured rule *G* made 20 trades there, 20 won, $+20.00 ($+1.00 per trade"
+            ),
+            "{g}"
+        );
+        // No KNMI readings: no K line.
+        assert!(
+            !lines.iter().any(|l| l.starts_with("Strategy K")),
+            "{lines:?}"
+        );
+        // The configured rule chosen itself: one sentence only.
+        let only_g: Vec<SimTrade> = trades
+            .iter()
+            .filter(|t| t.strategy == "G")
+            .cloned()
+            .collect();
+        let lines = out_of_sample(&only_g, &sim, &dates, 0, 200, 1);
+        let g = lines
+            .iter()
+            .find(|l| l.starts_with("Strategy G out of sample"))
+            .unwrap();
+        assert!(
+            g.contains("the best G rule was *G* (") && !g.contains("The configured rule"),
+            "{g}"
+        );
+        // A configured rule that did not trade later says so.
+        let early_g: Vec<SimTrade> = trades
+            .iter()
+            .filter(|t| t.strategy != "G" || t.date < dates[20])
+            .cloned()
+            .collect();
+        let lines = out_of_sample(&early_g, &sim, &dates, 0, 200, 1);
+        let g = lines
+            .iter()
+            .find(|l| l.starts_with("Strategy G out of sample"))
+            .unwrap();
+        assert!(
+            g.contains("The configured rule *G* made no trade on those later days."),
+            "{g}"
+        );
     }
 }

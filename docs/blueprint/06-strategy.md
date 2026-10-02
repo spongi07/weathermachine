@@ -114,12 +114,12 @@ intervals, never on win rate.
 | C | split + unwind (§27) | off | research only |
 | D | decided outcomes (§27a) | off | dead buckets reprice a median 39 s after the observation, before the bot knows the report |
 | E | book-confirmed high (§27c) | off | −$7.18 over 80 replayed trades |
-| F | peak slot (§27d) | **on** | traded; slot 75 % → 95 % since 1 Oct |
-| G | tail seller (§27e) | **on** | new |
-| H | next degree (§27f) | **on** | new |
-| I | middle fade (§27g) | **on** | new |
-| J | morning maker (§27h) | **on** | new |
-| K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | new |
+| F | peak slot (§27d) | **on** | traded; slot 75 % → 95 % since 1 Oct; replay 2 Oct: +$11.13 over 80 trades (about break-even) |
+| G | tail seller (§27e) | **on**, from 3 °C above | replay 2 Oct: from 2 °C above −$18.04 (37 trades), from 3 above 15 of 15 won (+$18.74) |
+| H | next degree (§27f) | off (2 Oct) | replay 2 Oct: −$77.18 over 169 trades; its best variant lost $92.20 out of sample |
+| I | middle fade (§27g) | **on** | replay 2 Oct: +$58.79 over 90 trades (interval spans zero); to be confirmed out of sample |
+| J | morning maker (§27h) | off (2 Oct) | replay 2 Oct: −$197.52 over 250 fills; its best variant lost $171.88 out of sample |
+| K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: 4 of 4 won (+$81.10), out of sample 4 of 4 (+$56.41) |
 | U | unwind (§28) | **on** | the exit engine; leaves G–K alone |
 
 A strategy switched off is not shown on the dashboard; its code stays,
@@ -131,7 +131,11 @@ prediction-market literature ([edge research
 §9](../research/edge-research.md#9-october-2026-five-new-strategies)). Every
 one is a **HYPOTHESIS TO BACKTEST**: `research market` replays each with
 variants and judges the best variant of each on the second half of the
-days, out of sample.
+days, out of sample — and, since 2 October 2026, the configured rule's own
+result on that half beside it. The first replay with KNMI's readings (2
+October 2026, 123 days to 1 October) switched H and J off, moved G to three
+degrees above the high and set K's `p_new_high` from the measured table
+([edge research §9.5](../research/edge-research.md#95-the-replay-of-2-october-2026)).
 
 ## 25. BUY YES — strategy A
 
@@ -543,7 +547,8 @@ day's high.
   YES at 0.02–0.10 was about fair (5.6 % won at 5.0 %), hence the 8¢ cap.
 
 **RULE** (`[strategies.tail_seller]`). For every bucket whose lowest value is
-≥ high + `min_distance` (2), between 10:00 and 21:00 local:
+≥ high + `min_distance` (3 since 2 October 2026; 2 before), between 10:00 and
+21:00 local:
 * the order is a NO bid one tick above the best NO bid (at it when the
   spread is one tick): the YES offered is one minus that bid and must lie in
   [`min_yes_price`, `max_yes_price`] = [0.01, 0.08];
@@ -558,6 +563,13 @@ day's high.
 premium). The edge is a fraction of a cent per dollar a day: a small, steady
 earner whose result rests on the rare loss. Caps: $30 an order, $120 in
 all.
+
+**REPLAY (2 October 2026, 123 days).** From two degrees above the high G
+lost $18.04 over 37 trades: two of those tails won. From three above all 15
+trades won, +$18.74 ($1.25 a trade), and its one trade in the
+out-of-sample half (August–September) won too — so G now starts three
+degrees above the high. Without the model veto G lost $37.20 over 192
+trades.
 
 ## 27f. NEXT DEGREE — strategy H
 
@@ -583,6 +595,11 @@ to settlement.
 **RISK.** It loses its stake whenever the day does not warm one more degree
 — most of the time. A few 3–20× winners must pay for many small losses.
 
+**REPLAY (2 October 2026) — switched off.** 169 trades, 38 won, −$77.18
+(−$0.46 a trade, 95 % CI −3.55 … +2.95); without the model −$173.23. The
+best variant on June–July, a resting bid (+$159.31), lost $92.20 on
+August–September (48 trades, 5 won).
+
 ## 27g. MIDDLE FADE — strategy I
 
 **PURPOSE.** Buy NO on the overpriced middle of the ladder.
@@ -604,6 +621,13 @@ probability; $10, fill-and-kill, held to settlement.
 **RISK.** Three points is about what the fee (≈ 1.25¢ at 0.50), half the
 spread and slippage cost: I trades only on tight books, and each trade is a
 coin flip with a slight tilt.
+
+**REPLAY (2 October 2026).** 90 trades, 51 won, +$58.79 (+$0.65 a trade,
+95 % CI −0.89 … +2.31); without the model +$62.35 — the edge is the
+market's calibration, not the model. The best variant on June–July, a
+resting NO bid (+$87.81), lost $74.85 on August–September; the configured
+rule's own result on those months (shown since this release) decides
+whether I stays on.
 
 ## 27h. MORNING MAKER — strategy J
 
@@ -627,6 +651,14 @@ the spread. No model needed.
 
 **RISK.** Inventory: a side that fills alone is a directional position at
 the market's own price a moment ago. Caps: $10 a quote, $80 in all.
+
+**REPLAY (2 October 2026) — switched off.** 250 quotes filled, 111 won,
+−$197.52 (−$0.79 a fill, 95 % CI −1.94 … +0.35); YES bids alone −$142.99,
+NO bids alone −$54.53, until 09:00 −$171.66. The best variant on
+June–July (YES bids, +$28.88) lost $171.88 on August–September (95 % CI
+−5.87 … −0.22 a fill). The average maker's profit in the morning comes from
+other buckets and prices; the quotes J posts are filled mostly by takers
+who know better.
 
 ## 27i. KNMI NOWCAST — strategy K
 
@@ -657,18 +689,37 @@ METAR is taken, still counts until that METAR is published — its mean is
 ≥ high + 0.5 + 0.3 °C (the
 rounding edge plus `mean_margin_tenths`) and its maximum ≥ high + 0.5 °C:
 buy the NO of the bucket holding the high (it dies the moment a report beats
-it) when the NO ask is in [0.02, 0.75] and the EV at `p_new_high` (0.80) is
-≥ 0.05 after fee and slippage; $25, fill-and-kill, held to settlement. A
+it) when the NO ask is in [0.02, 0.85] and the EV at `p_new_high` (0.94,
+measured) is ≥ 0.05 after fee and slippage — which binds near 0.87;
+$25, fill-and-kill, held to settlement. A
 bucket that also holds high + 1 is skipped. Its books may be up to 0.10 wide
 (`[risk.strategy_caps.K_knmi_nowcast].max_spread`): makers widen their quotes
 before a report.
 
-**ASSUMPTION.** `p_new_high` = 0.80 until `research market` (run with the
-key) measures how often the next METAR raised the high, by the ten-minute
-mean before it — the table *KNMI's ten-minute mean before the METAR*. The
-replay assumes a reading is known 5 minutes after its interval (variants: 2
-and 8); the live logs (`KNMI ten-minute reading … delay_minutes`) and the
-dashboard's *KNMI 10-minute* box measure the real delay.
+**MEASURED (replay of 2 October 2026, 123 days).** `research market`'s
+table *KNMI's ten-minute mean before the METAR* counts, for every report,
+how often it raised the high by how far the last reading before it stood
+above the rounding edge:
+
+| mean − (high + 0.5 °C) | reports | new high | share (95 % CI) |
+|---|---:|---:|---|
+| −0.4 … −0.1 °C | 645 | 53 | 0.082 (0.063 … 0.106) |
+| 0.0 … +0.2 °C | 358 | 305 | 0.852 (0.811 … 0.885) |
+| +0.3 … +0.5 °C | 199 | 194 | 0.975 (0.943 … 0.989) |
+| +0.6 °C or more | 137 | 137 | 1.000 |
+
+K's margin (+0.3 °C) sits in the third row, so `p_new_high` is its lower
+bound, 0.94 (it was an assumed 0.80); the NO also wins when a later report
+beats the high, so this is conservative. K made 4 trades, all won, +$81.10
+(+$20.28 a trade, 95 % CI +11.62 … +30.73); the variant chosen on
+June–July (the reading known after 2 minutes) won all 4 of its trades in
+August–September (+$56.41). With a 0.1 °C margin K traded 18 times but won
+only 11: the cases the market had not yet priced are the doubtful ones.
+Buying the YES of the next degree instead lost $577.12 over 83 trades.
+The replay assumes a reading is known 5 minutes after its interval
+(variants 2 and 8); the live logs (`KNMI ten-minute reading …
+delay_minutes`) and the dashboard's *KNMI 10-minute* box measure the real
+delay.
 
 **FAIL CLOSED.** No key, an API error or a stale reading: K does nothing,
 and the dashboard says why. The readings never change the observed high,
@@ -693,7 +744,9 @@ the views or settlement.
   box can be watched without a key.
 * `wm-backtest/src/market_gk.rs`: the replay of each strategy at traded
   prices and K's accuracy table; the market report's G–K section and its
-  JSON compatibility.
+  JSON compatibility; the out-of-sample line, which also judges the
+  configured rule when another was chosen
+  (`out_of_sample_also_judges_the_configured_rule`).
 * `wm-weather` (`knmi.rs`, `tests/knmi.rs`): CoverageJSON parsing, the
   request (path, period, parameters, key in the header) and a refused key;
   `wm-net`: the key is sent as a header and never printed.

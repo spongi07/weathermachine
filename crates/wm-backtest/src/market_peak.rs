@@ -19,7 +19,8 @@
 //! later slot, only once the temperature is 1 °C below the high, and as a
 //! resting bid (maker). The best of several variants on the same days
 //! overstates what to expect, so the variant that did best on the first half
-//! of the market days is judged again on the second half — out of sample.
+//! of the market days is judged again on the second half — out of sample —
+//! next to the configured rule's own result on that half.
 
 use crate::market_eval::MarketTrade;
 use crate::market_makers::{Resting, cancel_time, through_fill};
@@ -413,8 +414,27 @@ pub(crate) fn out_of_sample(
         iterations,
         seed,
     );
+    // The configured rule on the same later days, when another one was chosen.
+    let configured = match rules.first() {
+        Some(c) if c.label != best.label => {
+            let later = half(&c.label, true);
+            if later.is_empty() {
+                format!(
+                    " The configured rule *{}* made no trade on those later days.",
+                    c.label
+                )
+            } else {
+                let c = row(&later, c.key(), false, iterations, seed);
+                format!(
+                    " The configured rule *{}* made {} trades there, {} won, ${:+.2} (${:+.2} per trade, 95% CI {:+.2} … {:+.2}).",
+                    c.strategy, c.trades, c.wins, c.total_usd, c.pnl_per_trade, c.ci_low, c.ci_high
+                )
+            }
+        }
+        _ => String::new(),
+    };
     Some(format!(
-        "Strategy F out of sample: on the first {before} market days ({} → {}) the best F rule was *{}* ({} trades, {} won, ${:+.2}); on the {} later days ({} → {}) the same rule made {} trades, {} won, ${:+.2} (${:+.2} per trade, 95% CI {:+.2} … {:+.2}). Judge F by this line, not by the best row of its table.",
+        "Strategy F out of sample: on the first {before} market days ({} → {}) the best F rule was *{}* ({} trades, {} won, ${:+.2}); on the {} later days ({} → {}) the same rule made {} trades, {} won, ${:+.2} (${:+.2} per trade, 95% CI {:+.2} … {:+.2}).{configured} Judge F by these later days, not by the best row of its table.",
         dates[0],
         dates[before - 1],
         best.label,
@@ -998,6 +1018,13 @@ mod tests {
             line.contains("on the 20 later days (2026-08-04 → 2026-08-23) the same rule made 20 trades, 0 won, $-60.00"),
             "{line}"
         );
+        // The configured rule's own later days, for the decision about it.
+        assert!(
+            line.contains(
+                "The configured rule *F* made 20 trades there, 20 won, $+100.00 ($+5.00 per trade"
+            ),
+            "{line}"
+        );
         // A tie keeps the configured rule.
         let tie: Vec<SimTrade> = dates
             .iter()
@@ -1005,6 +1032,7 @@ mod tests {
             .collect();
         let line = out_of_sample(&tie, &sim, &dates, 200, 1).unwrap();
         assert!(line.contains("was *F* ("), "{line}");
+        assert!(!line.contains("The configured rule"), "{line}");
         // Too few days, no day, no first-half trade.
         let line = out_of_sample(&trades, &sim, &dates[..19], 200, 1).unwrap();
         assert!(

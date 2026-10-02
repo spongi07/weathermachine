@@ -32,10 +32,13 @@
 //!
 //! **Risk.** The METAR is a single minute's value; the temperature can dip
 //! back in the five to fifteen minutes between the readings. The NO then
-//! still wins if any later report beats the high. `p_new_high` is an
-//! assumption until `research market` (with a KNMI API key) measures how
-//! often the next METAR followed the ten-minute reading; set it from that
-//! table. No KNMI reading (no key, the API down): K does nothing.
+//! still wins if any later report beats the high. `p_new_high` comes from
+//! `research market` (with a KNMI API key): its table counts how often the
+//! next METAR raised the high after a reading this far above the rounding
+//! edge — on EHAM's 123 days to 1 October 2026, 194 of 199 readings
+//! 0.3–0.5 °C above it (95 % CI 0.943 … 0.989) and all 137 further above,
+//! so the shipped configuration uses 0.94. No KNMI reading (no key, the API
+//! down): K does nothing.
 //!
 //! [`min_price`]: KnmiNowcastConfig::min_price
 //! [`max_price`]: KnmiNowcastConfig::max_price
@@ -78,8 +81,10 @@ pub struct KnmiNowcastConfig {
     pub min_price: Price,
     #[serde(with = "decimal_serde::price")]
     pub max_price: Price,
-    /// Probability that the NO wins when the conditions hold (an
-    /// assumption until `research market` measures it).
+    /// Probability that the NO wins when the conditions hold: the next
+    /// METAR's rate of new highs at this margin in `research market`'s KNMI
+    /// table (the default 0.80 is a cautious placeholder; the shipped
+    /// configuration uses the measured 0.94).
     pub p_new_high: f64,
     /// EV per share at the ask, after the taker fee and slippage.
     pub min_edge: f64,

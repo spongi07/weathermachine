@@ -1439,7 +1439,7 @@ mod tests {
             cfg.file.risk.position_size_usd,
             wm_core::units::Usd::from_whole(10)
         );
-        // F and G–K at once: $420 of capital at most, $400 of worst case.
+        // F and G–K at once (H and J off): $400 of worst case.
         let usd = wm_core::units::Usd::from_whole;
         let risk = &cfg.file.risk;
         assert_eq!(risk.global_max_exposure_usd, usd(400));
@@ -1467,7 +1467,8 @@ mod tests {
         );
         assert_eq!(risk.max_daily_loss_usd, Some(usd(100)));
         assert_eq!(risk.max_daily_new_exposure_usd, Some(usd(600)));
-        // A–E are off; G–K run with the documented defaults.
+        // A–E, H and J are off; I runs with the documented defaults, G and
+        // K with the values the replay of 2 October 2026 supported.
         let st = &cfg.file.strategies;
         assert!(
             !st.buy_yes.enabled
@@ -1476,11 +1477,24 @@ mod tests {
                 && !st.certain.enabled
                 && !st.book_confirmed.enabled
         );
-        assert_eq!(st.tail_seller, wm_strategy::TailSellerConfig::default());
-        assert_eq!(st.next_degree, wm_strategy::NextDegreeConfig::default());
+        assert_eq!(
+            st.tail_seller,
+            wm_strategy::TailSellerConfig {
+                min_distance: 3,
+                ..wm_strategy::TailSellerConfig::default()
+            }
+        );
+        assert_eq!(st.next_degree, wm_strategy::NextDegreeConfig::absent());
         assert_eq!(st.middle_fade, wm_strategy::MiddleFadeConfig::default());
-        assert_eq!(st.morning_maker, wm_strategy::MorningMakerConfig::default());
-        assert_eq!(st.knmi_nowcast, wm_strategy::KnmiNowcastConfig::default());
+        assert_eq!(st.morning_maker, wm_strategy::MorningMakerConfig::absent());
+        assert_eq!(
+            st.knmi_nowcast,
+            wm_strategy::KnmiNowcastConfig {
+                max_price: Price::saturating_from_micros(850_000),
+                p_new_high: 0.94,
+                ..wm_strategy::KnmiNowcastConfig::default()
+            }
+        );
         assert_eq!(
             st.unwind.exempt_strategies,
             wm_strategy::default_exempt_strategies()
