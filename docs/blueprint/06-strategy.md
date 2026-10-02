@@ -727,8 +727,8 @@ against 4 for +$81.10 — so the cap stayed at 0.75; the replay keeps the
 other cap as a variant.
 The replay assumes a reading is known 5 minutes after its interval
 (variants 2 and 8); the live logs (`KNMI ten-minute reading …
-delay_minutes`) and the dashboard's *KNMI 10-minute* box measure the real
-delay.
+delay_minutes`, except the first after a start, which is labelled) and the
+dashboard's *KNMI 10-minute* box measure the real delay.
 
 **FAIL CLOSED.** No key, an API error or a stale reading: K does nothing,
 and the dashboard says why. The readings never change the observed high,

@@ -1464,14 +1464,30 @@ async fn knmi_loop(
                     {
                         continue;
                     }
-                    last_sent.insert(t.station.clone(), newest.interval_end);
+                    // The first reading after a start was published before
+                    // it: its delay says when the service started, not how
+                    // fast KNMI is.
+                    let first = last_sent
+                        .insert(t.station.clone(), newest.interval_end)
+                        .is_none();
+                    let c = |v: Option<wm_core::units::TempC>| {
+                        v.map_or_else(
+                            || "—".to_owned(),
+                            |t| format!("{:.1} °C", f64::from(t.tenths()) / 10.0),
+                        )
+                    };
                     tracing::info!(
                         station = %t.station,
                         interval_end = %newest.interval_end,
-                        mean = ?newest.mean,
-                        max = ?newest.max,
+                        mean = %c(newest.mean),
+                        max = %c(newest.max),
                         delay_minutes = newest.delay_minutes(),
-                        "KNMI ten-minute reading"
+                        "{}",
+                        if first {
+                            "KNMI ten-minute reading (the first since the start: published before it, so its delay is not KNMI's)"
+                        } else {
+                            "KNMI ten-minute reading"
+                        }
                     );
                     let env = EventEnvelope::new(
                         clock.now(),

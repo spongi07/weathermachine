@@ -59,7 +59,9 @@ for the last `lookback_minutes` (40) of `ta` (ten-minute mean) and `tx`
 request at a time, `Retry-After` honoured, a daily budget). The key goes
 only in the `Authorization` header — never in a URL, a log line or an audit
 record. A reading newer than the last one becomes a `NowcastUpdate`; the
-log records how many minutes after its interval it arrived. It is
+log records how many minutes after its interval it arrived (the first one
+after a start is labelled: it was published before the start, so its delay
+says nothing about KNMI). It is
 predictive input only: it never changes the observed high, the views or
 settlement. Failures raise one alert, recovery another; K then does
 nothing (fail closed). K enabled without a key raises a warning and stays
