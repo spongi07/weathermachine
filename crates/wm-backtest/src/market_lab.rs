@@ -65,7 +65,7 @@ pub const FAMILIES: u8 = 25;
 /// A KNMI station near the market's (L24's upwind lead).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Neighbour {
-    /// WMO number (`06210`); its EDR location is the WIGOS id.
+    /// WMO number (`06215`); its EDR location is the WIGOS id.
     pub wmo: String,
     pub name: String,
     pub latitude: f64,
@@ -91,9 +91,10 @@ pub struct LabSim {
 
 impl Default for LabSim {
     fn default() -> Self {
-        // Schiphol (06240) and three KNMI stations around it: Valkenburg
-        // near the coast to the south-west, De Bilt inland to the
-        // south-east, Berkhout to the north-north-east.
+        // Schiphol (06240) and three KNMI stations around it: Voorschoten
+        // near the coast to the south-west (Valkenburg's successor, which
+        // closed in 2016), De Bilt inland to the south-east, Berkhout to
+        // the north-north-east.
         Self {
             stake_usd: 20.0,
             latitude: 52.318,
@@ -102,10 +103,10 @@ impl Default for LabSim {
             neighbour_parameter: "ta".into(),
             neighbours: vec![
                 Neighbour {
-                    wmo: "06210".into(),
-                    name: "Valkenburg".into(),
-                    latitude: 52.171,
-                    longitude: 4.430,
+                    wmo: "06215".into(),
+                    name: "Voorschoten".into(),
+                    latitude: 52.141,
+                    longitude: 4.437,
                 },
                 Neighbour {
                     wmo: "06260".into(),
@@ -3891,7 +3892,7 @@ mod tests {
         );
         assert!(close(l24[0].price, 0.50) && l24[0].won);
         assert!(of(&out, "L24 · cool side").is_empty());
-        // The wind from De Bilt's side: Valkenburg is not upwind.
+        // The wind from De Bilt's side: Voorschoten is not upwind.
         let mut fx = fx;
         fx.wx = vec![wx("EHAM 151125Z 12012KT CAVOK 21/12 Q1015 NOSIG", 120)];
         assert!(of(&fx.run(), "L24").is_empty());
@@ -3949,7 +3950,7 @@ mod tests {
         );
         let lab = LabSim::default();
         let b: Vec<f64> = lab.neighbours.iter().map(|n| lab.bearing_to(n)).collect();
-        assert!((b[0] - 236.0).abs() < 2.0, "Valkenburg {}", b[0]);
+        assert!((b[0] - 231.0).abs() < 2.0, "Voorschoten {}", b[0]);
         assert!((b[1] - 132.0).abs() < 2.0, "De Bilt {}", b[1]);
         assert!((b[2] - 20.0).abs() < 2.0, "Berkhout {}", b[2]);
         assert!(close(angle_between(350.0, 10.0), 20.0));

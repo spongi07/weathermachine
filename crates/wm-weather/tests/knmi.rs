@@ -94,7 +94,7 @@ async fn a_rejected_key_is_an_error_not_an_empty_answer() {
 async fn a_series_request_names_its_parameters_and_keeps_the_key_in_the_header() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/locations/0-20000-0-06210"))
+        .and(path("/locations/0-20000-0-06215"))
         .and(query_param(
             "datetime",
             "2026-07-01T11:00:00Z/2026-07-01T11:45:00Z",
@@ -109,7 +109,7 @@ async fn a_series_request_names_its_parameters_and_keeps_the_key_in_the_header()
         .await;
     let got = client(&server.uri())
         .fetch_series(
-            "0-20000-0-06210",
+            "0-20000-0-06215",
             &["ta", "qg"],
             utc("2026-07-01T11:00:00Z"),
             utc("2026-07-01T11:45:00Z"),

@@ -32,7 +32,7 @@ with its own tests, as G–K did.
 | [Frontiers in Earth Science 2023](https://www.frontiersin.org/journals/earth-science/articles/10.3389/feart.2023.1099344/pdf); [fog burn-off busts](https://theweatherprediction.com/habyhints2/371/) | The error of maximum-temperature forecasts grows with cloud cover; a stratus deck that does not mix out busts the maximum. | L11, L12 |
 | [NWS Goodland: wet microburst](https://www.weather.gov/gld/MingoWetMicroburst) and gust-front studies | Rain-cooled outflow drops the surface temperature by 3–8 °C. | L9, L23 |
 | [KNMI AUTOTREND](https://www.knmi.nl/research/publications/autotrend-automated-guidance-for-short-term-aviation-weather-forecasts); [LVNL eAIP GEN 3.5](https://eaip.lvnl.nl/web/2025-01-09-AIRAC/html/eAIP/EH-GEN-3.5-en-GB.html) | Schiphol's METARs carry a two-hour TREND (BECMG/TEMPO/NOSIG) on cloud, visibility, wind and weather, from KNMI's guidance and forecaster. | L10 |
-| [KNMI ten-minute dataset](https://dataplatform.knmi.nl/dataset/10-minute-in-situ-meteorological-observations-1-0); [station data](https://www.knmi.nl/nederland-nu/klimatologie/uurgegevens) | `qg` global radiation (W/m²), `ta` temperature, wind, humidity … every ten minutes for every automatic station (Valkenburg, De Bilt, Berkhout among them). | L24, L25 |
+| [KNMI ten-minute dataset](https://dataplatform.knmi.nl/dataset/10-minute-in-situ-meteorological-observations-1-0); [station data](https://www.knmi.nl/nederland-nu/klimatologie/uurgegevens) | `qg` global radiation (W/m²), `ta` temperature, wind, humidity … every ten minutes for every automatic station (Voorschoten, De Bilt, Berkhout among them; [Valkenburg closed in 2016, Voorschoten replaced it](https://www.knmi.nl/research/publications/analysis-of-parallel-measurements-of-the-automatic-weather-stations-valkenburg-and-voorschoten-in-the-netherlands)). | L24, L25 |
 | [Haurwitz clear-sky model (pvlib)](https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.clearsky.haurwitz.html) | GHI = 1098 · cos z · exp(−0.057 / cos z). | L25's clear-sky index |
 | [Choi & Hui 2014](https://researchportal.hkust.edu.hk/en/publications/the-role-of-surprise-understanding-overreaction-and-underreaction/) | In-play betting overreacts to big surprises and underreacts to small ones; the overreaction fades within minutes. | L21 |
 | [Late informed betting (arXiv:2509.14645)](https://arxiv.org/html/2509.14645v1) | Returns fall with last-minute odds moves: informed money comes late. | L18 |
@@ -63,7 +63,7 @@ G–K ([§9 of the edge research](edge-research.md#9-october-2026-five-new-strat
   reports ([`metar_wx`](../../crates/wm-weather/src/metar_wx.rs)); the day-1
   forecast is read even when the installed model does not use it; with
   `WM_KNMI_API_KEY` set, KNMI's global radiation at Schiphol and the
-  temperatures of Valkenburg (06210), De Bilt (06260) and Berkhout (06249)
+  temperatures of Voorschoten (06215), De Bilt (06260) and Berkhout (06249)
   are downloaded a week at a time (about 72 requests for four months, well
   inside the 1,000 an hour) and cached under `research/knmi-series/`. A
   station or parameter the API refuses twice in a row is given up; its
@@ -289,7 +289,7 @@ METAR's slope ≥ 1 °C/h instead of KNMI.
 
 **L24 — Upwind KNMI station.** The air 30–40 km upwind is Schiphol's next
 hour. *Rule:* 10:00–18:00, the METAR wind ≥ 6 kt from within 40° of a
-neighbour's bearing (Valkenburg ~236°, De Bilt ~132°, Berkhout ~20°): the
+neighbour's bearing (Voorschoten ~231°, De Bilt ~132°, Berkhout ~19°): the
 neighbour ≥ 0.8 °C warmer than Schiphol in the same ten minutes and
 Schiphol within 0.6 °C under the edge → NO of the high's bucket at ≤ 0.75
 (p = 0.80). *Variant:* the cool side — from 12:00 the neighbour ≥ 1.0 °C
@@ -333,3 +333,35 @@ families held up. To take one live:
   carry no TREND (outside the Netherlands) gives L10 nothing to read.
 * The neighbours and their bearings are Schiphol's; for another station
   L24 is not replayed.
+
+## 6. The first run (2 October 2026)
+
+`research market` over 123 settled days (1 June – 1 October 2026) with
+every input: KNMI's readings, the day-1 forecast, KNMI's radiation and the
+neighbours on all days, 5,885 reports' weather groups, 80 F trades, 8,291
+takers scored (71 skilled, 58 losing by the end). Valkenburg (06210)
+returned no data: the station closed in 2016, and Voorschoten (06215), its
+successor 3 km inland, replaces it from the next run. *Later days*: the 62
+days from 1 August, on which no rule was chosen.
+
+| | all days | later days | reading |
+|---|---|---|---|
+| L1 shield | 98 trades, 81 won, +$94.18; without the shield 212 trades, −$254.89 | L1: 41 trades, −$25.01 | KNMI's shield turns the makers' loss before reports around (−$1.20 → +$0.96 a trade); what is left is about zero |
+| L4 cooling lock | 20 trades, 18 won, +$19.28 | 8 of 8 won, +$29.05 (95 % CI +1.68 … +5.68 a trade) | the only family named as held up — but it lost $9.77 in June–July |
+| L7 KNMI slope | 20 trades, 13 won, +$402.72 | 7 trades, 3 won, −$3.52 | the profit came from a few cheap NOs in June–July |
+| L14 morning departure | 104 trades, 31 won, +$663.27 (YES at 0.21 won 30 %) | chosen λ 1.0: 57 trades, −$186.78; the main rule: 51 trades, 15 won, +$199.41 (CI −6.44 … +16.70) | the main rule earned in both halves (+$463.86 and +$199.41): the most promising new idea, not proven |
+| L18 burst + KNMI | 4 of 4 won, +$30.58; without KNMI 122 trades, −$580.12 (CI −9.50 … −0.02) | 3 of 3, +$22.84 | following flow blindly loses; KNMI decides which bursts to follow |
+| L24 upwind, cool side | 10 trades, 9 won, +$40.71 | 3 of 3, +$19.86 | without the coastal station; rerun with Voorschoten |
+| L3 F's escape hatch | +$10.91 against F's own +$11.13 | — | selling at the bid does not save F's losses: the bid is gone by then |
+| L9, L12, L17, L19, L21, L23 | −$79.31, −$504.78, −$397.84, +$53.31, −$85.53, −$130.74 | all negative | refuted: the market prices showers, sunny mornings, yesterday's error, the skilled wallets (L19 lost $613.09 on the later days) and the jump after a new high |
+
+L2, L5, L6, L8, L11, L13, L15, L16, L22 and L25 traded too rarely to say
+anything (L11 and L13 wait for fog and fronts: autumn and winter).
+
+**Decisions.** Nothing from the lab goes live. L4 and L14's main rule get
+their confirmation on days no rule was chosen on: after about 20 new
+settled days, `research market --from 2026-10-02` replays only those days,
+and a rule that does not earn there is dropped. What works, here and in
+G–K, is one thing: KNMI's ten-minute readings ahead of the METAR (K, L7,
+L18, L1's shield). The market prices public weather information well; the
+edge is being earlier.

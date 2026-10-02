@@ -758,7 +758,7 @@ fn series_body(req: &Request, ranges: &[(&str, &str)]) -> ResponseTemplate {
     ))
 }
 
-/// KNMI for K and the lab: Schiphol's ta/tx and qg, Valkenburg's ta; De
+/// KNMI for K and the lab: Schiphol's ta/tx and qg, Voorschoten's ta; De
 /// Bilt refuses every request (asked twice, then given up); Berkhout is
 /// unknown (404).
 async fn lab_knmi_server() -> MockServer {
@@ -776,7 +776,7 @@ async fn lab_knmi_server() -> MockServer {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/locations/0-20000-0-06210"))
+        .and(path("/locations/0-20000-0-06215"))
         .and(query_param("parameter-name", "ta"))
         .respond_with(|req: &Request| series_body(req, &[("ta", "16.1")]))
         .mount(&server)
@@ -832,7 +832,7 @@ async fn the_lab_reads_knmi_radiation_and_neighbours_and_gives_up_on_a_refused_s
     let c = &o.report.lab_coverage;
     assert_eq!((c.days, c.knmi_days), (3, 3), "{c:?}");
     assert_eq!(c.radiation_days, 3, "{c:?}");
-    assert_eq!(c.neighbour_days, 3, "Valkenburg's readings: {c:?}");
+    assert_eq!(c.neighbour_days, 3, "Voorschoten's readings: {c:?}");
     assert_eq!(c.forecast_days, 0, "no forecast client");
     assert!(c.weather_reports > 0, "{c:?}");
     let v = &o.report.lab_verdict;
@@ -858,7 +858,7 @@ async fn the_lab_reads_knmi_radiation_and_neighbours_and_gives_up_on_a_refused_s
     let seen = seen.into_inner().unwrap();
     for what in [
         "global radiation",
-        "Valkenburg (06210)",
+        "Voorschoten (06215)",
         "De Bilt (06260)",
         "Berkhout (06249)",
     ] {
@@ -877,7 +877,7 @@ async fn the_lab_reads_knmi_radiation_and_neighbours_and_gives_up_on_a_refused_s
     );
     assert!(
         series
-            .join("0-20000-0-06210/ta/2025-03-27_2025-04-02.json")
+            .join("0-20000-0-06215/ta/2025-03-27_2025-04-02.json")
             .exists()
     );
     assert!(

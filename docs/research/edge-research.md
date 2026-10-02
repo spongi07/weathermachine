@@ -581,3 +581,10 @@ KNMI, takers' records on earlier days and the overreaction to a new high
 a shower, upwind stations, radiation against the clear sky (L23–L25). The
 reasoning, rules, variants and sources of each:
 [strategy lab](strategy-lab.md).
+
+The first run (2 October 2026, [§6 there](strategy-lab.md#6-the-first-run-2-october-2026))
+put nothing live: L4 (KNMI cooling lock) held up on the later days after
+losing in June–July, and L14 (the morning's departure from the hourly
+forecast) earned in both halves without a clear interval; both are judged
+again on new days. Six ideas were refuted outright, and what did work —
+L1's shield, L7, L18 — is again KNMI's lead over the METAR.

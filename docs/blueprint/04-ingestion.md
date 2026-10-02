@@ -70,7 +70,7 @@ of 4,000.
 
 **Research-only inputs of the strategy lab.** `KnmiTenMinute::fetch_series`
 asks the same collection for any parameters of any station (`qg`, global
-radiation in W/m², at Schiphol; `ta` at Valkenburg, De Bilt and Berkhout)
+radiation in W/m², at Schiphol; `ta` at Voorschoten, De Bilt and Berkhout)
 and returns them unconverted; only `research market` calls it, a week at a
 time. `wm_weather::metar_wx` reads a report's weather groups — wind and its
 variation, visibility, present and recent weather, clouds, QNH and the

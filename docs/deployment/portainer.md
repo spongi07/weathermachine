@@ -296,7 +296,7 @@ with a variant or a control, none of them live
 ([what each does and why](../research/strategy-lab.md)). It reads the
 day-1 forecast even when the installed model does not use it, the METAR's
 weather groups from the archived reports, and — with the KNMI key — KNMI's
-global radiation at Schiphol and the ten-minute temperatures of Valkenburg,
+global radiation at Schiphol and the ten-minute temperatures of Voorschoten,
 De Bilt and Berkhout: about 72 extra requests for four months, a few
 minutes at KNMI's request spacing, cached in `/data/research/knmi-series/`
 once final. A station or parameter KNMI refuses twice in a row is given up
