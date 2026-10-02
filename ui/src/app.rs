@@ -825,8 +825,11 @@ fn Blotter(snap: Snap) -> impl IntoView {
                 .iter()
                 .map(|p| {
                     let open = p.shares > 0.0;
+                    // The strategy that opened it, by its letter (A–K).
+                    let letter = p.opened_by.split('_').next().filter(|l| !l.is_empty()).unwrap_or("?").to_owned();
                     view! {
                         <tr class={if open { "" } else { "closed" }}>
+                            <td class="mono strong" title=p.opened_by.clone()>{letter}</td>
                             <td class="small">{p.event_slug.clone()}{(!open).then(|| view! { " " <span class="pill">"CLOSED"</span> })}</td>
                             <td>{p.bucket.clone()}</td>
                             <td class={if p.side == "YES" { "good strong" } else { "bad strong" }}>{p.side.clone()}</td>
@@ -870,8 +873,8 @@ fn Blotter(snap: Snap) -> impl IntoView {
                         <div>
                             <div class="panel-title"><span>"POSITIONS"</span><span class="muted">"marked at best bid · closed positions keep realized PnL"</span></div>
                             <div class="table-wrap"><table>
-                                <thead><tr><th>"Event"</th><th>"Bucket"</th><th>"Side"</th><th>"Shares"</th><th>"Avg"</th><th>"Mark"</th><th>"Cost"</th><th>"Unreal."</th><th>"Real."</th></tr></thead>
-                                <tbody>{if prow.is_empty() { view! { <tr><td colspan="9" class="empty">"No positions yet. They appear once a signal passes every pre-trade gate."</td></tr> }.into_any() } else { prow.into_any() }}</tbody>
+                                <thead><tr><th>"Strategy"</th><th>"Event"</th><th>"Bucket"</th><th>"Side"</th><th>"Shares"</th><th>"Avg"</th><th>"Mark"</th><th>"Cost"</th><th>"Unreal."</th><th>"Real."</th></tr></thead>
+                                <tbody>{if prow.is_empty() { view! { <tr><td colspan="10" class="empty">"No positions yet. They appear once a signal passes every pre-trade gate."</td></tr> }.into_any() } else { prow.into_any() }}</tbody>
                             </table></div>
                         </div>
                         <div>

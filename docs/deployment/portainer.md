@@ -366,7 +366,9 @@ strategy cards, lists every running lab strategy with its status now, this
 run's counts, and its own book's open positions and realized P&L; a line
 above the table shows what the lab reads. The letters link to each
 strategy's page, whose **Copy log** works as for F–K. The KPI strip and the
-positions and orders panels show the main book only; `/lite` lists the
+positions and orders panels show the main book only (each position with the
+letter of the strategy that opened it, which its strategy's log also
+lists); `/lite` lists the
 lab's books, and `report paper` gives the lab's settled P&L apart from the
 main book's.
 

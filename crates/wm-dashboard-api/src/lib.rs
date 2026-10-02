@@ -610,6 +610,10 @@ pub struct PositionDto {
     /// (strategies A–K).
     #[serde(default)]
     pub strategy: String,
+    /// The strategy whose order opened it (engine id, e.g. `F_peak_slot`):
+    /// on a lab book its own strategy; empty when unknown.
+    #[serde(default)]
+    pub opened_by: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

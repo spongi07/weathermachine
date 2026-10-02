@@ -515,6 +515,14 @@ pub fn build(
                 .get(&p.instrument.token)
                 .and_then(|b| b.best_bid())
                 .map(|l| l.price.as_f64());
+            let opened_by = if strategy.is_empty() {
+                snap.position_strategy
+                    .get(&p.instrument.token)
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            } else {
+                strategy.clone()
+            };
             PositionDto {
                 event_slug: p.instrument.event_slug.to_string(),
                 bucket: p.instrument.bucket.label(),
@@ -526,6 +534,7 @@ pub fn build(
                 unrealized_usd: mark.map(|m| m * p.shares.as_f64() - p.cost_basis.as_f64()),
                 realized_usd: p.realized_pnl.as_f64(),
                 strategy,
+                opened_by,
             }
         })
         .collect();

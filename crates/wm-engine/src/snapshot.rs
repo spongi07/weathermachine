@@ -3,8 +3,9 @@
 use crate::engine::{EngineStats, StationHint};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use wm_core::health::ProviderHealthSnapshot;
-use wm_core::ids::{LocationId, RunId, StationId, StrategyId};
+use wm_core::ids::{LocationId, RunId, StationId, StrategyId, TokenId};
 use wm_core::market::{DailyTemperatureMarket, OrderBook};
 use wm_core::portfolio::Position;
 use wm_core::trading::{DecisionRecord, RunMode};
@@ -125,6 +126,10 @@ pub struct EngineSnapshot {
     pub locations: Vec<LocationSnapshot>,
     pub health: Vec<ProviderHealthSnapshot>,
     pub positions: Vec<Position>,
+    /// The strategy whose order opened each of the main book's positions
+    /// (restored ones included); a lab book's are its own strategy's.
+    #[serde(default)]
+    pub position_strategy: BTreeMap<TokenId, StrategyId>,
     /// The latest 100 orders of the main book, then the latest 100 of the
     /// lab's books, each newest first.
     pub orders: Vec<OrderRecord>,

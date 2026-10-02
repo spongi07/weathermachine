@@ -1556,6 +1556,11 @@ impl Engine {
             locations,
             health: self.health.values().cloned().collect(),
             positions: main.positions.iter().cloned().collect(),
+            position_strategy: main
+                .position_strategy
+                .iter()
+                .map(|(t, s)| (t.clone(), s.clone()))
+                .collect(),
             // The main book's latest orders and the lab's apart, so the
             // lab's quotes never push A–K's out of the blotter.
             orders: {

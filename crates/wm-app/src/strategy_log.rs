@@ -11,7 +11,9 @@
 
 use crate::paper_report::{self, DayReport, PaperReport};
 use std::fmt::Write as _;
-use wm_dashboard_api::{DashboardSnapshot, EvaluationDto, LocationDto, StrategyDto, ViewDto};
+use wm_dashboard_api::{
+    DashboardSnapshot, EvaluationDto, LocationDto, PositionDto, StrategyDto, ViewDto,
+};
 
 /// Routine-evaluation lines of this run listed at most.
 const TRAIL_LINES: usize = 30;
@@ -113,6 +115,7 @@ pub fn render(snap: &DashboardSnapshot, strategy: &StrategyDto, history: History
     settings(&mut s, strategy);
     peak_slot(&mut s, strategy);
     lab_book(&mut s, snap, strategy);
+    main_positions(&mut s, snap, strategy);
     for l in &snap.locations {
         now(&mut s, snap, l, strategy);
     }
@@ -136,6 +139,46 @@ fn settings(s: &mut String, strategy: &StrategyDto) {
     s.push_str("## Settings\n\n| setting | value |\n|---|---|\n");
     for (k, v) in &strategy.settings {
         let _ = writeln!(s, "| {} | {} |", cell(k), cell(v));
+    }
+    s.push('\n');
+}
+
+/// The positions a strategy opened on the main book (A–K share it).
+fn main_positions(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
+    if strategy.lab {
+        return;
+    }
+    let mine: Vec<_> = snap
+        .positions
+        .iter()
+        .filter(|p| p.strategy.is_empty() && p.opened_by == strategy.id)
+        .collect();
+    if mine.is_empty() {
+        return;
+    }
+    s.push_str("## Its positions on the main book\n\n");
+    positions_table(s, &mine);
+}
+
+fn positions_table(s: &mut String, positions: &[&PositionDto]) {
+    if positions.is_empty() {
+        return;
+    }
+    s.push_str("| market | bucket | side | shares | cost | mark | unrealized | realized |\n|---|---|---|---:|---:|---:|---:|---:|\n");
+    for p in positions {
+        let _ = writeln!(
+            s,
+            "| {} | {} | {} | {:.2} | {} | {} | {} | {} |",
+            cell(&p.event_slug),
+            cell(&p.bucket),
+            p.side,
+            p.shares,
+            paper_report::usd(p.cost_usd),
+            opt(p.mark, 3),
+            p.unrealized_usd
+                .map_or_else(|| "–".to_owned(), paper_report::usd),
+            paper_report::usd(p.realized_usd)
+        );
     }
     s.push('\n');
 }
@@ -178,25 +221,7 @@ fn lab_book(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
         .iter()
         .filter(|p| p.strategy == strategy.id)
         .collect();
-    if !mine.is_empty() {
-        s.push_str("| market | bucket | side | shares | cost | mark | unrealized | realized |\n|---|---|---|---:|---:|---:|---:|---:|\n");
-        for p in mine {
-            let _ = writeln!(
-                s,
-                "| {} | {} | {} | {:.0} | {} | {} | {} | {} |",
-                cell(&p.event_slug),
-                cell(&p.bucket),
-                p.side,
-                p.shares,
-                paper_report::usd(p.cost_usd),
-                opt(p.mark, 3),
-                p.unrealized_usd
-                    .map_or_else(|| "–".to_owned(), paper_report::usd),
-                paper_report::usd(p.realized_usd)
-            );
-        }
-        s.push('\n');
-    }
+    positions_table(s, &mine);
     for i in snap.lab.iter().flat_map(|l| l.inputs.iter()) {
         let _ = writeln!(
             s,
@@ -725,6 +750,25 @@ mod tests {
                 strategy: "E_book_confirmed_high".into(),
                 ..OrderDto::default()
             }],
+            positions: vec![
+                PositionDto {
+                    event_slug: "eham-sep-30".into(),
+                    bucket: "21°C".into(),
+                    side: "YES".into(),
+                    shares: 59.84,
+                    cost_usd: 56.32,
+                    opened_by: "F_peak_slot".into(),
+                    ..PositionDto::default()
+                },
+                PositionDto {
+                    event_slug: "eham-sep-30".into(),
+                    bucket: "24°C".into(),
+                    side: "NO".into(),
+                    shares: 30.0,
+                    opened_by: "G_tail_seller".into(),
+                    ..PositionDto::default()
+                },
+            ],
             ..DashboardSnapshot::default()
         }
     }
@@ -748,6 +792,16 @@ mod tests {
         ] {
             assert!(md.contains(part), "missing {part:?} in\n{md}");
         }
+        // Its own position on the main book, not G's.
+        assert!(
+            md.contains("## Its positions on the main book\n\n| market |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| eham-sep-30 | 21°C | YES | 59.84 | $56.32 |"),
+            "{md}"
+        );
+        assert!(!md.contains("| 24°C | NO |"), "{md}");
         // Nothing of the other strategies.
         assert!(!md.contains("E's own blocker"), "{md}");
         assert!(!md.contains("E line"), "{md}");

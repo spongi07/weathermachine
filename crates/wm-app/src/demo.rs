@@ -655,5 +655,37 @@ mod tests {
         assert!(!all.iter().any(|x| x.approved && x.at >= from && x.at < to));
         // The ten-minute readings reach the engine (strategy K's input).
         assert!(s.engine().nowcast(&ids().station).is_some());
+        // Every position on the dashboard names the strategy that opened it.
+        let catalog = crate::strategies::catalog(&loc);
+        let (collectors, filters, reviews) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let model_status = ModelDto::default();
+        let peak_slot = loc.peak_slot();
+        let inputs = DtoInputs {
+            demo: true,
+            instance: "test",
+            collectors: &collectors,
+            stream: None,
+            alerts: &[],
+            confirmed_filters: &filters,
+            extra_providers: &[],
+            rules_review: &reviews,
+            model: &model_status,
+            yes_pooling: loc.buy_yes().pooling(),
+            no_pooling: loc.buy_no().pooling(),
+            strategies: &catalog,
+            peak_slot: &peak_slot,
+            peak_times: None,
+        };
+        let dash = dto::build(&s.engine().snapshot(), &inputs, Utc::now());
+        assert!(!dash.positions.is_empty(), "the demo trades");
+        for p in &dash.positions {
+            assert!(
+                catalog.iter().any(|c| c.id == p.opened_by),
+                "{} {} opened by {:?}",
+                p.bucket,
+                p.side,
+                p.opened_by
+            );
+        }
     }
 }

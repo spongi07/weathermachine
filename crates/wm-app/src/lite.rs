@@ -393,15 +393,16 @@ pub fn render(s: &DashboardSnapshot) -> String {
         );
     }
     out.push_str("</table></section>");
-    out.push_str("<section><h2>Positions</h2><table><tr><th>Book</th><th>Event</th><th>Bucket</th><th>Side</th><th>Shares</th><th>Avg</th><th>Mark</th><th>Cost $</th><th>Unrealized $</th><th>Realized $</th></tr>");
+    out.push_str("<section><h2>Positions</h2><table><tr><th>Book</th><th>Strategy</th><th>Event</th><th>Bucket</th><th>Side</th><th>Shares</th><th>Avg</th><th>Mark</th><th>Cost $</th><th>Unrealized $</th><th>Realized $</th></tr>");
     for p in &s.positions {
         let _ = write!(
             out,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.3}</td><td>{}</td><td>{:.2}</td><td>{}</td><td>{:+.2}</td></tr>",
-            if p.strategy.is_empty() {
-                "main".to_owned()
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.3}</td><td>{}</td><td>{:.2}</td><td>{}</td><td>{:+.2}</td></tr>",
+            if p.strategy.is_empty() { "main" } else { "lab" },
+            if p.opened_by.is_empty() {
+                "?".to_owned()
             } else {
-                esc(&p.strategy)
+                esc(&p.opened_by)
             },
             esc(&p.event_slug),
             esc(&p.bucket),
@@ -574,11 +575,13 @@ mod tests {
             positions: vec![
                 wm_dashboard_api::PositionDto {
                     event_slug: "eham-main".into(),
+                    opened_by: "G_tail_seller".into(),
                     ..Default::default()
                 },
                 wm_dashboard_api::PositionDto {
                     event_slug: "eham-lab".into(),
                     strategy: "L7_knmi_slope".into(),
+                    opened_by: "L7_knmi_slope".into(),
                     ..Default::default()
                 },
             ],
@@ -597,11 +600,11 @@ mod tests {
         );
         assert!(html.contains("takers' records not loaded yet"), "{html}");
         assert!(
-            html.contains("<tr><td>main</td><td>eham-main</td>"),
+            html.contains("<tr><td>main</td><td>G_tail_seller</td><td>eham-main</td>"),
             "{html}"
         );
         assert!(
-            html.contains("<tr><td>L7_knmi_slope</td><td>eham-lab</td>"),
+            html.contains("<tr><td>lab</td><td>L7_knmi_slope</td><td>eham-lab</td>"),
             "{html}"
         );
         // No lab, no section.

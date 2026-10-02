@@ -310,6 +310,11 @@ fn lab_strategies_and_k_buy_the_same_token_on_their_own_books() {
         .map(|p| (p.instrument.token.clone(), p.shares))
         .collect();
     assert_eq!(main, vec![(no18.clone(), Shares::from_whole(23))], "K only");
+    assert_eq!(
+        snap.position_strategy.get(&no18).map(StrategyId::as_str),
+        Some("K_knmi_nowcast"),
+        "the dashboard names the strategy that opened it"
+    );
     let l7 = snap
         .lab_books
         .iter()
@@ -421,6 +426,13 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
         .unwrap();
     assert_eq!(l7.shares, Shares::from_whole(47));
     let snap = e.snapshot();
+    assert_eq!(
+        snap.position_strategy
+            .get(&o.no_token)
+            .map(StrategyId::as_str),
+        Some("K_knmi_nowcast"),
+        "a restored position keeps the strategy of its order"
+    );
     assert_eq!(snap.daily_new_exposure, Usd::from_whole(10));
     assert_eq!(snap.lab_books[0].daily_new_exposure, Usd::from_whole(20));
 }
