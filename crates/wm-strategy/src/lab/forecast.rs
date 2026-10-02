@@ -52,11 +52,21 @@ fn usable<'a>(day: &Day<'_, 'a>, out: &mut StrategyOutput) -> Option<&'a Forecas
     None
 }
 
-/// The latest report's time (the forecast is read there, as the replay
-/// does at each report).
+/// The latest report's time: the forecast is read there, as the replay
+/// does at each report, whenever the service last refetched it (`usable`
+/// has checked that it is known now).
 fn report_time(day: &Day<'_, '_>) -> DateTime<Utc> {
     day.latest_report()
         .map_or_else(|| day.last_metar_at(), |r| r.observed_at)
+}
+
+/// Why the forecast gives no rise at the latest report: it has no value
+/// on one side of it (the report is the day's last hour or before its first).
+fn no_rise(day: &Day<'_, '_>) -> String {
+    format!(
+        "the forecast has no value on both sides of the {} UTC report",
+        report_time(day).format("%H:%M")
+    )
 }
 
 /// L14 (`variant`: λ = 1.0). The morning's departure from the hourly
@@ -69,16 +79,32 @@ pub(crate) fn departure(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutp
     };
     let lambda = if variant { 1.0 } else { 0.7 };
     let at = report_time(day);
-    let (Some(now), Some(rest)) = (forecast_at(fc, at), fc.remaining_max_tenths(at)) else {
+    let mut blockers: Vec<String> = day.outside(10 * 60, 12 * 60 + 30).into_iter().collect();
+    // Without a bucket to point to, the high's says why the rule waits.
+    let wait = |mut blockers: Vec<String>, why: String, out: &mut StrategyOutput| {
+        if let Some(h) = day.outcome_of(day.high) {
+            blockers.push(why);
+            day.note(h, OutcomeSide::Yes, blockers, out);
+        }
+    };
+    let (Some(now), Some(rest)) = (forecast_at(fc, at), fc.remaining_max_tenths_at(at)) else {
+        wait(
+            blockers,
+            format!(
+                "the forecast has no value at or after the {} UTC report",
+                at.format("%H:%M")
+            ),
+            out,
+        );
         return;
     };
     let departure = (f64::from(day.f.current_tenths) - now) / 10.0;
     let predicted = f64::from(rest) / 10.0 + lambda * departure;
     let v = round_half_up(predicted).max(day.high);
     let Some(target) = day.outcome_of(v) else {
+        wait(blockers, format!("{v} °C is not on the ladder"), out);
         return;
     };
-    let mut blockers: Vec<String> = day.outside(10 * 60, 12 * 60 + 30).into_iter().collect();
     match day.favourite() {
         Some((fav, p)) if fav.condition_id == target.condition_id => blockers.push(format!(
             "{} is already the market's favourite ({p:.2})",
@@ -155,10 +181,10 @@ pub(crate) fn own_peak(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutpu
             c(day.f.drop_tenths)
         ));
     }
-    match fc.rise_tenths(report_time(day)) {
+    match fc.rise_tenths_at(report_time(day)) {
         Some(r) if r <= -10 => rationale.push(format!("the forecast falls {} from here", c(-r))),
         Some(r) => blockers.push(format!("forecast rise {} > −1.0 °C", c(r))),
-        None => blockers.push("no forecast rise".into()),
+        None => blockers.push(no_rise(day)),
     }
     day.taker(
         Buy {
@@ -222,10 +248,10 @@ pub(crate) fn evening_high(day: &Day<'_, '_>, variant: bool, out: &mut StrategyO
             c(day.f.current_tenths)
         ));
     }
-    match fc.rise_tenths(report_time(day)) {
+    match fc.rise_tenths_at(report_time(day)) {
         Some(r) if r >= min_rise => rationale.push(format!("the forecast still rises {}", c(r))),
         Some(r) => blockers.push(format!("forecast rise {} < {}", c(r), c(min_rise))),
-        None => blockers.push("no forecast rise".into()),
+        None => blockers.push(no_rise(day)),
     }
     day.taker(
         Buy {

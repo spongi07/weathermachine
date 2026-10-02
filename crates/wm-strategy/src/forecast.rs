@@ -76,9 +76,7 @@ impl ForecastDay {
         if now < self.known_at {
             return None;
         }
-        let elapsed = self.max_where(|t| t <= now)?;
-        let remaining = self.max_where(|t| t > now)?;
-        Some(remaining - elapsed)
+        self.rise_tenths_at(now)
     }
 
     /// Forecast maximum over the rest of the day, `(now, 24:00]`. `None`
@@ -87,7 +85,23 @@ impl ForecastDay {
         if now < self.known_at {
             return None;
         }
-        self.max_where(|t| t > now)
+        self.remaining_max_tenths_at(now)
+    }
+
+    /// [`Self::rise_tenths`] read at `at` whenever the series became known,
+    /// for a caller that checks the knowledge time itself. The strategy lab
+    /// decides now but reads the forecast at the latest report, as the replay
+    /// does; the service refetches the forecast every hour, and a refresh
+    /// after that report must not hide it.
+    pub fn rise_tenths_at(&self, at: DateTime<Utc>) -> Option<i32> {
+        let elapsed = self.max_where(|t| t <= at)?;
+        let remaining = self.max_where(|t| t > at)?;
+        Some(remaining - elapsed)
+    }
+
+    /// [`Self::remaining_max_tenths`] read at `at`, likewise.
+    pub fn remaining_max_tenths_at(&self, at: DateTime<Utc>) -> Option<i32> {
+        self.max_where(|t| t > at)
     }
 
     /// Forecast maximum of the whole local day (display only).

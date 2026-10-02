@@ -860,6 +860,36 @@ fn l15_buys_the_high_well_past_the_forecast_peak() {
     assert_eq!(proposal(&w.run(15, true)).token, w.yes(21));
 }
 
+/// The service refetches the forecast every hour: a refresh after the
+/// latest report (or a restart) must not hide the forecast from the rules,
+/// which read it at that report.
+#[test]
+fn a_forecast_refetched_after_the_latest_report_is_still_read_there() {
+    let mut w = World::new("13:30");
+    w.temps(&[
+        ("10:55", 205),
+        ("11:25", 210),
+        ("12:55", 200),
+        ("13:25", 195),
+    ]);
+    // As in L15's test, but known at 13:28, after the 13:25 report.
+    let peak_at_11 = |h: i64| {
+        let utc_hour = (22 + h) % 24;
+        200 - 10 * (utc_hour - 11).abs() as i32
+    };
+    w.forecast = Some(forecast("13:28", peak_at_11));
+    w.yes_book(21, "0.82", "0.85");
+    assert_eq!(proposal(&w.run(15, false)).token, w.yes(21));
+    // L16 reads the rise too, and L14 says why it waits instead of nothing.
+    let l16 = w.run(16, false);
+    assert_blocked(&l16, "no evening high");
+    assert_blocked(&l16, "forecast rise -3.0 °C < 1.0 °C");
+    assert_blocked(&w.run(14, false), "outside 10:00–12:30");
+    // Not before the forecast is known at all.
+    w.forecast = Some(forecast("13:31", peak_at_11));
+    assert_blocked(&w.run(15, false), "the forecast is usable from 13:31 UTC");
+}
+
 #[test]
 fn l16_buys_the_next_degree_on_an_evening_high_day() {
     let mut w = World::new("12:30");
