@@ -620,8 +620,26 @@ async fn research_market(
             );
             m.uses_forecast()
         }
-        _ => {
-            println!("no installed model: evaluated without the forecast");
+        // Say which: a model elsewhere (WM_MODEL_PATH) or an unreadable
+        // file looks the same as none otherwise.
+        setup::ModelLoad::Missing(p) => {
+            println!(
+                "no installed model at {} (WM_MODEL_PATH unset, or set differently from the service's): evaluated without the forecast",
+                p.display()
+            );
+            false
+        }
+        setup::ModelLoad::Invalid(p, e) => {
+            println!(
+                "the installed model {} could not be used ({e}): evaluated without the forecast",
+                p.display()
+            );
+            false
+        }
+        setup::ModelLoad::NotConfigured => {
+            println!(
+                "no model path (WM_MODEL_PATH unset and auto-training off): evaluated without the forecast"
+            );
             false
         }
     };

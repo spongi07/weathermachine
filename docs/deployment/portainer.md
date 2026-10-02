@@ -194,9 +194,12 @@ docker run --rm -e WM_CONTACT=you@example.org -e WM_KNMI_API_KEY \
 Mount the stack's own data volume. Portainer names it after the stack
 (`<stack name>_wmdata`; `docker volume ls | grep wmdata` lists them), and
 `docker run` silently creates an empty volume for a name that does not
-exist. On the wrong volume the study finds no installed model — it prints
-*no installed model: evaluated without the forecast* — and the dashboard's
-*Reports to paste* panel does not see the report. `-e WM_KNMI_API_KEY`
+exist. On the wrong volume the study finds no installed model and the
+dashboard's *Reports to paste* panel does not see the report. The first
+line of the run says which model it found: *installed model … evaluated
+with the day-1 forecast* is what the service uses; *no installed model at
+…* means another volume or a stack that sets `WM_MODEL_PATH` (pass the same
+`-e WM_MODEL_PATH=…` to the study). `-e WM_KNMI_API_KEY`
 without a value passes the key from your shell (`read -rs WM_KNMI_API_KEY &&
 export WM_KNMI_API_KEY`), so it never appears on the command line.
 
