@@ -14,17 +14,6 @@ impl SplitMix64 {
         Self { state: seed }
     }
 
-    /// Seed from process-specific entropy (time and address) for production jitter.
-    pub fn from_entropy() -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9_7F4A_7C15);
-        let local = 0u8;
-        let addr = std::ptr::addr_of!(local) as u64;
-        Self::new(nanos ^ addr.rotate_left(32) ^ u64::from(std::process::id()))
-    }
-
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;

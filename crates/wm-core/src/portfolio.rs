@@ -77,10 +77,6 @@ impl PositionBook {
             .filter(move |p| &p.instrument.event_slug == slug && p.shares.micros() > 0)
     }
 
-    pub fn total_cost_basis(&self) -> Usd {
-        self.open_positions().map(|p| p.cost_basis).sum()
-    }
-
     pub fn total_realized_pnl(&self) -> Usd {
         self.positions.values().map(|p| p.realized_pnl).sum()
     }
@@ -218,7 +214,7 @@ mod tests {
         let pnl = book.settle_event(&yes18.event_slug, 18);
         // YES 18 wins: +10 - 9.52375 ; NO 19 wins: +10 - 9.0
         assert_eq!(pnl, Usd::parse("1.47625").unwrap());
-        assert_eq!(book.total_cost_basis(), Usd::ZERO);
+        assert_eq!(book.open_positions().count(), 0);
     }
 
     #[test]

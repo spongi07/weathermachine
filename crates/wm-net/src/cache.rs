@@ -84,15 +84,6 @@ impl<K: Eq + Hash + Clone, V: Clone> TtlCache<K, V> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key, (value, now));
     }
-
-    /// Drop expired entries.
-    pub fn purge(&self, now: Duration) {
-        let ttl = self.ttl;
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, (_, at)| now.saturating_sub(*at) < ttl);
-    }
 }
 
 #[cfg(test)]
@@ -105,8 +96,6 @@ mod tests {
         c.insert("a", 1, Duration::from_secs(0));
         assert_eq!(c.get(&"a", Duration::from_secs(9)), Some(1));
         assert_eq!(c.get(&"a", Duration::from_secs(10)), None);
-        c.purge(Duration::from_secs(11));
-        assert_eq!(c.get(&"a", Duration::from_secs(0)), None);
     }
 
     #[test]

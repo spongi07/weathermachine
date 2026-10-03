@@ -207,6 +207,16 @@ impl OrderManager {
         self.open_orders().map(|o| o.token.clone()).collect()
     }
 
+    /// Forget terminal orders (filled, cancelled, rejected, expired) last
+    /// updated before `cutoff`; the database keeps every order. Returns how
+    /// many were dropped. Live orders are never touched.
+    pub fn prune_terminal_before(&mut self, cutoff: DateTime<Utc>) -> usize {
+        let before = self.orders.len();
+        self.orders
+            .retain(|_, o| !(o.status.is_terminal() && o.updated_at < cutoff));
+        before - self.orders.len()
+    }
+
     /// Most recently updated orders first.
     pub fn recent(&self, n: usize) -> Vec<&OrderRecord> {
         let mut v: Vec<&OrderRecord> = self.orders.values().collect();

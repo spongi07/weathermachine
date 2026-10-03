@@ -3647,7 +3647,6 @@ dependencies = [
  "chrono-tz",
  "proptest",
  "serde",
- "serde_json",
  "thiserror",
  "toml",
  "wm-core",

@@ -229,18 +229,6 @@ impl DailyTemperatureMarket {
         }
         Ok(())
     }
-
-    pub fn find_by_token(&self, token: &TokenId) -> Option<(&MarketOutcome, OutcomeSide)> {
-        self.outcomes.iter().find_map(|o| {
-            if &o.yes_token == token {
-                Some((o, OutcomeSide::Yes))
-            } else if &o.no_token == token {
-                Some((o, OutcomeSide::No))
-            } else {
-                None
-            }
-        })
-    }
 }
 
 /// One price level.
@@ -308,14 +296,6 @@ impl OrderBook {
         }
     }
 
-    /// Midpoint for display only. Weather Machine never assumes mid-price fills.
-    pub fn mid_for_display(&self) -> Option<f64> {
-        match (self.best_bid(), self.best_ask()) {
-            (Some(b), Some(a)) => Some((b.price.as_f64() + a.price.as_f64()) / 2.0),
-            _ => None,
-        }
-    }
-
     /// Shares and cost available to a buyer at prices `<= limit`.
     pub fn ask_depth_up_to(&self, limit: Price) -> (Shares, Usd) {
         let mut shares = Shares::ZERO;
@@ -325,17 +305,6 @@ impl OrderBook {
             cost += notional(l.price, l.size, Rounding::Up);
         }
         (shares, cost)
-    }
-
-    /// Shares and proceeds available to a seller at prices `>= limit`.
-    pub fn bid_depth_down_to(&self, limit: Price) -> (Shares, Usd) {
-        let mut shares = Shares::ZERO;
-        let mut proceeds = Usd::ZERO;
-        for l in self.bids.iter().take_while(|l| l.price >= limit) {
-            shares += l.size;
-            proceeds += notional(l.price, l.size, Rounding::Down);
-        }
-        (shares, proceeds)
     }
 
     /// Time since the book was last known current (received or confirmed),

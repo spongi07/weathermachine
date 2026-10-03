@@ -327,6 +327,38 @@ fn paper_lifecycle_signal_risk_fill_settle() {
     let pnl = engine.settle(&m.event_slug, 18);
     assert!(pnl > Usd::ZERO, "pnl {pnl}");
     assert_eq!(engine.positions().open_positions().count(), 0);
+    // The settled market, its books and its orders stay for two days (the
+    // dashboard shows yesterday's), then the kernel forgets them; the
+    // positions keep their realized P&L and the counters stand.
+    let heartbeat = |at: &str| {
+        env(
+            at,
+            WeatherMachineEvent::Timer(wm_core::event::TimerEvent {
+                due_at: utc(at),
+                kind: wm_core::event::TimerKind::Heartbeat,
+            }),
+        )
+    };
+    engine.handle(&heartbeat("2026-07-02T12:00:00Z"));
+    assert!(engine.markets().contains_key(&m.event_slug));
+    assert_eq!(engine.orders().len(), 3);
+    assert!(!engine.snapshot().orders.is_empty());
+    engine.handle(&heartbeat("2026-07-04T01:00:00Z"));
+    assert!(!engine.markets().contains_key(&m.event_slug));
+    assert_eq!(engine.orders().len(), 0);
+    let snap = engine.snapshot();
+    assert!(snap.orders.is_empty());
+    assert!(
+        snap.locations[0].books.is_empty(),
+        "the market's books are forgotten"
+    );
+    assert_eq!(snap.realized_pnl_total, pnl);
+    assert_eq!(
+        engine.positions().iter().count(),
+        3,
+        "closed positions keep their realized P&L"
+    );
+    assert_eq!(snap.stats.fills_total, 3);
 }
 
 /// Strategy E end to end: after the peak the high's YES offers thin out.

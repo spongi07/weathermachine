@@ -98,7 +98,7 @@ module_inception = "allow"
 lto = "thin"
 codegen-units = 1
 # Crash-only design: a panic terminates the process, the container restarts it,
-# and state is rebuilt from the durable event journal (see docs/blueprint/16-operations.md).
+# and state is rebuilt from the durable event journal (see docs/blueprint/09-operations.md).
 panic = "abort"
 debug = "line-tables-only"
 

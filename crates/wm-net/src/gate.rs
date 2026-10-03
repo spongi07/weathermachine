@@ -73,10 +73,6 @@ pub enum RequestOutcome {
 }
 
 impl RequestOutcome {
-    pub fn is_success(&self) -> bool {
-        matches!(self, RequestOutcome::Success { .. })
-    }
-
     pub fn status(&self) -> Option<u16> {
         match self {
             RequestOutcome::Success { status }
@@ -559,7 +555,6 @@ impl ProviderGate {
         match admission {
             Admission::Proceed => Ok(GatePermit {
                 gate: Arc::clone(self),
-                started: now,
                 _sem: sem,
                 completed: false,
             }),
@@ -633,16 +628,11 @@ impl ProviderGate {
 /// the gate believing a request is still in flight).
 pub struct GatePermit {
     gate: Arc<ProviderGate>,
-    started: Duration,
     _sem: OwnedSemaphorePermit,
     completed: bool,
 }
 
 impl GatePermit {
-    pub fn started_mono(&self) -> Duration {
-        self.started
-    }
-
     pub fn complete(mut self, outcome: RequestOutcome) {
         self.completed = true;
         self.gate.complete(outcome);

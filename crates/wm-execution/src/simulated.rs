@@ -405,8 +405,4 @@ impl SimulatedExchange {
     pub fn resting_count(&self) -> usize {
         self.resting.len()
     }
-
-    pub fn pending_count(&self) -> usize {
-        self.pending.len()
-    }
 }

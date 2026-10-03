@@ -78,17 +78,6 @@ impl ManualClock {
         s.mono += by;
     }
 
-    /// Jump wall-clock time forward to `t` (monotonic advances by the same amount).
-    /// Moving backwards is ignored: simulated time never runs backwards.
-    pub fn advance_to(&self, t: DateTime<Utc>) {
-        let mut s = self.lock();
-        if t > s.now {
-            let delta = (t - s.now).to_std().unwrap_or(Duration::ZERO);
-            s.now = t;
-            s.mono += delta;
-        }
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, ManualState> {
         // A poisoned lock only means another test thread panicked; the data is still valid.
         self.inner
@@ -261,10 +250,6 @@ mod tests {
         clock.advance(Duration::from_secs(90));
         assert_eq!(clock.now(), utc("2026-09-26T12:01:30Z"));
         assert_eq!(clock.monotonic(), Duration::from_secs(90));
-        clock.advance_to(utc("2026-09-26T11:00:00Z")); // ignored
-        assert_eq!(clock.now(), utc("2026-09-26T12:01:30Z"));
-        clock.advance_to(utc("2026-09-26T12:02:30Z"));
-        assert_eq!(clock.monotonic(), Duration::from_secs(150));
     }
 
     #[test]

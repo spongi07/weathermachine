@@ -172,19 +172,9 @@ impl TempC {
         (self.0 + 5).div_euclid(10)
     }
 
-    /// Exact whole-degree value, or `None` if the value has a fractional part.
-    pub fn exact_whole(self) -> Option<i32> {
-        (self.0 % 10 == 0).then_some(self.0 / 10)
-    }
-
     /// Difference `self - other` in tenths of a degree.
     pub fn diff_tenths(self, other: TempC) -> i32 {
         self.0 - other.0
-    }
-
-    /// Fahrenheit value for display purposes only (never for bucket decisions).
-    pub fn to_fahrenheit_f64(self) -> f64 {
-        self.as_f64() * 9.0 / 5.0 + 32.0
     }
 }
 
@@ -264,13 +254,6 @@ impl Price {
         Price(self.0 - self.0 % tick.0)
     }
 
-    pub fn ceil_to_tick(self, tick: Price) -> Price {
-        if tick.0 == 0 || self.0.is_multiple_of(tick.0) {
-            return self;
-        }
-        Price((self.0 - self.0 % tick.0 + tick.0).min(1_000_000))
-    }
-
     pub fn saturating_add(self, other: Price) -> Price {
         Price((self.0 + other.0).min(1_000_000))
     }
@@ -336,16 +319,8 @@ macro_rules! signed_micro_unit {
                 self.0 == 0
             }
 
-            pub const fn is_negative(self) -> bool {
-                self.0 < 0
-            }
-
             pub const fn abs(self) -> Self {
                 Self(self.0.abs())
-            }
-
-            pub fn checked_add(self, other: Self) -> Option<Self> {
-                self.0.checked_add(other.0).map(Self)
             }
 
             pub fn max(self, other: Self) -> Self {
@@ -448,8 +423,8 @@ pub fn round_shares_to_lot(shares: Shares, lot: Shares, rounding: Rounding) -> S
     Shares((lots * i128::from(lot.micros())) as i64)
 }
 
-/// A probability in `[0, 1]`. Models work in `f64`; decisions compare against
-/// exact prices via [`Probability::as_price_floor`] to stay conservative.
+/// A probability in `[0, 1]` (NaN and out-of-range values clamp, fail
+/// closed). Models work in `f64`; decisions compare it with exact prices.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Probability(f64);
@@ -473,11 +448,6 @@ impl Probability {
 
     pub fn complement(self) -> Probability {
         Probability::new(1.0 - self.0)
-    }
-
-    /// Probability expressed as a price, rounded down to the micro-unit.
-    pub fn as_price_floor(self) -> Price {
-        Price((self.0 * 1_000_000.0).floor().clamp(0.0, 1_000_000.0) as u32)
     }
 }
 
@@ -526,13 +496,8 @@ mod tests {
         let p = Price::parse("0.953").unwrap();
         assert!(!p.is_on_tick(tick));
         assert_eq!(p.floor_to_tick(tick), Price::parse("0.95").unwrap());
-        assert_eq!(p.ceil_to_tick(tick), Price::parse("0.96").unwrap());
         let fine = Price::parse("0.001").unwrap();
         assert!(p.is_on_tick(fine));
-        assert_eq!(
-            Price::parse("0.999").unwrap().ceil_to_tick(tick),
-            Price::ONE
-        );
     }
 
     #[test]
@@ -542,8 +507,6 @@ mod tests {
         assert_eq!(TempC::from_tenths(-15).round_half_up_whole(), -1);
         assert_eq!(TempC::from_tenths(-16).round_half_up_whole(), -2);
         assert_eq!(TempC::from_tenths(-5).round_half_up_whole(), 0);
-        assert_eq!(TempC::from_whole(18).exact_whole(), Some(18));
-        assert_eq!(TempC::from_tenths(178).exact_whole(), None);
         assert_eq!(TempC::from_tenths(-3).to_string(), "-0.3°C");
         assert_eq!(TempC::from_whole(18).to_string(), "18.0°C");
     }
@@ -583,7 +546,6 @@ mod tests {
         assert_eq!(Probability::new(f64::NAN).value(), 0.0);
         assert_eq!(Probability::new(1.5).value(), 1.0);
         assert_eq!(Probability::new(-0.5).value(), 0.0);
-        assert_eq!(Probability::new(0.9531).as_price_floor().micros(), 953_100);
     }
 
     proptest! {

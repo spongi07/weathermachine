@@ -34,7 +34,3 @@ pub use polling::{
 pub use providers::{AwcMetarSource, NwsApiSource, TgftpMetarSource};
 pub use registry::{AlreadyRunning, CollectorClaim, CollectorRegistry};
 pub use source::{ObservationSource, ParsedReport, SourceError, SourceFetch};
-/// The METAR's weather groups (pure parsing, in `wm_core` so that the
-/// engine and the strategies read them too).
-pub use wm_core::metar_wx;
-pub use wm_core::metar_wx::{MetarWx, parse_wx};

@@ -175,10 +175,6 @@ impl ProviderId {
     pub fn nws_api() -> Self {
         Self("nws_api".to_owned())
     }
-    /// Synoptic Data API — the data behind weather.gov/wrh/timeseries (requires own token).
-    pub fn synoptic() -> Self {
-        Self("synoptic".to_owned())
-    }
     pub fn polymarket_gamma() -> Self {
         Self("polymarket_gamma".to_owned())
     }

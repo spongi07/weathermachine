@@ -367,7 +367,7 @@ max_strategy_exposure_usd = "50.00"
 max_spread = "0.10"
 
 # ---------------------------------------------------------------------------
-# Strategies (research parameters; see docs/blueprint/14-research-methodology.md)
+# Strategies (research parameters; see docs/blueprint/08-research.md#36-parameter-research)
 # ---------------------------------------------------------------------------
 # The book is information. A and B pool the model's probability with the
 # market's (midpoint of a fresh book with spread <= max_market_spread):
@@ -702,7 +702,7 @@ retrain_after_days = 30           # background retrain (current model keeps trad
 # ---------------------------------------------------------------------------
 # Day-1 forecast as a model feature — MEASURED, NOT ASSUMED. Training joins
 # the forecast history with the METAR history and runs a walk-forward test
-# with a placebo control (docs/blueprint/19-forecast-layer.md). The forecast
+# with a placebo control (docs/blueprint/05-markets.md, component 19). The forecast
 # changes trading probabilities only if that test adopts it; otherwise it is
 # fetched and shown on the dashboard, nothing more. WM_FORECAST=false turns
 # it off entirely.

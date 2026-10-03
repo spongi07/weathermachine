@@ -137,11 +137,6 @@ pub enum DedupClass {
 }
 
 impl DedupClass {
-    /// Whether the observation must enter the event pipeline.
-    pub fn emits_event(self) -> bool {
-        !matches!(self, DedupClass::Duplicate)
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             DedupClass::New => "new",

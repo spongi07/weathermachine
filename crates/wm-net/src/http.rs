@@ -159,10 +159,6 @@ impl FetchError {
         }
     }
 
-    pub fn is_gate_closed(&self) -> bool {
-        matches!(self, FetchError::GateClosed(_))
-    }
-
     pub fn is_throttled(&self) -> bool {
         matches!(self, FetchError::Throttled { .. })
     }

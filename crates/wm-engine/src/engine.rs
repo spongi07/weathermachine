@@ -44,6 +44,11 @@ use wm_strategy::{
 /// How long the lab's KNMI readings and METAR weather groups are kept.
 const LAB_HISTORY: Duration = Duration::hours(36);
 
+/// A settled market, its books and its finished orders are forgotten this
+/// long after its day: the dashboard still shows yesterday's, the database
+/// keeps everything, and the kernel's memory stays flat over months.
+const SETTLED_HISTORY: Duration = Duration::days(2);
+
 /// A neighbouring KNMI station of a location (the strategy lab's L24).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NeighbourStation {
@@ -393,14 +398,6 @@ impl Engine {
         self.model.id()
     }
 
-    /// Replace the default strategy set (e.g. research configurations). A
-    /// lab strategy keeps its own book; every other one trades the main
-    /// book.
-    pub fn with_strategies(mut self, strategies: Vec<Box<dyn Strategy>>) -> Self {
-        self.strategies = strategies;
-        self
-    }
-
     /// The book `strategy` trades.
     fn book_index(&self, strategy: &StrategyId) -> usize {
         self.book_of.get(strategy).copied().unwrap_or(MAIN)
@@ -489,14 +486,6 @@ impl Engine {
 
     pub fn set_storage_ok(&mut self, ok: bool) {
         self.storage_ok = ok;
-    }
-
-    pub fn set_execution_ok(&mut self, ok: bool) {
-        self.execution_ok = ok;
-    }
-
-    pub fn set_compliance_ok(&mut self, ok: bool) {
-        self.compliance_ok = ok;
     }
 
     pub fn kill_switch(&self) -> Option<&str> {
@@ -712,6 +701,7 @@ impl Engine {
                     for i in 0..self.cfg.locations.len() {
                         self.evaluate_location(i, false, &mut out);
                     }
+                    self.forget_history();
                 }
             },
             WeatherMachineEvent::ProviderHealthChanged(h) => {
@@ -1349,6 +1339,34 @@ impl Engine {
         }
         self.lab.takers.remove(slug);
         main
+    }
+
+    /// Drop what the kernel no longer needs: markets settled more than
+    /// [`SETTLED_HISTORY`] ago (with their tokens' books, last trades and
+    /// evaluations) and terminal orders older than that. Positions keep
+    /// their realized P&L; the database keeps every market, book and order.
+    fn forget_history(&mut self) {
+        let cutoff = self.now - SETTLED_HISTORY;
+        let gone: Vec<EventSlug> = self
+            .markets
+            .values()
+            .filter(|m| m.closed && local_day_bounds(m.local_date, m.timezone).1 < cutoff)
+            .map(|m| m.event_slug.clone())
+            .collect();
+        for slug in &gone {
+            if let Some(m) = self.markets.remove(slug) {
+                for o in &m.outcomes {
+                    for token in [&o.yes_token, &o.no_token] {
+                        self.token_index.remove(token);
+                        self.books.remove(token);
+                        self.last_trades.remove(token);
+                    }
+                }
+            }
+            self.evaluations.remove(slug);
+            self.lab.takers.remove(slug);
+        }
+        self.orders.prune_terminal_before(cutoff);
     }
 
     /// Rebuild earlier runs' paper book after a restart (see [`RestoreState`]):

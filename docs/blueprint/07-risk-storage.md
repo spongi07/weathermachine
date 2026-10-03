@@ -198,7 +198,11 @@ with 5 levels per side and deleted from the journal after
 `journal_book_retention_days` (7; `WM_JOURNAL_RETENTION_DAYS`, 0 = keep).
 Market history lives on in `orderbook_snapshots` (changes only, ≤ 1 per
 10 s per token). Nightly backups exclude the replay journal by default
-(`WM_BACKUP_JOURNAL=true` includes it).
+(`WM_BACKUP_JOURNAL=true` includes it). In memory the engine keeps a
+settled market (books, last trades, evaluations, lab takers and its
+terminal orders) for two days after the market's local day ends, then
+forgets it on the next heartbeat; the database keeps everything, so the
+process footprint no longer grows with the number of days traded.
 
 **FAILURE MODES.** A write failure, or a batch the writer has not accepted
 yet, turns `storage_ok` off, which blocks new positions until the backlog is
