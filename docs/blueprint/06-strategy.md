@@ -123,6 +123,10 @@ intervals, never on win rate.
 | U | unwind (§28) | **on** | the exit engine; leaves G–K alone |
 | L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`) | built on 2 Oct on request, so their live record grows beside the replay's; none trades money |
 
+The review of 3 October 2026 weighs every one of them against the replays,
+the first paper days and the code, with recommendations for the operator:
+[strategy review](../research/strategy-review.md).
+
 A strategy switched off is not shown on the dashboard; its code stays,
 because `research market` replays A, B, E and F as baselines, and
 `enabled = true` brings it back. G–K were chosen on 1 October 2026 from the

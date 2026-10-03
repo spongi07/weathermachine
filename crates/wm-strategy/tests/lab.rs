@@ -648,6 +648,48 @@ fn l9_caps_the_day_after_a_shower() {
     assert_blocked(&rain.run(9, true), "no thunder");
 }
 
+/// A book the lab's risk check would refuse (wider than its 0.10 limit, or
+/// one-sided) is a blocker of the rule itself, not a proposal rejected on
+/// every update: for a taker (L9) and for a maker (L1) alike.
+#[test]
+fn lab_rules_wait_out_a_book_their_risk_check_refuses() {
+    let shower = |w: &mut World| {
+        w.metar(
+            "11:55",
+            220,
+            Some(150),
+            "EHAM 011155Z 21010KT 9999 SCT030 22/15 Q1012 NOSIG",
+        );
+        w.metar(
+            "12:55",
+            195,
+            Some(170),
+            "EHAM 011255Z 25015G25KT 4000 SHRA BKN015CB 20/17 Q1013 NOSIG",
+        );
+    };
+    let mut wide = World::new("13:00");
+    shower(&mut wide);
+    wide.no_book(23, "0.75", "0.88");
+    let out = wide.run(9, false);
+    assert!(out.proposals.is_empty());
+    assert_blocked(&out, "NO spread 0.13 > 0.10 (the lab book's limit)");
+    let mut one_sided = World::new("13:00");
+    shower(&mut one_sided);
+    let t = one_sided.no(23);
+    one_sided.book(t, None, Some("0.88"));
+    assert_blocked(&one_sided.run(9, false), "NO book one-sided");
+    // L1 rests one tick inside the spread: still refused in a wide book.
+    let mut maker = World::new("12:06");
+    high_21(&mut maker);
+    maker.reading("11:40", 205, 207);
+    maker.reading("11:50", 204, 206);
+    maker.reading("12:00", 203, 205);
+    maker.no_book(22, "0.70", "0.92");
+    let out = maker.run(1, false);
+    assert!(out.proposals.is_empty());
+    assert_blocked(&out, "NO spread 0.22 > 0.10 (the lab book's limit)");
+}
+
 #[test]
 fn l10_reads_the_trend() {
     let mut w = World::new("11:00");

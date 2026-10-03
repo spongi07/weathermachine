@@ -477,6 +477,7 @@ impl<'c, 'a> Day<'c, 'a> {
                         b.band.0, b.band.1
                     ));
                 }
+                blockers.extend(self.spread_blocker(side, bk));
             }
         }
         let fees = ctx.market.fees;
@@ -550,6 +551,20 @@ impl<'c, 'a> Day<'c, 'a> {
         }
     }
 
+    /// What the lab book's risk check refuses in this book: one side only,
+    /// or a spread over the book's limit. Said here, the rule waits in its
+    /// evaluation instead of proposing on every update into a rejection.
+    fn spread_blocker(&self, side: &str, book: &OrderBook) -> Option<String> {
+        match book.spread() {
+            None => Some(format!("{side} book one-sided")),
+            Some(sp) if sp > self.cfg.risk.max_spread => Some(format!(
+                "{side} spread {sp} > {} (the lab book's limit)",
+                self.cfg.risk.max_spread
+            )),
+            Some(_) => None,
+        }
+    }
+
     /// A resting NO bid (good-till-date), held to settlement once filled.
     pub fn maker_no(&self, q: Quote<'_>, mut blockers: Vec<String>, out: &mut StrategyOutput) {
         let ctx = self.ctx;
@@ -563,6 +578,10 @@ impl<'c, 'a> Day<'c, 'a> {
             Some(bk) => {
                 if bk.age_ms(ctx.now) > self.cfg.max_book_age_ms {
                     blockers.push("order book stale".into());
+                }
+                // A one-sided book already leaves no bid to join (below).
+                if price.is_some() {
+                    blockers.extend(self.spread_blocker("NO", bk));
                 }
             }
         }

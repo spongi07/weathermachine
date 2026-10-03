@@ -412,7 +412,9 @@ windows, price bands and win probabilities
 
 **Risk** (`[strategies.lab.risk]`, per book). $25 an order ($100 for L3),
 $120 in open positions and live orders, $120 of new exposure and $100 of
-loss a day, books up to 0.10 wide, 10 orders a minute. Everything else is
+loss a day, books up to 0.10 wide, 10 orders a minute. A rule names a book
+its risk check would refuse, wider than that or one-sided, as a blocker of
+its own and waits, instead of proposing into a rejection on every update. Everything else is
 the main `[risk]`: data freshness, prices 0.01–0.99, the kill switch, a
 stale or throttled weather source.
 
