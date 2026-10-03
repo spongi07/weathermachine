@@ -302,6 +302,7 @@ impl Strategy for KnmiNowcast {
             blockers,
             model_p: None,
             market_p: None,
+            maker_bid: None,
         });
         if signal && let (Some(a), Some(sh), Some(b)) = (ask, shares, be) {
             out.proposals.push(Proposal {

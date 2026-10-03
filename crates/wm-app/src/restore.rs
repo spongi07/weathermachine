@@ -238,14 +238,26 @@ fn restored_fill(
 
 /// The alert of a restore.
 pub fn describe(s: &RestoreSummary) -> String {
+    let usd = |u: Usd| crate::paper_report::usd(u.as_f64());
     let mut text = format!(
-        "restored the paper book of earlier runs: {} open position(s) ({} shares, cost {}) from {} fill(s) in {} market(s); today's new exposure {} counts toward the daily limit",
-        s.open_positions, s.open_shares, s.open_cost, s.fills, s.markets, s.new_exposure_today
+        "restored the paper book of earlier runs: {} open position(s) ({} shares, cost {}) from {} fill(s) in {} market(s); today's new exposure {} counts toward the main book's daily limit",
+        s.open_positions,
+        s.open_shares,
+        usd(s.open_cost),
+        s.fills,
+        s.markets,
+        usd(s.new_exposure_today)
     );
     if !s.realized_today.is_zero() {
         text.push_str(&format!(
             ", and so does {} realized by today's restored sales",
-            s.realized_today
+            usd(s.realized_today)
+        ));
+    }
+    if !s.lab_new_exposure_today.is_zero() {
+        text.push_str(&format!(
+            "; the lab books' {} counts toward their own limits",
+            usd(s.lab_new_exposure_today)
         ));
     }
     if !s.rejected.is_empty() {
@@ -298,18 +310,26 @@ mod tests {
         let text = describe(&s);
         assert!(
             text.contains(
-                "1 open position(s) (100 shares, cost $95.2375) from 1 fill(s) in 1 market(s)"
+                "1 open position(s) (100 shares, cost $95.24) from 1 fill(s) in 1 market(s)"
             ),
             "{text}"
         );
-        assert!(text.contains("today's new exposure $95.00 counts toward the daily limit"));
-        assert!(!text.contains("refused") && !text.contains("sales"));
+        assert!(
+            text.contains("today's new exposure $95.00 counts toward the main book's daily limit"),
+            "{text}"
+        );
+        assert!(!text.contains("refused") && !text.contains("sales") && !text.contains("lab"));
         s.realized_today = Usd::from_whole(-3);
+        s.lab_new_exposure_today = Usd::from_micros(39_700_000);
         s.rejected
             .push("wm-x on m: sell of 5 exceeds held 0 shares".into());
         let text = describe(&s);
         assert!(
-            text.contains("and so does $-3.00 realized by today's restored sales"),
+            text.contains("and so does −$3.00 realized by today's restored sales"),
+            "{text}"
+        );
+        assert!(
+            text.contains("; the lab books' $39.70 counts toward their own limits"),
             "{text}"
         );
         assert!(text.contains("1 fill(s) refused: wm-x on m"), "{text}");

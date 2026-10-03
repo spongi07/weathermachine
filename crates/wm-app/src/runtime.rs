@@ -1129,12 +1129,16 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         restore_paper_book(s, &cfg, &mut session, clock.now(), &side).await;
     }
 
+    // Every gate that is not a station's METAR source (those report through
+    // their collector). KNMI feeds K and the lab; the Data API, the lab's tape.
     let gates_for_ui: Vec<Arc<ProviderGate>> = [
         "polymarket_gamma",
         "polymarket_clob",
         "polymarket_ws",
+        "polymarket_data",
         "iem",
         "open_meteo",
+        "knmi",
     ]
     .iter()
     .filter_map(|n| providers.gate(n).cloned())
@@ -1713,12 +1717,42 @@ async fn knmi_loop(
                 }
             }
         }
+        let newest = targets
+            .iter()
+            .map(|t| last_sent.get(&t.station).copied())
+            .collect::<Option<Vec<_>>>()
+            .and_then(|v| v.into_iter().min());
+        let pause = knmi_pause(clock.now(), newest, poll);
         tokio::select! {
-            _ = tokio::time::sleep(poll) => {}
+            _ = tokio::time::sleep(pause) => {}
             _ = shutdown.changed() => return,
         }
     }
 }
+
+/// How long the KNMI loop waits before asking again. KNMI publishes each
+/// ten-minute reading some minutes after its interval ends (4–5 minutes
+/// seen live): once every station holds its newest reading, nothing new can
+/// come before the next interval's end plus [`KNMI_EARLIEST_DELAY`], so the
+/// loop sleeps until then and polls every `poll` from there on. A station
+/// without a reading yet keeps the plain cadence.
+fn knmi_pause(
+    now: DateTime<Utc>,
+    newest: Option<DateTime<Utc>>,
+    poll: std::time::Duration,
+) -> std::time::Duration {
+    let Some(newest) = newest else {
+        return poll;
+    };
+    let due = newest + Duration::minutes(10) + KNMI_EARLIEST_DELAY;
+    (due - now)
+        .to_std()
+        .map_or(poll, |d| d.clamp(poll, std::time::Duration::from_secs(600)))
+}
+
+/// The soonest after its interval's end a KNMI ten-minute reading is
+/// expected; the loop resumes polling from there.
+const KNMI_EARLIEST_DELAY: Duration = Duration::minutes(2);
 
 /// A location whose day-1 forecast is fetched.
 #[derive(Debug, Clone)]
@@ -1944,7 +1978,9 @@ impl EngineLoopState {
                     "info",
                     format!(
                         "settled {} at {} °C (observed): PnL {}",
-                        s.event_slug, s.final_value, s.pnl
+                        s.event_slug,
+                        s.final_value,
+                        crate::paper_report::usd(s.pnl.as_f64())
                     ),
                 );
             }
@@ -2062,6 +2098,46 @@ impl EngineLoopState {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    /// With the newest reading in, the loop sleeps until two minutes after
+    /// the next interval's end and polls at its cadence from there.
+    #[test]
+    fn knmi_polls_only_when_a_reading_can_be_due() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let poll = std::time::Duration::from_secs(30);
+        // The 20:50 reading arrived at 20:54:17: the 21:00 one is due from 21:02.
+        assert_eq!(
+            knmi_pause(
+                t("2026-10-03T20:54:17Z"),
+                Some(t("2026-10-03T20:50:00Z")),
+                poll
+            ),
+            std::time::Duration::from_secs(7 * 60 + 43)
+        );
+        // From then on, every 30 s until it is in.
+        assert_eq!(
+            knmi_pause(
+                t("2026-10-03T21:02:10Z"),
+                Some(t("2026-10-03T20:50:00Z")),
+                poll
+            ),
+            poll
+        );
+        assert_eq!(
+            knmi_pause(
+                t("2026-10-03T21:30:00Z"),
+                Some(t("2026-10-03T20:50:00Z")),
+                poll
+            ),
+            poll,
+            "a late reading keeps the cadence"
+        );
+        assert_eq!(
+            knmi_pause(t("2026-10-03T21:00:00Z"), None, poll),
+            poll,
+            "no reading yet"
+        );
+    }
     use wm_core::market::BookLevel;
     use wm_core::units::{Price, Shares};
 

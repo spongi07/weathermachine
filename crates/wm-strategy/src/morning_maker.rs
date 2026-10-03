@@ -267,6 +267,7 @@ impl MorningMaker {
             blockers,
             model_p: None,
             market_p: Some(p_mid),
+            maker_bid: price,
         };
         let proposal = match (signal, price, shares, expiry) {
             (true, Some(p), Some(sh), Some(exp)) => Some(Proposal {

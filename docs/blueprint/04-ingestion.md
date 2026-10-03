@@ -53,8 +53,8 @@ checks the real collector loop makes 12–120 requests in six virtual hours.
 **KNMI ten-minute readings (strategy K's input, `[knmi]`).** With
 `WM_KNMI_API_KEY` set (and `[knmi] enabled`), one loop per station asks the
 KNMI EDR API (`10-minute-in-situ-meteorological-observations`, the station
-by its WIGOS id, `0-20000-0-06240` for Schiphol) every `poll_seconds` (30)
-for the last `lookback_minutes` (40) of `ta` (ten-minute mean) and `tx`
+by its WIGOS id, `0-20000-0-06240` for Schiphol) for the last
+`lookback_minutes` (40) of `ta` (ten-minute mean) and `tx`
 (maximum), through its own gate (`[providers.knmi]`: ≥ 5 s spacing, one
 request at a time, `Retry-After` honoured, a daily budget). The key goes
 only in the `Authorization` header — never in a URL, a log line or an audit
@@ -65,8 +65,12 @@ says nothing about KNMI). It is
 predictive input only: it never changes the observed high, the views or
 settlement. Failures raise one alert, recovery another; K then does
 nothing (fail closed). K enabled without a key raises a warning and stays
-idle. At 30 s the loop makes about 2,900 requests a day, under the budget
-of 4,000.
+idle. KNMI publishes a reading 4–5 minutes after its interval ends, so the
+loop asks only when one can be due: from two minutes after each interval's
+end, every `poll_seconds` (30) until the reading is in, then it sleeps until
+the next one can be due. That keeps the latency of a 30 s poll at about 50
+requests an hour with the lab's neighbours (some 1,300 a day; polling all
+day long took about 3,200 of the budget of 4,000).
 
 With the strategy lab on (`[strategies.lab]`), the same loop also asks for
 global radiation (`[lab].radiation_parameter`, `qg`) in the same request,

@@ -60,7 +60,11 @@ pub const ADMIN_TOKEN_HEADER: &str = "x-wm-admin-token";
 pub struct Published {
     pub seq: u64,
     pub snapshot: DashboardSnapshot,
+    /// The whole snapshot: REST, and a stream client's first event.
     pub json: Bytes,
+    /// The same without `decisions` (`decisions_omitted`), for a stream
+    /// client that already holds this `decisions_seq`.
+    pub json_without_decisions: Bytes,
     pub published_at: Instant,
 }
 
@@ -68,6 +72,19 @@ pub struct Published {
 pub struct Publisher {
     tx: watch::Sender<Arc<Published>>,
     seq: u64,
+    decisions_seq: u64,
+    decisions_key: u64,
+}
+
+/// Decision records never change once made, so their ids name the list.
+fn decisions_key(decisions: &[wm_dashboard_api::DecisionDto]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    decisions.len().hash(&mut h);
+    for d in decisions {
+        d.id.hash(&mut h);
+    }
+    h.finish()
 }
 
 impl Publisher {
@@ -84,24 +101,46 @@ impl Publisher {
         let (tx, rx) = watch::channel(Arc::new(Published {
             seq: 0,
             snapshot: initial,
+            json_without_decisions: json.clone(),
             json,
             published_at: Instant::now(),
         }));
-        (Self { tx, seq: 0 }, rx)
+        let publisher = Self {
+            tx,
+            seq: 0,
+            decisions_seq: 0,
+            decisions_key: decisions_key(&[]),
+        };
+        (publisher, rx)
     }
 
-    pub fn publish(&mut self, snapshot: DashboardSnapshot) {
+    pub fn publish(&mut self, mut snapshot: DashboardSnapshot) {
         self.seq += 1;
-        match serde_json::to_vec(&snapshot) {
-            Ok(json) => {
+        let key = decisions_key(&snapshot.decisions);
+        if key != self.decisions_key {
+            self.decisions_key = key;
+            self.decisions_seq += 1;
+        }
+        snapshot.decisions_seq = self.decisions_seq;
+        // Once without the decision log, once with it; nothing is copied.
+        let decisions = std::mem::take(&mut snapshot.decisions);
+        snapshot.decisions_omitted = true;
+        let without = serde_json::to_vec(&snapshot);
+        snapshot.decisions = decisions;
+        snapshot.decisions_omitted = false;
+        match (serde_json::to_vec(&snapshot), without) {
+            (Ok(json), Ok(without)) => {
                 self.tx.send_replace(Arc::new(Published {
                     seq: self.seq,
                     snapshot,
                     json: Bytes::from(json),
+                    json_without_decisions: Bytes::from(without),
                     published_at: Instant::now(),
                 }));
             }
-            Err(e) => tracing::error!(error = %e, "snapshot serialization failed"),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::error!(error = %e, "snapshot serialization failed");
+            }
         }
     }
 
@@ -329,17 +368,27 @@ async fn snapshot(State(state): State<AppState>) -> Response {
 
 async fn stream(State(state): State<AppState>) -> impl IntoResponse {
     let rx = state.snapshots.clone();
-    let events = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
+    // The decision log is most of a snapshot's bytes and changes a few times
+    // an hour: a client gets it on connecting and whenever it changes, and
+    // keeps it in between (the event says `decisions_omitted`).
+    let start = (rx, true, None::<u64>);
+    let events = futures_util::stream::unfold(start, |(mut rx, first, held)| async move {
         if !first && rx.changed().await.is_err() {
             return None;
         }
         let p = Arc::clone(&rx.borrow_and_update());
-        let data = String::from_utf8_lossy(&p.json).into_owned();
+        let version = p.snapshot.decisions_seq;
+        let json = if held == Some(version) {
+            &p.json_without_decisions
+        } else {
+            &p.json
+        };
+        let data = String::from_utf8_lossy(json).into_owned();
         let ev = Event::default()
             .event("snapshot")
             .id(p.seq.to_string())
             .data(data);
-        Some((Ok::<Event, Infallible>(ev), (rx, false)))
+        Some((Ok::<Event, Infallible>(ev), (rx, false, Some(version))))
     });
     (
         [(HeaderName::from_static("x-accel-buffering"), "no")],

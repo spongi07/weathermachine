@@ -434,6 +434,7 @@ impl<'c, 'a> Day<'c, 'a> {
             blockers,
             model_p: None,
             market_p: None,
+            maker_bid: None,
         });
     }
 
@@ -512,6 +513,7 @@ impl<'c, 'a> Day<'c, 'a> {
             blockers,
             model_p: None,
             market_p: None,
+            maker_bid: None,
         });
         if signal && let (Some(a), Some(sh)) = (ask, shares) {
             let mut rationale = b.rationale;
@@ -615,6 +617,7 @@ impl<'c, 'a> Day<'c, 'a> {
             blockers,
             model_p: None,
             market_p: None,
+            maker_bid: None,
         });
         if signal && let (Some(p), Some(sh), Some(e)) = (price, shares, q.expires_at) {
             let mut rationale = q.rationale;
@@ -694,6 +697,7 @@ impl<'c, 'a> Day<'c, 'a> {
             blockers,
             model_p: None,
             market_p: None,
+            maker_bid: None,
         });
         if signal && let Some(b) = bid {
             let mut rationale = rationale;

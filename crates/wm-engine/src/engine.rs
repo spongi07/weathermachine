@@ -1118,11 +1118,19 @@ impl Engine {
         if from_weather {
             let id = self.alloc_decision();
             let blockers: Vec<String> = evaluations.iter().map(evaluation_line).collect();
-            // The bucket that came closest to a trade: the highest EV.
+            // The bucket that came closest to a trade: the fewest blockers,
+            // then the highest EV. A rule's EV assumes its trigger holds, so
+            // EV alone would crown the line furthest from trading (K's fixed
+            // 0.94 against a NO offered at 0.001).
+            let blocked = |e: &BucketEvaluation| if e.signal { 0 } else { e.blockers.len() };
             let closest = evaluations
                 .iter()
                 .filter_map(|e| e.ev_per_share.map(|ev| (ev, e)))
-                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .min_by(|a, b| {
+                    blocked(a.1)
+                        .cmp(&blocked(b.1))
+                        .then_with(|| b.0.total_cmp(&a.0))
+                })
                 .map(|(_, e)| e);
             let rec = DecisionRecord {
                 decision_id: id,
@@ -1437,7 +1445,7 @@ impl Engine {
         for (strategy, cost) in &state.lab_new_exposure_today {
             if let Some(&b) = self.book_of.get(strategy) {
                 self.paper[b].risk.restore_daily_new_exposure(*cost, now);
-                summary.new_exposure_today += *cost;
+                summary.lab_new_exposure_today += *cost;
             }
         }
         for p in self.paper.iter().flat_map(|b| b.positions.open_positions()) {
@@ -1684,10 +1692,15 @@ fn strategy_tag(s: &StrategyId) -> &str {
 
 /// One audit line per bucket evaluation, with the numbers behind the verdict:
 /// `A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge …`.
+/// A maker (G, J) also names the bid it would rest, where its EV is taken:
+/// `G 20°C NO · ask 0.26 · bid 0.24 (maker) · p 0.248 · EV +0.0078 — …`.
 fn evaluation_line(e: &BucketEvaluation) -> String {
-    let price = e
+    let mut price = e
         .ask
         .map_or_else(|| "no ask".to_owned(), |a| format!("ask {a}"));
+    if let Some(b) = e.maker_bid {
+        price.push_str(&format!(" · bid {b} (maker)"));
+    }
     let p = match (e.p_win, e.model_p, e.market_p) {
         (Some(pw), Some(m), Some(k)) if (pw - m).abs() > 1e-9 => {
             format!(" · p {pw:.3} (model {m:.3}, market {k:.3})")
@@ -1710,4 +1723,44 @@ fn evaluation_line(e: &BucketEvaluation) -> String {
         e.bucket_label,
         e.outcome_side.as_str()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wm_core::market::OutcomeSide;
+    use wm_core::units::Price;
+
+    fn eval(maker_bid: Option<Price>) -> BucketEvaluation {
+        BucketEvaluation {
+            strategy: StrategyId::from_static("G_tail_seller"),
+            bucket_label: "20°C".into(),
+            outcome_side: OutcomeSide::No,
+            token: TokenId::new("n20").unwrap(),
+            ask: Some(Price::from_f64(0.26).unwrap()),
+            bid: Some(Price::from_f64(0.23).unwrap()),
+            p_win: Some(0.2478),
+            ev_per_share: Some(0.0078),
+            break_even: Some(0.24),
+            signal: false,
+            blockers: vec!["YES offered at 0.76 outside [0.01, 0.08]".into()],
+            model_p: Some(0.2478),
+            market_p: None,
+            maker_bid,
+        }
+    }
+
+    /// A maker's EV is taken at the bid it would rest, so its line names
+    /// that bid; a taker's line stays as it was.
+    #[test]
+    fn a_makers_line_names_the_bid_its_ev_is_taken_at() {
+        assert_eq!(
+            evaluation_line(&eval(Some(Price::from_f64(0.24).unwrap()))),
+            "G 20°C NO · ask 0.26 · bid 0.24 (maker) · p 0.248 · EV +0.0078 — YES offered at 0.76 outside [0.01, 0.08]"
+        );
+        assert_eq!(
+            evaluation_line(&eval(None)),
+            "G 20°C NO · ask 0.26 · p 0.248 · EV +0.0078 — YES offered at 0.76 outside [0.01, 0.08]"
+        );
+    }
 }

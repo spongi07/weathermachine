@@ -277,6 +277,7 @@ impl MiddleFade {
             blockers,
             model_p: model.map(|pm| 1.0 - pm),
             market_p: Some(1.0 - m),
+            maker_bid: None,
         };
         let proposal = match (signal, ask, shares, be) {
             (true, Some(a), Some(sh), Some(b)) => Some(Proposal {

@@ -65,7 +65,13 @@ fn connect(
                 return;
             };
             match serde_json::from_str::<DashboardSnapshot>(&text) {
-                Ok(s) => {
+                Ok(mut s) => {
+                    // The stream sends the decision log only when it changed.
+                    if s.decisions_omitted
+                        && let Some(prev) = snap.get_untracked()
+                    {
+                        s.decisions = prev.decisions.clone();
+                    }
                     snap.set(Some(Arc::new(s)));
                     link.set(Link::Live);
                     last_msg.set(js_sys::Date::now());

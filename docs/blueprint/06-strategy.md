@@ -562,6 +562,11 @@ day's high.
   minutes left; posted again after the report;
 * one position per bucket and day, held to settlement.
 
+Its evaluation line names the bid it would rest (`· bid 0.24 (maker)`):
+the EV is taken there, maker fee nil, not at the NO ask the line also shows.
+Its `p` is the NO's lower bound, one minus the bucket's upper bound, so
+every bucket in the model's open last cell shows the same `p`.
+
 **RISK.** A bucket that wins costs the whole NO price (12–100 × the
 premium). The edge is a fraction of a cent per dollar a day: a small, steady
 earner whose result rests on the rare loss. Caps: $30 an order, $120 in

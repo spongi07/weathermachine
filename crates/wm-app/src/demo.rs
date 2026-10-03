@@ -525,7 +525,9 @@ pub async fn run(
                 level: "info".into(),
                 message: format!(
                     "settled {} at {} °C: PnL {}",
-                    s.event_slug, s.final_value, s.pnl
+                    s.event_slug,
+                    s.final_value,
+                    crate::paper_report::usd(s.pnl.as_f64())
                 ),
             });
         }

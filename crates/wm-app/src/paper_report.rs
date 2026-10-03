@@ -377,6 +377,8 @@ pub struct Call {
     pub bucket: String,
     pub side: String,
     pub ask: Option<f64>,
+    /// The bid a maker would rest (G, J), where its EV is taken.
+    pub maker_bid: Option<f64>,
     pub p: Option<f64>,
     pub model: Option<f64>,
     pub market: Option<f64>,
@@ -384,7 +386,8 @@ pub struct Call {
     pub verdict: String,
     /// Did this side win (METAR high)?
     pub won: Option<bool>,
-    /// P&L per share had it been bought at the ask, taker fee included.
+    /// P&L per share had it been bought: a maker at its bid (no fee),
+    /// anyone else at the ask, taker fee included.
     pub pnl_per_share: Option<f64>,
 }
 
@@ -392,6 +395,10 @@ pub struct Call {
 pub struct ModelVsMarket {
     pub bucket: String,
     pub samples: usize,
+    /// Evaluations left out because the winning bucket lay inside the
+    /// model's open last cell (P(final ≥ high + K − 1)), which does not say
+    /// how much of that mass is this bucket's — as `research market` does.
+    pub ambiguous: usize,
     /// Average probability each gave the winning bucket.
     pub model_mean: f64,
     pub market_mean: f64,
@@ -486,6 +493,7 @@ pub struct Totals {
     pub catch_up: usize,
     /// Model against market on the winning bucket (days that are over).
     pub mvm_samples: usize,
+    pub mvm_ambiguous: usize,
     pub model_log_loss: Option<f64>,
     pub market_log_loss: Option<f64>,
 }
@@ -997,6 +1005,8 @@ struct EvalLine {
     bucket: String,
     side: String,
     ask: Option<f64>,
+    /// The bid a maker would rest (G, J), where its EV is taken.
+    maker_bid: Option<f64>,
     p: Option<f64>,
     model: Option<f64>,
     market: Option<f64>,
@@ -1015,6 +1025,7 @@ fn parse_line(line: &str) -> Option<EvalLine> {
         bucket: bucket.to_owned(),
         side: side.to_owned(),
         ask: None,
+        maker_bid: None,
         p: None,
         model: None,
         market: None,
@@ -1025,6 +1036,8 @@ fn parse_line(line: &str) -> Option<EvalLine> {
     for part in parts {
         if let Some(a) = part.strip_prefix("ask ") {
             e.ask = a.trim().parse().ok();
+        } else if let Some(b) = part.strip_prefix("bid ") {
+            e.maker_bid = b.trim_end_matches("(maker)").trim().parse().ok();
         } else if let Some(v) = part.strip_prefix("EV ") {
             e.ev = v.trim().parse().ok();
         } else if let Some(p) = part.strip_prefix("p ") {
@@ -1087,8 +1100,9 @@ fn call(
         (Some(b), Some(h)) => Some(b.contains(h) == (l.side == "YES")),
         _ => None,
     };
-    let pnl_per_share = match (won, l.ask) {
-        (Some(w), Some(a)) => Some(f64::from(u8::from(w)) - a - taker_fee(fee_rate, a)),
+    let pnl_per_share = match (won, l.maker_bid, l.ask) {
+        (Some(w), Some(b), _) => Some(f64::from(u8::from(w)) - b),
+        (Some(w), None, Some(a)) => Some(f64::from(u8::from(w)) - a - taker_fee(fee_rate, a)),
         _ => None,
     };
     Call {
@@ -1096,6 +1110,7 @@ fn call(
         bucket: l.bucket.clone(),
         side: l.side.clone(),
         ask: l.ask,
+        maker_bid: l.maker_bid,
         p: l.p,
         model: l.model,
         market: l.market,
@@ -1110,20 +1125,22 @@ fn call(
 type Closeness = (f64, f64);
 
 /// The [`Closeness`] of an evaluation line.
-/// A, B and D trade on a model edge, so their EV ranks them. E and F trade
-/// on a price rule and claim no edge: fewer blockers first, then the higher
-/// ask, since their trigger is the ask rising into a range.
+/// A, B, D and I trade on a model edge, so their EV ranks them. E and F
+/// trade on a price rule and claim no edge: fewer blockers first, then the
+/// higher ask, since their trigger is the ask rising into a range. The rest
+/// (G–K, the lab) trade on a rule whose probability holds only once its
+/// trigger fires: fewer blockers first, then the EV — by EV alone a NO at
+/// 0.001 would always look closest.
 fn closeness(l: &EvalLine) -> Option<Closeness> {
+    let blockers = if l.signal {
+        0
+    } else {
+        l.verdict.split("; ").filter(|b| !b.is_empty()).count()
+    };
     match l.tag.as_str() {
-        "E" | "F" => {
-            let blockers = if l.signal {
-                0
-            } else {
-                l.verdict.split("; ").filter(|b| !b.is_empty()).count()
-            };
-            Some((-(blockers as f64), l.ask?))
-        }
-        _ => Some((l.ev?, 0.0)),
+        "A" | "B" | "D" | "I" => Some((l.ev?, 0.0)),
+        "E" | "F" => Some((-(blockers as f64), l.ask?)),
+        _ => Some((-(blockers as f64), l.ev?)),
     }
 }
 
@@ -1260,6 +1277,15 @@ fn log_loss(p: f64) -> f64 {
     -p.clamp(LOG_LOSS_FLOOR, 1.0).ln()
 }
 
+/// "; N left out …" for evaluations the model could not score.
+fn left_out(ambiguous: usize) -> String {
+    if ambiguous == 0 {
+        String::new()
+    } else {
+        format!("; {ambiguous} left out, the bucket then still in the model's open last cell")
+    }
+}
+
 fn model_vs_market(
     evaluations: &[&ReportDecision],
     label: &str,
@@ -1268,6 +1294,7 @@ fn model_vs_market(
     tz: Tz,
 ) -> Option<ModelVsMarket> {
     let mut points: Vec<(DateTime<Utc>, TrailPoint)> = Vec::new();
+    let mut ambiguous = 0;
     for d in evaluations {
         let Some((high, probs)) = model_view(&d.inputs) else {
             continue;
@@ -1280,12 +1307,20 @@ fn model_vs_market(
             support: 0,
             source: String::new(),
         };
+        // Inside the open last cell the model only bounds the bucket's
+        // probability (from 0 to the whole cell); scoring the lower bound
+        // would charge it for a statement it never made.
+        let lower = dist.p_in_bucket_lower(high, bucket);
+        if (dist.p_in_bucket_upper(high, bucket) - lower).abs() > 1e-9 {
+            ambiguous += 1;
+            continue;
+        }
         points.push((
             d.at,
             TrailPoint {
                 at: hhmm(d.at, tz),
                 high_c: high,
-                model: dist.p_in_bucket_lower(high, bucket),
+                model: lower,
                 market,
             },
         ));
@@ -1316,6 +1351,7 @@ fn model_vs_market(
     Some(ModelVsMarket {
         bucket: label.to_owned(),
         samples: points.len(),
+        ambiguous,
         model_mean: mean(&|p| p.model),
         market_mean: mean(&|p| p.market),
         model_log_loss: mean(&|p| log_loss(p.model)),
@@ -1365,6 +1401,7 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
         t.catch_up += d.latency.catch_up;
         if let Some(m) = d.model_vs_market.as_ref().filter(|_| !d.in_progress) {
             t.mvm_samples += m.samples;
+            t.mvm_ambiguous += m.ambiguous;
             ll_model += m.model_log_loss * m.samples as f64;
             ll_market += m.market_log_loss * m.samples as f64;
         }
@@ -1447,10 +1484,24 @@ pub(crate) fn usd(v: f64) -> String {
     }
 }
 
+/// A price as the book quotes it: two decimals, three on a sub-cent tick
+/// (0.001 is not "0.00", nor 0.997 "1.00").
+fn price_text(p: f64) -> String {
+    let cents = p * 100.0;
+    if (cents - cents.round()).abs() < 1e-6 {
+        format!("{p:.2}")
+    } else {
+        format!("{p:.3}")
+    }
+}
+
 pub(crate) fn call_text(c: &Call) -> String {
     let mut s = format!("{} {} {}", c.at, c.bucket, c.side);
     if let Some(a) = c.ask {
-        let _ = write!(s, " · ask {a:.2}");
+        let _ = write!(s, " · ask {}", price_text(a));
+    }
+    if let Some(b) = c.maker_bid {
+        let _ = write!(s, " · bid {} (maker)", price_text(b));
     }
     if let Some(p) = c.p {
         let _ = write!(s, " · p {p:.3}");
@@ -1468,12 +1519,13 @@ pub(crate) fn call_text(c: &Call) -> String {
         let _ = write!(s, " · EV {ev:+.4}");
     }
     let _ = write!(s, " — {}", c.verdict);
+    let at = if c.maker_bid.is_some() { "bid" } else { "ask" };
     match (c.won, c.pnl_per_share) {
         (Some(true), Some(p)) => {
-            let _ = write!(s, " → **won** ({p:+.3}/share at the ask)");
+            let _ = write!(s, " → **won** ({p:+.3}/share at the {at})");
         }
         (Some(false), Some(p)) => {
-            let _ = write!(s, " → **lost** ({p:+.3}/share at the ask)");
+            let _ = write!(s, " → **lost** ({p:+.3}/share at the {at})");
         }
         (Some(w), None) => {
             let _ = write!(s, " → **{}**", if w { "won" } else { "lost" });
@@ -1554,8 +1606,9 @@ pub fn markdown(r: &PaperReport) -> String {
         (Some(m), Some(k)) => {
             let _ = writeln!(
                 s,
-                "- Model against market on the winning bucket (finished days, {} evaluations): log loss model {m:.3}, market {k:.3} — lower is better.",
-                t.mvm_samples
+                "- Model against market on the winning bucket (finished days, {} evaluations{}): log loss model {m:.3}, market {k:.3} — lower is better.",
+                t.mvm_samples,
+                left_out(t.mvm_ambiguous)
             );
         }
         _ => {
@@ -1746,9 +1799,10 @@ fn day_markdown(s: &mut String, d: &DayReport) {
     if let Some(m) = &d.model_vs_market {
         let _ = writeln!(
             s,
-            "- **Model against market on {}** ({} evaluations with a book): mean probability model {:.2}, market {:.2}; log loss model {:.3}, market {:.3}; model higher {}×, market higher {}×. Sure (≥ 0.90) first: model {}, market {}.",
+            "- **Model against market on {}** ({} evaluations with a book{}): mean probability model {:.2}, market {:.2}; log loss model {:.3}, market {:.3}; model higher {}×, market higher {}×. Sure (≥ 0.90) first: model {}, market {}.",
             m.bucket,
             m.samples,
+            left_out(m.ambiguous),
             m.model_mean,
             m.market_mean,
             m.model_log_loss,
@@ -1936,6 +1990,65 @@ fn day_markdown(s: &mut String, d: &DayReport) {
 mod tests {
     use super::*;
 
+    /// Closest calls print an ask as the book quotes it.
+    #[test]
+    fn prices_keep_their_sub_cent_tick() {
+        assert_eq!(price_text(0.001), "0.001");
+        assert_eq!(price_text(0.997), "0.997");
+        assert_eq!(price_text(0.012), "0.012");
+        assert_eq!(price_text(0.76), "0.76");
+        assert_eq!(price_text(0.9), "0.90");
+    }
+
+    /// Inside the model's open last cell ("≥ high + 3") a bucket's
+    /// probability is only bounded, not stated: those evaluations are
+    /// counted apart instead of being scored as a model probability of 0.
+    #[test]
+    fn model_vs_market_leaves_out_the_open_last_cell() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let eval = |at: &str, high: i64| ReportDecision {
+            at: t(at),
+            strategy: "evaluation".into(),
+            event_slug: None,
+            summary: String::new(),
+            inputs: serde_json::json!({
+                "views": [{"view": "all", "high_whole": high, "p": [0.5, 0.2, 0.2, 0.1]}]
+            }),
+            outputs: serde_json::Value::Null,
+            approved: false,
+            reasons: vec![],
+        };
+        let top = |at: &str| ReportBookTop {
+            captured_at: t(at),
+            bid_micros: Some(700_000),
+            ask_micros: Some(720_000),
+        };
+        // 20 °C wins: at a high of 17 °C it is +3, inside "≥ +3"; at 18 °C
+        // it is +2, which the model states (0.2).
+        let morning = eval("2026-10-03T09:27:30Z", 17);
+        let noon = eval("2026-10-03T10:27:30Z", 18);
+        let tops = [top("2026-10-03T09:20:00Z"), top("2026-10-03T10:20:00Z")];
+        let bucket = TemperatureBucket::exact(20, TempUnit::Celsius);
+        let m = model_vs_market(
+            &[&morning, &noon],
+            "20°C",
+            &bucket,
+            &tops,
+            chrono_tz::Europe::Amsterdam,
+        )
+        .unwrap();
+        assert_eq!((m.samples, m.ambiguous), (1, 1));
+        assert_eq!(m.trail.len(), 1);
+        assert_eq!((m.trail[0].at.as_str(), m.trail[0].high_c), ("12:27", 18));
+        assert!((m.model_mean - 0.2).abs() < 1e-12, "P(+2) at 18 °C");
+        assert!((m.market_mean - 0.71).abs() < 1e-12);
+        assert_eq!(
+            left_out(m.ambiguous),
+            "; 1 left out, the bucket then still in the model's open last cell"
+        );
+        assert_eq!(left_out(0), "");
+    }
+
     /// The lab's fills settle on their own books: the main book's P&L
     /// leaves them out and the lab's is listed apart, per strategy.
     #[test]
@@ -2086,6 +2199,93 @@ mod tests {
 
     /// 30 Sep: F's closest call is the 15:27 near-miss (ask 0.94, too few
     /// shares), not the line with the best model EV; A keeps the EV order.
+    /// A maker (G) is judged at the bid it would rest, without a fee, as
+    /// its EV is; the bid survives into the call's text.
+    #[test]
+    fn a_makers_call_is_scored_at_its_bid() {
+        let l = parse_line(
+            "G 20°C NO · ask 0.27 · bid 0.24 (maker) · p 0.435 · EV +0.1953 — YES offered at 0.76 outside [0.01, 0.08]",
+        )
+        .unwrap();
+        assert_eq!(
+            (l.ask, l.maker_bid, l.ev),
+            (Some(0.27), Some(0.24), Some(0.1953))
+        );
+        let buckets = HashMap::from([("20°C", TemperatureBucket::exact(20, TempUnit::Celsius))]);
+        let at = "2026-10-03T09:27:30Z".parse::<DateTime<Utc>>().unwrap();
+        let c = call(
+            at,
+            &l,
+            &buckets,
+            Some(20),
+            0.05,
+            chrono_tz::Europe::Amsterdam,
+        );
+        assert_eq!(c.won, Some(false), "20 °C won, so its NO lost");
+        assert!(
+            (c.pnl_per_share.unwrap() + 0.24).abs() < 1e-12,
+            "the bid, no fee"
+        );
+        let text = call_text(&c);
+        assert!(
+            text.contains("· ask 0.27 · bid 0.24 (maker) · p 0.435"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("→ **lost** (-0.240/share at the bid)"),
+            "{text}"
+        );
+    }
+
+    /// A rule's EV assumes its trigger fired: K's closest call is the line
+    /// with the fewest blockers, not the cheapest NO with the highest EV.
+    #[test]
+    fn rule_strategies_rank_closest_calls_by_blockers_then_ev() {
+        let at = |h: u32, m: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 3)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap()
+                .and_utc()
+        };
+        let rec = |t: DateTime<Utc>, lines: &[&str]| ReportDecision {
+            at: t,
+            strategy: "evaluation".into(),
+            event_slug: None,
+            summary: String::new(),
+            inputs: serde_json::Value::Null,
+            outputs: serde_json::json!({ "evaluations": lines }),
+            approved: false,
+            reasons: Vec::new(),
+        };
+        let recs = [
+            rec(
+                at(12, 27),
+                &[
+                    "K 20°C NO · ask 0.18 · p 0.940 · EV +0.7426 — KNMI mean 19.8 °C < 20.8 °C (high 20 + 0.5 + 0.3 °C); KNMI maximum below 20.5 °C",
+                ],
+            ),
+            rec(
+                at(16, 27),
+                &[
+                    "K 20°C NO · ask 0.001 · p 0.940 · EV +0.9290 — KNMI reading not newer than the last METAR; KNMI mean 17.5 °C < 20.8 °C (high 20 + 0.5 + 0.3 °C); KNMI maximum below 20.5 °C; NO ask 0.001 outside [0.02, 0.75]",
+                ],
+            ),
+        ];
+        let refs: Vec<&ReportDecision> = recs.iter().collect();
+        let days = strategy_days(
+            &refs,
+            &HashMap::new(),
+            Some(20),
+            0.05,
+            chrono_tz::Europe::Amsterdam,
+        );
+        let k = days.iter().find(|d| d.strategy == "K").unwrap();
+        assert_eq!(k.closest.len(), 1, "one line per bucket and side");
+        assert_eq!(k.closest[0].at, "14:27", "two blockers beat four");
+        assert!(call_text(&k.closest[0]).contains("ask 0.18 · p 0.940 · EV +0.7426"));
+    }
+
     #[test]
     fn price_rules_rank_closest_calls_by_blockers_then_ask() {
         let at = |h: u32, m: u32| {

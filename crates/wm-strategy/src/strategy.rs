@@ -100,6 +100,10 @@ pub struct BucketEvaluation {
     /// The market-implied probability of winning (book midpoint).
     #[serde(default)]
     pub market_p: Option<f64>,
+    /// The bid a maker strategy would rest (G, J): its EV is at this price,
+    /// not at the ask.
+    #[serde(default)]
+    pub maker_bid: Option<Price>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -529,6 +533,7 @@ impl Strategy for BuyYesFinalHigh {
             blockers,
             model_p: model.map(|x| x.0),
             market_p,
+            maker_bid: None,
         });
         if signal
             && let (Some((pw, support)), Some(pr), Some(sh), Some(e), Some(b)) =
@@ -811,6 +816,7 @@ impl BuyNoAboveHigh {
             blockers,
             model_p,
             market_p,
+            maker_bid: None,
         }
     }
 }

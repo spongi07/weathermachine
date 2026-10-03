@@ -337,6 +337,7 @@ impl Strategy for PeakSlotHigh {
             blockers,
             model_p: model.map(|x| x.0),
             market_p,
+            maker_bid: None,
         });
         if signal && let (Some(pr), Some(lim), Some(b)) = (ask, limit, be) {
             out.proposals.push(Proposal {

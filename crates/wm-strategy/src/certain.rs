@@ -219,6 +219,7 @@ impl CertainOutcomes {
             blockers,
             model_p: Some(1.0),
             market_p,
+            maker_bid: None,
         }
     }
 }

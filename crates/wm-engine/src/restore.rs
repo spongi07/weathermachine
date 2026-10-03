@@ -58,7 +58,10 @@ pub struct RestoreSummary {
     pub open_cost: Usd,
     /// Realized P&L of the restored sells made today (UTC).
     pub realized_today: Usd,
+    /// Today's new exposure restored to the main book's daily limit.
     pub new_exposure_today: Usd,
+    /// The lab books' together; each counts toward its own book's limit.
+    pub lab_new_exposure_today: Usd,
     /// Fills the position book refused, e.g. a sell larger than the holding.
     pub rejected: Vec<String>,
 }

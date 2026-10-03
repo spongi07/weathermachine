@@ -501,6 +501,7 @@ impl Strategy for BookConfirmedHigh {
             blockers,
             model_p: model.map(|x| x.0),
             market_p,
+            maker_bid: None,
         });
         if signal && let (Some(pr), Some(sh), Some(b), Some(s)) = (ask, shares, be, shrink) {
             out.proposals.push(Proposal {

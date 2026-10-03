@@ -723,7 +723,7 @@ enabled = true
 mean_parameter = "ta"             # mean 1.5 m air temperature over the ten minutes
 max_parameter = "tx"              # its maximum
 location_id = ""                  # empty: the WIGOS id of the station's WMO number (0-20000-0-06240)
-poll_seconds = 30
+poll_seconds = 30                 # while a reading can be due (from 2 min after each interval's end)
 lookback_minutes = 40
 
 # What the strategy lab reads beyond A–K's inputs (with [strategies.lab]).

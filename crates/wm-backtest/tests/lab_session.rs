@@ -416,7 +416,8 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
     let mut e = Engine::new(config(&[7]), Arc::new(NoEdgeModel));
     let summary = e.restore(&state, utc("2026-07-01T12:30:00Z"));
     assert_eq!(summary.open_positions, 2);
-    assert_eq!(summary.new_exposure_today, Usd::from_whole(30));
+    assert_eq!(summary.new_exposure_today, Usd::from_whole(10), "main");
+    assert_eq!(summary.lab_new_exposure_today, Usd::from_whole(20), "L7");
     let k = e.positions().get(&o.no_token).unwrap();
     assert_eq!(k.shares, Shares::from_whole(23));
     let l7 = e

@@ -388,10 +388,15 @@ everything. The report reads it back, day by day:
 * the day-1 forecast's maximum and its error against the METAR high;
 * per strategy: how often each blocker stopped it, any signals, and the
   three closest calls with how they would have ended if bought at the ask
-  (ranked by model EV for A, B and D; for E and F, which trade on a price,
-  by fewest blockers and then the highest ask);
+  (a maker, G or J, at the bid it would rest). They are ranked by model EV
+  for A, B, D and I; for E and F, which trade on a price, by fewest
+  blockers and then the highest ask; for the other rules (G–K, the lab) by
+  fewest blockers and then the EV, since a rule's probability only holds
+  once its trigger fires;
 * the model against the market on the bucket that won: average
-  probability, log loss, and who was sure (≥ 0.90) first;
+  probability, log loss, and who was sure (≥ 0.90) first. Evaluations
+  where that bucket still lay in the model's open last cell ("≥ high + 3")
+  are left out and counted: the model only bounds such a bucket;
 * proposals with the risk verdicts, paper orders, fills and settled P&L;
 * requests, failures and latency per provider, health changes and logged
   events.

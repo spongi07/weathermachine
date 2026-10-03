@@ -284,6 +284,7 @@ impl Strategy for NextDegree {
             blockers,
             model_p: model,
             market_p: None,
+            maker_bid: None,
         });
         if signal && let (Some(lim), Some(sh), Some(b), Some(a)) = (limit, shares, be, ask) {
             out.proposals.push(Proposal {

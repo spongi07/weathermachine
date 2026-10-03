@@ -43,6 +43,14 @@ pub struct DashboardSnapshot {
     pub positions: Vec<PositionDto>,
     pub orders: Vec<OrderDto>,
     pub decisions: Vec<DecisionDto>,
+    /// Bumped whenever `decisions` changes. The stream sends the decision
+    /// log (most of a snapshot's bytes) only when a client does not hold this
+    /// version yet; other events leave it out and say so.
+    #[serde(default)]
+    pub decisions_seq: u64,
+    /// `decisions` was left out: keep the list of the same `decisions_seq`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decisions_omitted: bool,
     pub alerts: Vec<AlertDto>,
     pub break_even: Vec<BreakEvenDto>,
     /// Every strategy of the engine, for its page.
@@ -429,6 +437,8 @@ pub struct LadderRowDto {
     pub yes_spread: Option<f64>,
     pub yes_ask_depth_usd: Option<f64>,
     pub implied_p: Option<f64>,
+    /// The model's P(YES); none while the bucket lies inside the model's
+    /// open last cell ("≥ high + K − 1"), whose share it does not state.
     pub model_p: Option<f64>,
     /// P(YES) the strategies use: the model pooled with a reliable market
     /// midpoint, never above the model.
@@ -603,6 +613,8 @@ pub struct PositionDto {
     pub shares: f64,
     pub cost_usd: f64,
     pub avg_cost: f64,
+    /// What a share is worth now: 0 or 1 once the observed high decides the
+    /// bucket (paper settles on it), else the best bid; none without either.
     pub mark: Option<f64>,
     pub unrealized_usd: Option<f64>,
     pub realized_usd: f64,

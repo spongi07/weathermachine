@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (562 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (570 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -57,6 +57,17 @@ Provider behaviours required by the brief:
   They show provider health and budgets, collector schedule, the knowledge
   delay of each report, gates with reasons, the decision log, positions and
   orders, and kernel latency (µs).
+  The decision log is most of a snapshot's bytes (about 30 lines per
+  evaluation, 80 evaluations), so a stream client gets it on connecting and
+  when it changes; other events leave it out (`decisions_omitted`) and the
+  page keeps the list it has. `/api/v1/snapshot` always carries all of it.
+  The provider table lists every gate: the METAR sources through their
+  collector, and Gamma, the CLOB, the market stream, the Data API, IEM,
+  Open-Meteo and KNMI from their gates' counters. A position's mark is 0
+  or 1 once the observed high decides its bucket (paper settles there),
+  else the best bid. The market ladder shows no model probability for a
+  bucket inside the model's open last cell ("≥ high + K − 1"), which the
+  model only bounds.
 * **Strategy pages:** one per strategy (`/#/strategy/<id>`), fed by the
   snapshot's strategy catalog (settings straight from the configuration)
   and every strategy's latest evaluation of each bucket. Each shows
@@ -83,11 +94,16 @@ Provider behaviours required by the brief:
   a minute) reads the database back: METAR high, report delays and the
   source that delivered each report first, the day-1 forecast's error, the
   blockers of every evaluation per strategy, the closest calls and how they
-  would have ended (by model EV for A, B and D; for the price rules E and F
-  fewest blockers, then the highest ask), the model against the recorded
-  book on the winning bucket, proposals, orders, fills, P&L settled at the
-  METAR high, provider requests, health changes and logged events. The
-  dashboard only holds the last 100 decisions of the current run.
+  would have ended (by model EV for A, B, D and I; for the price rules E and
+  F fewest blockers, then the highest ask; for the other rules, G–K and the
+  lab, fewest blockers, then the EV, which assumes the rule's trigger; a
+  maker, G or J, judged at the bid it would rest, the others at the ask),
+  the model against the recorded book on the winning bucket (leaving out
+  evaluations where that bucket still lay in the model's open last cell,
+  which only bounds it, as `research market` does), proposals, orders,
+  fills, P&L settled at the METAR high, provider requests, health changes
+  and logged events. The dashboard only holds the last 100 decisions of the
+  current run.
 
 ## 40. Recovery architecture
 

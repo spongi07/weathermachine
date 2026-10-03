@@ -285,6 +285,53 @@ async fn sse_stream_delivers_snapshots() {
         .unwrap()
         .unwrap();
     assert!(String::from_utf8_lossy(&next).contains("\"instance\":\"second\""));
+
+    // The decision log goes out when it changes, then stays with the client.
+    let decision = |id: u64| wm_dashboard_api::DecisionDto {
+        id,
+        summary: format!("decision {id}"),
+        details: vec!["F 20°C YES · ask 0.95 — SIGNAL".into()],
+        ..Default::default()
+    };
+    let mut next_event = async || {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        String::from_utf8_lossy(&chunk).into_owned()
+    };
+    f.publisher.publish(DashboardSnapshot {
+        decisions: vec![decision(1)],
+        ..Default::default()
+    });
+    let text = next_event().await;
+    assert!(text.contains("\"summary\":\"decision 1\""), "{text}");
+    assert!(!text.contains("decisions_omitted"), "{text}");
+    f.publisher.publish(DashboardSnapshot {
+        instance: "third".into(),
+        decisions: vec![decision(1)],
+        ..Default::default()
+    });
+    let text = next_event().await;
+    assert!(
+        text.contains("\"instance\":\"third\"")
+            && text.contains("\"decisions\":[]")
+            && text.contains("\"decisions_omitted\":true"),
+        "the client keeps the log it holds: {text}"
+    );
+    f.publisher.publish(DashboardSnapshot {
+        decisions: vec![decision(2), decision(1)],
+        ..Default::default()
+    });
+    let text = next_event().await;
+    assert!(
+        text.contains("\"summary\":\"decision 2\"") && !text.contains("decisions_omitted"),
+        "a new decision sends the log again: {text}"
+    );
+    // REST always carries the whole log.
+    let (_, _, rest) = call(&f.shared, get("/api/v1/snapshot")).await;
+    assert!(rest.contains("\"summary\":\"decision 2\""), "{rest}");
 }
 
 fn strategies() -> Vec<wm_dashboard_api::StrategyDto> {

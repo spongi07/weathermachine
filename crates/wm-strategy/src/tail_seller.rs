@@ -268,6 +268,7 @@ impl TailSeller {
             blockers,
             model_p: p_win,
             market_p: None,
+            maker_bid: bid,
         };
         let proposal = match (signal, bid, shares, expiry, yes_offered) {
             (true, Some(b), Some(sh), Some(exp), Some(y)) => Some(Proposal {

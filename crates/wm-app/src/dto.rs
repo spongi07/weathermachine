@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use std::collections::HashMap;
 use wm_core::health::ProviderHealthSnapshot;
 use wm_core::ids::{StationId, TokenId};
-use wm_core::market::{OrderBook, OutcomeSide};
+use wm_core::market::{OrderBook, OutcomeSide, TemperatureBucket};
 use wm_core::resolution::{ObservationFilter, ResolutionSourceKind};
 use wm_core::units::Price;
 use wm_dashboard_api::*;
@@ -15,6 +15,7 @@ use wm_strategy::Pooling;
 use wm_strategy::ev::{
     break_even_probability, break_even_table, ev_per_share, research_price_grid,
 };
+use wm_strategy::probability::IncrementDistribution;
 use wm_weather::CollectorStatus;
 
 /// Extra inputs that live outside the engine.
@@ -75,6 +76,28 @@ fn ms(t: DateTime<Utc>) -> i64 {
 
 fn local(t: DateTime<Utc>, tz: Tz) -> String {
     t.with_timezone(&tz).format("%H:%M").to_string()
+}
+
+/// The model's P(bucket) where it states one: none inside its open last
+/// cell, which it only bounds (from 0 up to the whole cell).
+fn stated_p(d: &IncrementDistribution, high: i32, bucket: &TemperatureBucket) -> Option<f64> {
+    let lower = d.p_in_bucket_lower(high, bucket);
+    ((d.p_in_bucket_upper(high, bucket) - lower).abs() <= 1e-9).then_some(lower)
+}
+
+/// A share's value once the observed `high` decides its bucket: 1 for the
+/// winning side, 0 for the other; none while the bucket can still win.
+fn decided_value(bucket: &TemperatureBucket, side: OutcomeSide, high: i32) -> Option<f64> {
+    let yes_wins = match (bucket.lower, bucket.upper) {
+        (_, Some(upper)) if upper < high => false,
+        (Some(lower), None) if lower <= high => true,
+        _ => return None,
+    };
+    Some(if yes_wins == (side == OutcomeSide::Yes) {
+        1.0
+    } else {
+        0.0
+    })
 }
 
 fn provider_dto(s: &ProviderHealthSnapshot) -> ProviderDto {
@@ -255,8 +278,11 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                 let nb = books.get(&o.no_token).copied();
                 let (yes_bid, yes_ask) = book_top(yb);
                 let (no_bid, no_ask) = book_top(nb);
+                // Inside the open last cell the model bounds the bucket (0 up
+                // to the whole cell) without stating it: no model value then,
+                // rather than its lower bound 0 against the market's price.
                 let model_p = match (&dist, high) {
-                    (Some(d), Some(h)) => Some(d.p_in_bucket_lower(h, &o.bucket)),
+                    (Some(d), Some(h)) => stated_p(d, h, &o.bucket),
                     _ => None,
                 };
                 let model_loss = match (&dist, high) {
@@ -317,7 +343,8 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                             -p.shares.as_f64()
                         }
                     })
-                    .sum();
+                    .sum::<f64>()
+                    + 0.0; // an empty sum is −0.0, which JSON keeps
                 LadderRowDto {
                     label: o.label.clone(),
                     lower: o.bucket.lower,
@@ -499,6 +526,22 @@ pub fn build(
         .flat_map(|l| l.books.iter())
         .map(|b| (&b.token, b))
         .collect();
+    // The high each market's day reached in every view: a bucket it decides
+    // is worth 0 or 1 a share, as paper settles it, whether or not anyone
+    // still bids for it.
+    let decided: HashMap<&str, i32> = snap
+        .locations
+        .iter()
+        .filter_map(|l| {
+            let m = l.market.as_ref()?;
+            let highs: Option<Vec<i32>> = l
+                .views
+                .iter()
+                .map(|v| v.features.as_ref().map(|f| f.high_whole))
+                .collect();
+            Some((m.event_slug.as_str(), highs?.into_iter().min()?))
+        })
+        .collect();
     // The main book's positions, then each lab strategy's own.
     let positions = snap
         .positions
@@ -511,10 +554,17 @@ pub fn build(
         )
         .filter(|(p, _)| p.shares.micros() > 0 || !p.realized_pnl.is_zero())
         .map(|(p, strategy)| {
-            let mark = books
-                .get(&p.instrument.token)
-                .and_then(|b| b.best_bid())
-                .map(|l| l.price.as_f64());
+            let settled_value = decided
+                .get(p.instrument.event_slug.as_str())
+                .and_then(|&high| {
+                    decided_value(&p.instrument.bucket, p.instrument.outcome_side, high)
+                });
+            let mark = settled_value.or_else(|| {
+                books
+                    .get(&p.instrument.token)
+                    .and_then(|b| b.best_bid())
+                    .map(|l| l.price.as_f64())
+            });
             let opened_by = if strategy.is_empty() {
                 snap.position_strategy
                     .get(&p.instrument.token)
@@ -771,6 +821,9 @@ pub fn build(
         positions,
         orders,
         decisions,
+        // Set by the publisher, which knows what each stream client holds.
+        decisions_seq: 0,
+        decisions_omitted: false,
         alerts: inp.alerts.to_vec(),
         break_even: break_even_table(&research_price_grid(), &fee, Price::ZERO)
             .into_iter()
@@ -859,6 +912,63 @@ mod tests {
         );
         assert!(super::evaluation_lines(&serde_json::json!({ "risk": [] })).is_empty());
         assert!(super::evaluation_lines(&serde_json::json!(null)).is_empty());
+    }
+
+    /// Inside the model's open last cell ("≥ +3" here) a bucket gets no
+    /// model value; below it, and the open top bucket, get theirs.
+    #[test]
+    fn the_ladder_shows_only_probabilities_the_model_states() {
+        use wm_core::market::{TempUnit, TemperatureBucket};
+        let d = wm_strategy::probability::IncrementDistribution {
+            probs: vec![0.1, 0.1, 0.05, 0.75],
+            support: 100,
+            source: String::new(),
+        };
+        let exact = |v| TemperatureBucket::exact(v, TempUnit::Celsius);
+        let p = |b: &TemperatureBucket| super::stated_p(&d, 16, b);
+        assert_eq!(p(&exact(17)), Some(0.1), "+1 is stated");
+        assert_eq!(p(&exact(19)), None, "+3 shares the open cell with +4, +5 …");
+        assert_eq!(p(&exact(20)), None);
+        let top = TemperatureBucket {
+            lower: Some(19),
+            upper: None,
+            unit: TempUnit::Celsius,
+        };
+        assert_eq!(
+            p(&top),
+            Some(0.75),
+            "the open top bucket holds the whole cell"
+        );
+        assert_eq!(p(&exact(15)), Some(0.0), "below the high: certainly lost");
+    }
+
+    /// Once the observed high passes a bucket its YES is worth 0 and its NO
+    /// 1, as paper settles them; a bucket that can still win has no such value.
+    #[test]
+    fn a_decided_bucket_is_marked_at_its_settlement() {
+        use wm_core::market::{OutcomeSide, TempUnit, TemperatureBucket};
+        let exact = |v| TemperatureBucket::exact(v, TempUnit::Celsius);
+        assert_eq!(
+            super::decided_value(&exact(19), OutcomeSide::Yes, 20),
+            Some(0.0)
+        );
+        assert_eq!(
+            super::decided_value(&exact(19), OutcomeSide::No, 20),
+            Some(1.0)
+        );
+        assert_eq!(
+            super::decided_value(&exact(20), OutcomeSide::Yes, 20),
+            None,
+            "still live"
+        );
+        assert_eq!(super::decided_value(&exact(21), OutcomeSide::No, 20), None);
+        let top = TemperatureBucket {
+            lower: Some(20),
+            upper: None,
+            unit: TempUnit::Celsius,
+        };
+        assert_eq!(super::decided_value(&top, OutcomeSide::Yes, 20), Some(1.0));
+        assert_eq!(super::decided_value(&top, OutcomeSide::No, 21), Some(0.0));
     }
 
     #[test]
