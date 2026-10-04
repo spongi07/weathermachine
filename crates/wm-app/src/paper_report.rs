@@ -1484,6 +1484,17 @@ pub(crate) fn usd(v: f64) -> String {
     }
 }
 
+/// A settlement's P&L: the main book's, then the lab books' together when
+/// they held the market ("PnL $2.56; the lab books −$14.00").
+pub(crate) fn settled_pnl(s: &wm_backtest::Settlement) -> String {
+    let main = format!("PnL {}", usd(s.pnl.as_f64()));
+    if s.lab_pnl.is_zero() {
+        main
+    } else {
+        format!("{main}; the lab books {}", usd(s.lab_pnl.as_f64()))
+    }
+}
+
 /// A price as the book quotes it: two decimals, three on a sub-cent tick
 /// (0.001 is not "0.00", nor 0.997 "1.00").
 fn price_text(p: f64) -> String {
@@ -1998,6 +2009,26 @@ mod tests {
         assert_eq!(price_text(0.012), "0.012");
         assert_eq!(price_text(0.76), "0.76");
         assert_eq!(price_text(0.9), "0.90");
+    }
+
+    /// A settlement names the lab books' result beside the main book's,
+    /// when they held the market.
+    #[test]
+    fn a_settlement_names_the_lab_books_result() {
+        use wm_core::units::Usd;
+        let settled = |pnl: &str, lab: &str| wm_backtest::Settlement {
+            event_slug: wm_core::ids::EventSlug::new("m").unwrap(),
+            local_date: NaiveDate::from_ymd_opt(2026, 10, 3).unwrap(),
+            final_value: 20,
+            pnl: Usd::parse(pnl).unwrap(),
+            lab_pnl: Usd::parse(lab).unwrap(),
+            at: Utc::now(),
+        };
+        assert_eq!(
+            settled_pnl(&settled("2.56", "-14")),
+            "PnL $2.56; the lab books −$14.00"
+        );
+        assert_eq!(settled_pnl(&settled("2.56", "0")), "PnL $2.56");
     }
 
     /// Inside the model's open last cell ("≥ high + 3") a bucket's

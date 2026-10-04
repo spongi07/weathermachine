@@ -22,6 +22,9 @@ configuration. The Portainer stack (`docker-compose.yml`) adds PostgreSQL 18
 The image is built and pushed by `.github/workflows/ci.yml` on every push after
 formatting, lint and tests pass. Tags: `latest` (default branch), the branch
 name, `sha-<short>` for every commit, and semantic versions for `v*` tags.
+The running build names its commit in the dashboard's status bar
+(`v0.1.0+1a2b3c4`) and in the startup log line ("starting paper runtime …
+build=0.1.0+1a2b3c4"): it matches the tag `sha-1a2b3c4`.
 
 ## 2. Try it first: the demo stack (2 minutes, no secrets)
 
@@ -447,7 +450,7 @@ docker run --rm -e WM_CONTACT=you@example.org ghcr.io/spongi07/weathermachine:la
 | Roll back | Set `WM_IMAGE_TAG` to the previous `sha-…` tag and redeploy. Migrations are additive. |
 | Restart safety | Crash-only design: the process state is rebuilt from PostgreSQL (observations, journal) on start. A second instance cannot poll the same station (PostgreSQL advisory lease). |
 | Backups | Volume `backups`. Restore (stop `weather-machine` first): `docker run --rm -it --network weather-machine_default -e PGPASSWORD=… -v weather-machine_backups:/b postgres:18-alpine pg_restore -h postgres -U wm -d weather_machine --clean --if-exists /b/<file>.dump` |
-| Logs | JSON lines (Portainer → container → Logs). Change verbosity with `RUST_LOG`. |
+| Logs | JSON lines (Portainer → container → Logs): besides the providers and the restore, every paper fill, settlement and engine alert. Change verbosity with `RUST_LOG`. |
 | Metrics | Scrape `/metrics` (Basic auth applies if configured). Key series: `nws_requests_total`, `nws_429_total`, `nws_failures_total`, `nws_cache_hits`, `nws_new_observations_total`, `wm_engine_events_total`, `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`, `wm_persist_backlog_episodes_total`, `wm_journal_shed_total`. |
 | Disk | The market stream delivers ~1.5 million order-book updates a day. They are journaled with 5 levels per side and deleted from the journal after 7 days (`WM_JOURNAL_RETENTION_DAYS`), so the database levels off at a few GB plus the recorded market history (books stored on change, ≤ 1 per 10 s per token), which grows by roughly 100–300 MB a day. Check with *Volumes* in Portainer or `docker system df -v`. |
 

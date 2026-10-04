@@ -197,7 +197,11 @@ pub struct Settlement {
     pub event_slug: EventSlug,
     pub local_date: NaiveDate,
     pub final_value: i32,
+    /// The main book's P&L.
     pub pnl: Usd,
+    /// The lab books' P&L together.
+    #[serde(default)]
+    pub lab_pnl: Usd,
     pub at: DateTime<Utc>,
 }
 
@@ -472,12 +476,14 @@ impl SimulationSession {
             let Some(date) = self.engine.markets().get(&slug).map(|m| m.local_date) else {
                 continue;
             };
+            let lab_before = self.engine.lab_realized_pnl_total();
             let pnl = self.engine.settle(&slug, final_value);
             out.settlements.push(Settlement {
                 event_slug: slug,
                 local_date: date,
                 final_value,
                 pnl,
+                lab_pnl: self.engine.lab_realized_pnl_total() - lab_before,
                 at: now,
             });
         }

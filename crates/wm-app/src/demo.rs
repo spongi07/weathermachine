@@ -524,10 +524,10 @@ pub async fn run(
                 at_ms: s.at.timestamp_millis(),
                 level: "info".into(),
                 message: format!(
-                    "settled {} at {} °C: PnL {}",
+                    "settled {} at {} °C: {}",
                     s.event_slug,
                     s.final_value,
-                    crate::paper_report::usd(s.pnl.as_f64())
+                    crate::paper_report::settled_pnl(s)
                 ),
             });
         }

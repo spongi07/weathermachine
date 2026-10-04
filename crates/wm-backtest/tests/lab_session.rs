@@ -370,6 +370,10 @@ fn lab_strategies_and_k_buy_the_same_token_on_their_own_books() {
     );
     let lab_pnl = s.engine().lab_realized_pnl_total();
     assert!(lab_pnl > Usd::from_whole(26), "L7's 47 shares: {lab_pnl}");
+    assert_eq!(
+        out.settlements[0].lab_pnl, lab_pnl,
+        "the settlement names it"
+    );
 }
 
 #[test]

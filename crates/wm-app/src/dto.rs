@@ -788,7 +788,7 @@ pub fn build(
         engine_time_ms: ms(snap.now.max(DateTime::<Utc>::UNIX_EPOCH)),
         mode: snap.mode.as_str().to_owned(),
         demo: inp.demo,
-        version: wm_core::VERSION.to_owned(),
+        version: crate::build_label().to_owned(),
         instance: inp.instance.to_owned(),
         run_id: snap.run_id.to_string(),
         model_id: snap.model_id.clone(),

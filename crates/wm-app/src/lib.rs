@@ -20,3 +20,22 @@ pub mod strategies;
 pub mod strategy_log;
 pub mod telemetry;
 pub mod training;
+
+/// The version, with the commit the image was built from when the build
+/// passed one (`WM_GIT_SHA`, which CI sets): "0.1.0+bdf5668".
+pub fn build_label() -> &'static str {
+    static LABEL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        match option_env!("WM_GIT_SHA")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(sha) => format!(
+                "{}+{}",
+                wm_core::VERSION,
+                sha.chars().take(7).collect::<String>()
+            ),
+            None => wm_core::VERSION.to_owned(),
+        }
+    });
+    &LABEL
+}

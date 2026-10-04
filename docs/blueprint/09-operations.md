@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (572 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (573 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -52,7 +52,10 @@ Provider behaviours required by the brief:
   actual provider load is a SQL query away, e.g. requests per hour per
   provider.
 * **Logs:** `tracing` with JSON output in containers; every request, health
-  transition, decision and failure is structured.
+  transition, decision and failure is structured. Every paper fill (the
+  lab's too), every settlement (the main book's P&L, then the lab books'
+  together) and every engine alert is logged as well as shown, and the
+  startup line names the build (`build=0.1.0+<commit>`).
 * **Dashboard:** live SSE snapshot (500 ms) and the zero-JS `/lite` page.
   They show provider health and budgets, collector schedule, the knowledge
   delay of each report, gates with reasons, the decision log, positions and

@@ -718,11 +718,11 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 "info",
                 "startup",
                 "weather machine started",
-                &serde_json::json!({ "run_id": run_id.to_string(), "version": wm_core::VERSION }),
+                &serde_json::json!({ "run_id": run_id.to_string(), "version": crate::build_label() }),
             )
             .await;
     }
-    tracing::info!(run = %run_id, model = %model.id(), locations = cfg.locations.len(), "starting paper runtime");
+    tracing::info!(run = %run_id, build = crate::build_label(), model = %model.id(), locations = cfg.locations.len(), "starting paper runtime");
 
     let providers = Providers::build(&cfg, Arc::clone(&clock), &user_agent)?;
     let side: SharedSide = Arc::new(Mutex::new(SideState::default()));
@@ -1628,9 +1628,9 @@ async fn knmi_loop(
                         interval_end = %newest.interval_end,
                         mean = %c(newest.mean),
                         max = %c(newest.max),
-                        radiation_wm2 = ?newest.radiation,
+                        radiation_wm2 = newest.radiation,
                         earlier = fresh.len() - 1,
-                        delay_minutes = newest.delay_minutes(),
+                        delay_minutes = (newest.delay_minutes() * 10.0).round() / 10.0,
                         "{}",
                         if first {
                             "KNMI ten-minute reading (the first since the start: published before it, so its delay is not KNMI's)"
@@ -1948,6 +1948,40 @@ impl EngineLoopState {
                 });
             }
         }
+        // The container log carries what the alerts show, and the lab's fills.
+        for a in &out.alerts {
+            if a.contains("KILL") {
+                tracing::error!("{a}");
+            } else {
+                tracing::warn!("{a}");
+            }
+        }
+        let fills: Vec<(bool, String)> = out
+            .trades
+            .iter()
+            .map(|t| {
+                let text = format!(
+                    "paper fill {} {} {} @ {} × {}",
+                    t.strategy, t.side, t.bucket_label, t.price, t.shares
+                );
+                tracing::info!(slug = %t.event_slug, "{text}");
+                (wm_strategy::lab::is_lab_id(t.strategy.as_str()), text)
+            })
+            .collect();
+        let settled: Vec<String> = out
+            .settlements
+            .iter()
+            .map(|s| {
+                let text = format!(
+                    "settled {} at {} °C (observed): {}",
+                    s.event_slug,
+                    s.final_value,
+                    crate::paper_report::settled_pnl(s)
+                );
+                tracing::info!("{text}");
+                text
+            })
+            .collect();
         with_side(side, |st| {
             for a in &out.alerts {
                 st.alert(
@@ -1960,29 +1994,11 @@ impl EngineLoopState {
                 );
             }
             // The lab's fills show on its own pages, not among the alerts.
-            for t in out
-                .trades
-                .iter()
-                .filter(|t| !wm_strategy::lab::is_lab_id(t.strategy.as_str()))
-            {
-                st.alert(
-                    "info",
-                    format!(
-                        "paper fill {} {} {} @ {} × {}",
-                        t.strategy, t.side, t.bucket_label, t.price, t.shares
-                    ),
-                );
+            for (_, text) in fills.into_iter().filter(|(lab, _)| !lab) {
+                st.alert("info", text);
             }
-            for s in &out.settlements {
-                st.alert(
-                    "info",
-                    format!(
-                        "settled {} at {} °C (observed): PnL {}",
-                        s.event_slug,
-                        s.final_value,
-                        crate::paper_report::usd(s.pnl.as_f64())
-                    ),
-                );
+            for text in settled {
+                st.alert("info", text);
             }
         });
         let Some(tx) = persist else { return };

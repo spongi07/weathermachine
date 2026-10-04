@@ -28,6 +28,9 @@ RUN rustup toolchain install && rustup target list --installed
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo install wasm-bindgen-cli --version "${WASM_BINDGEN_VERSION}" --locked
 COPY . .
+# The commit the image is built from (CI passes it): the dashboard and the
+# startup log show the version as "0.1.0+<commit>".
+ARG WM_GIT_SHA=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     --mount=type=cache,target=/src/ui/target,sharing=locked \

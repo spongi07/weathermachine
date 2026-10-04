@@ -92,7 +92,7 @@ impl Publisher {
         let initial = DashboardSnapshot {
             api_version: API_VERSION,
             mode: "starting".into(),
-            version: wm_core::VERSION.into(),
+            version: crate::build_label().into(),
             ..Default::default()
         };
         let json = serde_json::to_vec(&initial)
