@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (571 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (572 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -65,9 +65,10 @@ Provider behaviours required by the brief:
   collector, and Gamma, the CLOB, the market stream, the Data API, IEM,
   Open-Meteo and KNMI from their gates' counters. A position's mark is 0
   or 1 once the observed high decides its bucket (paper settles there),
-  else the best bid. The market ladder shows no model probability for a
-  bucket inside the model's open last cell ("≥ high + K − 1"), which the
-  model only bounds.
+  else the best bid, else 0 while the share is offered and nobody bids (a
+  lost bucket late in the day, offered at 0.001). The market ladder shows
+  no model probability for a bucket inside the model's open last cell
+  ("≥ high + K − 1"), which the model only bounds.
 * **Strategy pages:** one per strategy (`/#/strategy/<id>`), fed by the
   snapshot's strategy catalog (settings straight from the configuration)
   and every strategy's latest evaluation of each bucket. Each shows

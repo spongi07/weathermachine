@@ -614,7 +614,8 @@ pub struct PositionDto {
     pub cost_usd: f64,
     pub avg_cost: f64,
     /// What a share is worth now: 0 or 1 once the observed high decides the
-    /// bucket (paper settles on it), else the best bid; none without either.
+    /// bucket (paper settles on it), else the best bid, else 0 while it is
+    /// offered and nobody bids; none with an empty book.
     pub mark: Option<f64>,
     pub unrealized_usd: Option<f64>,
     pub realized_usd: f64,

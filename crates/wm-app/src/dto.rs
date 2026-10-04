@@ -100,6 +100,17 @@ fn decided_value(bucket: &TemperatureBucket, side: OutcomeSide, high: i32) -> Op
     })
 }
 
+/// What a share sells for now: the best bid, or nothing while it is offered
+/// and nobody bids (a lost bucket late in the day trades that way, offered
+/// at 0.001); none for an empty book.
+fn book_mark(book: &OrderBook) -> Option<f64> {
+    match (book.best_bid(), book.best_ask()) {
+        (Some(bid), _) => Some(bid.price.as_f64()),
+        (None, Some(_)) => Some(0.0),
+        (None, None) => None,
+    }
+}
+
 fn provider_dto(s: &ProviderHealthSnapshot) -> ProviderDto {
     ProviderDto {
         provider: s.provider.to_string(),
@@ -559,12 +570,8 @@ pub fn build(
                 .and_then(|&high| {
                     decided_value(&p.instrument.bucket, p.instrument.outcome_side, high)
                 });
-            let mark = settled_value.or_else(|| {
-                books
-                    .get(&p.instrument.token)
-                    .and_then(|b| b.best_bid())
-                    .map(|l| l.price.as_f64())
-            });
+            let mark =
+                settled_value.or_else(|| books.get(&p.instrument.token).and_then(|b| book_mark(b)));
             let opened_by = if strategy.is_empty() {
                 snap.position_strategy
                     .get(&p.instrument.token)
@@ -969,6 +976,41 @@ mod tests {
         };
         assert_eq!(super::decided_value(&top, OutcomeSide::Yes, 20), Some(1.0));
         assert_eq!(super::decided_value(&top, OutcomeSide::No, 21), Some(0.0));
+    }
+
+    /// A share is marked at what it sells for: the best bid, nothing while
+    /// it is only offered, and no mark without a book to say.
+    #[test]
+    fn a_share_nobody_bids_for_is_marked_at_nothing() {
+        use wm_core::ids::TokenId;
+        use wm_core::market::{BookLevel, OrderBook};
+        use wm_core::units::{Price, Shares};
+        let level = |p: &str| BookLevel {
+            price: Price::parse(p).unwrap(),
+            size: Shares::parse("100").unwrap(),
+        };
+        let book = |bid: Option<&str>, ask: Option<&str>| OrderBook {
+            token: TokenId::new("t").unwrap(),
+            bids: bid.map(level).into_iter().collect(),
+            asks: ask.map(level).into_iter().collect(),
+            tick_size: Price::parse("0.001").unwrap(),
+            min_order_size: Shares::parse("5").unwrap(),
+            exchange_ts: None,
+            received_at: chrono::Utc::now(),
+            hash: None,
+            confirmed_at: None,
+        };
+        assert_eq!(
+            super::book_mark(&book(Some("0.42"), Some("0.45"))),
+            Some(0.42)
+        );
+        assert_eq!(super::book_mark(&book(Some("0.97"), None)), Some(0.97));
+        assert_eq!(
+            super::book_mark(&book(None, Some("0.001"))),
+            Some(0.0),
+            "offered at 0.001, bid for by nobody: it sells for nothing"
+        );
+        assert_eq!(super::book_mark(&book(None, None)), None);
     }
 
     #[test]
