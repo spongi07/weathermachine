@@ -62,7 +62,12 @@ pub fn passive_bid(book: &OrderBook) -> Option<Price> {
     }
     let tick = tick_of(book);
     let improved = bid.saturating_add(tick).floor_to_tick(tick);
-    Some(if improved < ask { improved } else { bid })
+    if improved < ask {
+        return Some(improved);
+    }
+    // Join the bid, or just under it when it lies off the book's tick.
+    let join = bid.floor_to_tick(tick);
+    (join.micros() > 0).then_some(join)
 }
 
 /// EV per share of a resting buy filled at `price`: no taker fee and no
@@ -132,5 +137,15 @@ mod tests {
         assert_eq!(passive_bid(&one_tick), Some(p("0.40")), "join the bid");
         let one_sided = synthetic_book(&t, Some("0.40"), None, 100, now);
         assert_eq!(passive_bid(&one_sided), None);
+        // A bid off the book's tick (0.975 on 0.01) is never quoted as is:
+        // the risk check refuses a price off the tick.
+        let off_tick = synthetic_book(&t, Some("0.975"), Some("0.98"), 100, now);
+        assert_eq!(off_tick.tick_size, p("0.01"));
+        assert_eq!(passive_bid(&off_tick), Some(p("0.97")));
+        let fine = OrderBook {
+            tick_size: p("0.001"),
+            ..off_tick
+        };
+        assert_eq!(passive_bid(&fine), Some(p("0.976")), "one tick inside");
     }
 }

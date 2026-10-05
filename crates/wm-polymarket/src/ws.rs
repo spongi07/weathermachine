@@ -202,6 +202,11 @@ pub struct LocalBook {
     bids: BTreeMap<u32, i64>,
     asks: BTreeMap<u32, i64>,
     pub tick: Price,
+    /// Whether the feed named the tick (`tick_size_change`). Until it does,
+    /// `tick` is the default of 0.01, refined by the levels themselves: a
+    /// token already past 0.96 (or under 0.04) when it was subscribed trades
+    /// on 0.001, and the feed never says so.
+    pub tick_from_feed: bool,
     pub min_size: Shares,
     pub exchange_ts: Option<DateTime<Utc>>,
     pub received_at: DateTime<Utc>,
@@ -216,12 +221,32 @@ impl LocalBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             tick: Price::saturating_from_micros(10_000),
+            tick_from_feed: false,
             min_size: Shares::from_whole(5),
             exchange_ts: None,
             received_at: now,
             hash: None,
             valid: false,
         }
+    }
+
+    /// The tick the feed named.
+    pub fn set_tick(&mut self, tick: Price) {
+        self.tick = tick;
+        self.tick_from_feed = true;
+    }
+
+    /// Without a tick from the feed, a level off the assumed tick shows a
+    /// finer one: the coarsest finer tick it lies on (0.001 first).
+    fn fit_tick(&mut self, price: Price) {
+        if self.tick_from_feed || price.is_on_tick(self.tick) {
+            return;
+        }
+        self.tick = [1_000, 100, 10, 1]
+            .into_iter()
+            .map(Price::saturating_from_micros)
+            .find(|t| t < &self.tick && price.is_on_tick(*t))
+            .unwrap_or(self.tick);
     }
 
     pub fn apply_snapshot(
@@ -242,6 +267,9 @@ impl LocalBook {
             .filter(|(_, s)| s.micros() > 0)
             .map(|(p, s)| (p.micros(), s.micros()))
             .collect();
+        for (p, _) in bids.iter().chain(asks).filter(|(_, s)| s.micros() > 0) {
+            self.fit_tick(*p);
+        }
         self.exchange_ts = ts;
         self.hash = hash;
         self.received_at = now;
@@ -265,6 +293,7 @@ impl LocalBook {
             book.remove(&price.micros());
         } else {
             book.insert(price.micros(), size.micros());
+            self.fit_tick(price);
         }
         self.exchange_ts = ts.or(self.exchange_ts);
         self.received_at = now;
@@ -398,7 +427,7 @@ impl MarketStream {
                 }
                 WsEvent::TickSize { asset, tick } => {
                     if let Some(b) = self.books.get_mut(&asset) {
-                        b.tick = tick;
+                        b.set_tick(tick);
                         touched.push(asset);
                     }
                 }
@@ -679,5 +708,40 @@ mod tests {
         assert_eq!(s.best_bid().unwrap().price, Price::parse("0.94").unwrap());
         assert_eq!(s.best_ask().unwrap().price, Price::parse("0.96").unwrap());
         assert_eq!(s.bids.len(), 2);
+    }
+
+    /// A token already on the 0.001 tick when it was subscribed gets no
+    /// `tick_size_change`: its levels show the tick. Once the feed names one,
+    /// the feed's tick holds.
+    #[test]
+    fn the_levels_show_a_tick_the_feed_never_named() {
+        let now = Utc::now();
+        let p = |s: &str| Price::parse(s).unwrap();
+        let mut b = LocalBook::new(TokenId::new("1").unwrap(), now);
+        b.apply_snapshot(
+            &[(p("0.97"), Shares::from_whole(100))],
+            &[(p("0.98"), Shares::from_whole(50))],
+            None,
+            None,
+            now,
+        );
+        assert_eq!(b.snapshot(5).tick_size, p("0.01"), "nothing finer seen");
+        b.apply_change(Side::Buy, p("0.975"), Shares::from_whole(30), None, now);
+        assert_eq!(b.snapshot(5).tick_size, p("0.001"));
+        b.apply_change(Side::Buy, p("0.975"), Shares::ZERO, None, now);
+        assert_eq!(b.snapshot(5).tick_size, p("0.001"), "a finer tick stays");
+
+        let mut b = LocalBook::new(TokenId::new("2").unwrap(), now);
+        b.apply_snapshot(
+            &[(p("0.971"), Shares::from_whole(10))],
+            &[(p("0.999"), Shares::from_whole(10))],
+            None,
+            None,
+            now,
+        );
+        assert_eq!(b.snapshot(5).tick_size, p("0.001"), "from the snapshot");
+        b.set_tick(p("0.01"));
+        b.apply_change(Side::Buy, p("0.972"), Shares::from_whole(5), None, now);
+        assert_eq!(b.snapshot(5).tick_size, p("0.01"), "the feed's tick holds");
     }
 }

@@ -189,7 +189,7 @@ strategies never touch it.
 | Order books | `ClobClient::book` (`GET clob.polymarket.com/book?token_id=`), REST fallback while the stream is down | ✅ |
 | Prices / history | `ClobClient::prices_history` (`/prices-history`, research only) | ✅ |
 | Trade history | `DataApiClient::trades` (`GET data-api.polymarket.com/trades`, taker side, all buckets of an event in one query; `limit`/`offset` ≤ 10,000, so a window that reaches the cap is halved and read again). Research only (`research market`) | ✅ |
-| Trades, live books | `MarketStream` (`wss://ws-subscriptions-clob.polymarket.com/ws/market`: `book`, `price_change`, `tick_size_change`, `last_trade_price`), local book with invalidation on disconnect | ✅ |
+| Trades, live books | `MarketStream` (`wss://ws-subscriptions-clob.polymarket.com/ws/market`: `book`, `price_change`, `tick_size_change`, `last_trade_price`), local book with invalidation on disconnect. The feed names a tick only when it changes, so a token already on 0.001 (past 0.96 or under 0.04) when it was subscribed takes its tick from its own levels until it does | ✅ |
 | Split / merge / redeem / neg-risk convert | `wm_polymarket::ctf` economics (pure) | ✅ model; on-chain calls Phase 14 |
 | Orders, cancellations, fills, positions, balances | `ExecutionVenue` port; `SimulatedExchange` (paper); `DisabledLiveVenue` (live) | paper ✅, live ⛔ Phase 14 |
 
