@@ -107,6 +107,8 @@ pub struct LabBookSnapshot {
     pub strategy: StrategyId,
     pub positions: Vec<Position>,
     pub exposure: ExposureSummary,
+    /// Today's (UTC) new exposure and realized P&L: zero on a day the book
+    /// has not acted on yet.
     pub daily_new_exposure: Usd,
     pub daily_realized_pnl: Usd,
     pub realized_pnl_total: Usd,
@@ -135,6 +137,8 @@ pub struct EngineSnapshot {
     pub orders: Vec<OrderRecord>,
     pub exposure: ExposureSummary,
     pub risk: RiskConfig,
+    /// The main book's new exposure and realized P&L of today (UTC), as the
+    /// daily limits count them: zero on a day without activity yet.
     pub daily_new_exposure: Usd,
     pub daily_realized_pnl: Usd,
     pub realized_pnl_total: Usd,

@@ -1427,6 +1427,11 @@ impl Engine {
     /// market settles at the next step, as it would have live, so its P&L
     /// counts toward today's loss limit again.
     pub fn restore(&mut self, state: &RestoreState, now: DateTime<Utc>) -> RestoreSummary {
+        // The restore happens at `now`: the clock moves there (never back),
+        // so the snapshot reads today's counters of the restore's day.
+        if now > self.now {
+            self.now = now;
+        }
         let mut summary = RestoreSummary {
             markets: state.markets.len(),
             fills: state.fills.len(),
@@ -1612,8 +1617,8 @@ impl Engine {
                         markets: &self.markets,
                         position_strategy: &book.position_strategy,
                     }),
-                    daily_new_exposure: book.risk.daily_new_exposure(),
-                    daily_realized_pnl: book.risk.daily_realized_pnl(),
+                    daily_new_exposure: book.risk.daily_new_exposure(self.now),
+                    daily_realized_pnl: book.risk.daily_realized_pnl(self.now),
                     realized_pnl_total: book.realized_pnl_total,
                 }
             })
@@ -1652,8 +1657,8 @@ impl Engine {
             },
             exposure,
             risk: main.risk.config().clone(),
-            daily_new_exposure: main.risk.daily_new_exposure(),
-            daily_realized_pnl: main.risk.daily_realized_pnl(),
+            daily_new_exposure: main.risk.daily_new_exposure(self.now),
+            daily_realized_pnl: main.risk.daily_realized_pnl(self.now),
             realized_pnl_total: main.realized_pnl_total,
             // As the orders: the main book's (and the evaluations) and the
             // lab's latest 100 apart.

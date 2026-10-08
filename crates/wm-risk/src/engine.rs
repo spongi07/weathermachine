@@ -361,12 +361,21 @@ impl RiskEngine {
         self.daily.realized_pnl += pnl;
     }
 
-    pub fn daily_realized_pnl(&self) -> Usd {
-        self.daily.realized_pnl
+    /// Realized PnL of the UTC day of `now`. The counters roll on the
+    /// engine's next activity, so a book that has not acted since an earlier
+    /// day reads zero here instead of that day's figures.
+    pub fn daily_realized_pnl(&self, now: DateTime<Utc>) -> Usd {
+        self.today(now).map_or(Usd::ZERO, |d| d.realized_pnl)
     }
 
-    pub fn daily_new_exposure(&self) -> Usd {
-        self.daily.new_exposure
+    /// New exposure of the UTC day of `now` (zero on a day without an
+    /// approval yet, as [`Self::daily_realized_pnl`]).
+    pub fn daily_new_exposure(&self, now: DateTime<Utc>) -> Usd {
+        self.today(now).map_or(Usd::ZERO, |d| d.new_exposure)
+    }
+
+    fn today(&self, now: DateTime<Utc>) -> Option<&DailyCounters> {
+        (self.daily.date == Some(now.date_naive())).then_some(&self.daily)
     }
 
     /// After a restart: count the cost of today's (UTC) opening orders of

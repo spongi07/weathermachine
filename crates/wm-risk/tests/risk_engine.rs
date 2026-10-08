@@ -582,13 +582,13 @@ fn unfilled_cost_returns_to_the_daily_new_exposure_of_its_day() {
     let book = book_for(&i.token, "0.93", "0.94");
     let d = e.evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None));
     assert!(d.is_approved(), "{:?}", checks(&d));
-    assert_eq!(e.daily_new_exposure(), Usd::from_whole(94));
+    assert_eq!(e.daily_new_exposure(utc(NOW)), Usd::from_whole(94));
     // 40 of the 100 shares filled; the rest expired: $56.40 comes back.
     e.release_daily_new_exposure(Usd::from_micros(56_400_000), utc(NOW), utc(NOW));
-    assert_eq!(e.daily_new_exposure(), Usd::from_micros(37_600_000));
+    assert_eq!(e.daily_new_exposure(utc(NOW)), Usd::from_micros(37_600_000));
     // Never below zero.
     e.release_daily_new_exposure(Usd::from_whole(500), utc(NOW), utc(NOW));
-    assert_eq!(e.daily_new_exposure(), Usd::ZERO);
+    assert_eq!(e.daily_new_exposure(utc(NOW)), Usd::ZERO);
     // An order approved yesterday (UTC) does not touch today's counter.
     let mut e = RiskEngine::new(with_f_caps(), &RunId::deterministic(7));
     let i = f_intent(&w.market, "0.94", 100, 2);
@@ -597,7 +597,33 @@ fn unfilled_cost_returns_to_the_daily_new_exposure_of_its_day() {
             .is_approved()
     );
     e.release_daily_new_exposure(Usd::from_whole(94), utc(NOW) - Duration::days(1), utc(NOW));
-    assert_eq!(e.daily_new_exposure(), Usd::from_whole(94));
+    assert_eq!(e.daily_new_exposure(utc(NOW)), Usd::from_whole(94));
+}
+
+#[test]
+fn a_day_without_activity_reads_zero() {
+    let w = World::new();
+    let ws = weather(ProviderHealthState::Healthy, 5);
+    let mut e = RiskEngine::new(with_f_caps(), &RunId::deterministic(7));
+    let i = f_intent(&w.market, "0.94", 100, 1);
+    let book = book_for(&i.token, "0.93", "0.94");
+    assert!(
+        e.evaluate(i, &w.inputs(Some(&book), Some(&ws), RunMode::Paper, None))
+            .is_approved()
+    );
+    e.record_realized_pnl(Usd::from_whole(-7), utc(NOW));
+    assert_eq!(e.daily_new_exposure(utc(NOW)), Usd::from_whole(94));
+    assert_eq!(e.daily_realized_pnl(utc(NOW)), Usd::from_whole(-7));
+    // The next (UTC) day, before the book acts again: nothing yet, not
+    // yesterday's figures (on 8 October 2026 an idle lab book still showed
+    // the settlement of three days before as today's).
+    let tomorrow = utc(NOW) + Duration::days(1);
+    assert_eq!(e.daily_new_exposure(tomorrow), Usd::ZERO);
+    assert_eq!(e.daily_realized_pnl(tomorrow), Usd::ZERO);
+    // A settlement that day starts the day's count afresh.
+    e.record_realized_pnl(Usd::from_whole(3), tomorrow);
+    assert_eq!(e.daily_realized_pnl(tomorrow), Usd::from_whole(3));
+    assert_eq!(e.daily_new_exposure(tomorrow), Usd::ZERO);
 }
 
 #[test]

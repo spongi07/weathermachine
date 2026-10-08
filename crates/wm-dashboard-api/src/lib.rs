@@ -112,6 +112,8 @@ pub struct LabBookDto {
     pub capital_usd: f64,
     /// Worst-case loss of the open positions and live orders.
     pub worst_case_usd: f64,
+    /// Today's (UTC) new exposure and realized P&L; zero on a day the book
+    /// has not acted on yet.
     pub today_new_usd: f64,
     pub today_realized_usd: f64,
     pub realized_total_usd: f64,

@@ -120,7 +120,11 @@ fill-and-kill that finds less than it asked for — its unfilled cost is
 taken off again (same UTC day, never below zero), so quotes posted and
 withdrawn every half hour do not use up the day's limit. A restart restores
 the counter from the filled cost of the day's opening orders
-(`opening_orders_since`).
+(`opening_orders_since`). The counters start a new UTC day on the book's
+next activity (an approval, a fill, a settlement); until then the
+dashboard reads them as zero for the new day, not as the figures of the
+book's last active day (an idle lab book showed a settlement three days old
+as today's until 8 October 2026).
 
 Consequences, by design:
 

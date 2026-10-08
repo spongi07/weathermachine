@@ -354,6 +354,10 @@ fn paper_lifecycle_signal_risk_fill_settle() {
         "the market's books are forgotten"
     );
     assert_eq!(snap.realized_pnl_total, pnl);
+    // A day without activity: today's counters read zero, not the day of
+    // the settlement's.
+    assert_eq!(snap.daily_realized_pnl, Usd::ZERO);
+    assert_eq!(snap.daily_new_exposure, Usd::ZERO);
     assert_eq!(
         engine.positions().iter().count(),
         3,
