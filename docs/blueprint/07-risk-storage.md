@@ -26,7 +26,7 @@ reported, never just the first. Client order ids are deterministic
 | WeatherCoverage | no gap > 75 min in the local day series | (incomplete day may hide the high) |
 | CorrectionCooldown | 10 min after a correction | — |
 | MarketData | book present, ≤ 15 s old (received or confirmed by the stream's heartbeat), correct token | market data stale ⇒ no new position |
-| Spread | ≤ 0.05 (a strategy may have its own: K ≤ 0.10) | maximum spread |
+| Spread | ≤ 0.05 (a strategy may have its own: F and K ≤ 0.10) | maximum spread |
 | Liquidity | FAK/FOK: ask depth ≥ size at limit | minimum liquidity |
 | Tick / PriceBounds / MinSize | on tick; 0.01 ≤ price ≤ 0.99; ≥ market minimum | — |
 | MarketStatus | accepting orders, not closed, before end time (a daily market ends no earlier than its local day) | — |
@@ -76,9 +76,10 @@ max_daily_loss_usd = "100.00"
 max_spread = "0.05"
 max_orders_per_minute = 20
 
-[risk.strategy_caps.F_peak_slot]       # a fixed 100 shares at ≤ 0.95
+[risk.strategy_caps.F_peak_slot]       # a fixed 100 shares at ≤ 0.95, books up to 0.10 wide
 position_size_usd = "100.00"
 max_strategy_exposure_usd = "110.00"
+max_spread = "0.10"
 [risk.strategy_caps.G_tail_seller]     # $30 a resting NO bid, ≤ 4 buckets
 position_size_usd = "30.00"
 max_strategy_exposure_usd = "120.00"
@@ -104,8 +105,10 @@ the risk check does: a proposal to open on a one-sided book, or on one
 wider than its strategy's limit (its lab book's for a lab strategy), waits
 in that strategy's evaluation ("spread 0.079 > 0.05 (the risk limit)")
 instead of being refused on every book update — on 7 October 2026 F was
-refused some 4,500 times in 45 minutes. The portfolio caps (global, market,
-location, daily new exposure, daily loss) count every strategy together.
+refused some 4,500 times in 45 minutes, on books 0.06–0.09 wide, and
+missed the winning bucket; since 8 October its own limit is 0.10. The
+portfolio caps (global, market, location, daily new exposure, daily loss)
+count every strategy together.
 Configuration validation refuses an enabled strategy whose one order would
 not fit every cap it meets (position, market, strategy, global, location,
 daily new exposure); a strategy cap must be positive and ≤ the global cap.

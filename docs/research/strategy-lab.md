@@ -14,9 +14,9 @@ sky, the temperatures of upwind stations, and every taker's track record on
 the days before. They are built as a **lab**: `weather-machine research
 market` replays all of them at traded prices on the settled Amsterdam
 markets, each with a variant or a control, and judges each family out of
-sample. Since 2 October 2026 all 25 also run in the live service as
+sample. Since 2 October 2026 they also run in the live service as
 **paper strategies**, each on a paper book of its own, so they never block
-A–K or each other (§7). None trades money: a family that holds up on days
+A–K or each other; 18 of them since 8 October (§7). None trades money: a family that holds up on days
 it was not chosen on, again on the next run's new days and in its paper
 record is a candidate, nothing more.
 
@@ -374,9 +374,14 @@ no cost and without touching A–K.
 
 ## 7. Paper trading (live, from 2 October 2026)
 
-All 25 families run in the live service — **paper only**, like everything
+The families run in the live service — **paper only**, like everything
 the service trades. They see the same markets, books, reports and KNMI
-readings as A–K, at the same moments, and their record is kept apart.
+readings as A–K, at the same moments, and their record is kept apart. All
+25 ran from 2 October 2026; since 8 October the shipped configuration
+switches off the six families the replay refuted (L9, L12, L17, L19, L21,
+L23) and L22, whose 1–5¢ band the far tails never offer
+([strategy review §3.5](strategy-review.md#35-lab-notes)). Their replay
+code stays.
 
 **Own books.** Each lab strategy trades a paper book of its own: its
 positions (and the order that opened each), its live orders, its risk

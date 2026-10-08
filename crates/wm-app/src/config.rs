@@ -1585,7 +1585,7 @@ mod tests {
             cfg.file.risk.position_size_usd,
             wm_core::units::Usd::from_whole(10)
         );
-        // F and G–K at once (H and J off): $400 of worst case.
+        // F, G and K at once (H–J off): $400 of worst case.
         let usd = wm_core::units::Usd::from_whole;
         let risk = &cfg.file.risk;
         assert_eq!(risk.global_max_exposure_usd, usd(400));
@@ -1607,14 +1607,23 @@ mod tests {
             assert_eq!(risk.market_cap_for(&id(s)), Some(usd(400)), "{s}");
         }
         assert_eq!(risk.market_cap_for(&id("F_peak_slot")), Some(usd(400)));
+        // F and K may buy on books up to 0.10 wide; the rest keep 0.05.
+        for s in ["F_peak_slot", "K_knmi_nowcast"] {
+            assert_eq!(
+                risk.max_spread_for(&id(s)),
+                Price::saturating_from_micros(100_000),
+                "{s}"
+            );
+        }
         assert_eq!(
-            risk.max_spread_for(&id("K_knmi_nowcast")),
-            Price::saturating_from_micros(100_000)
+            risk.max_spread_for(&id("G_tail_seller")),
+            Price::saturating_from_micros(50_000)
         );
         assert_eq!(risk.max_daily_loss_usd, Some(usd(100)));
         assert_eq!(risk.max_daily_new_exposure_usd, Some(usd(600)));
-        // A–E, H and J are off; I runs with the documented defaults, G and
-        // K with the values the replay of 2 October 2026 supported.
+        // A–E and H–J are off (I since 8 October 2026, on its live record,
+        // its settings kept at the documented defaults); G and K run with the
+        // values the replay of 2 October 2026 supported.
         let st = &cfg.file.strategies;
         assert!(
             !st.buy_yes.enabled
@@ -1632,7 +1641,13 @@ mod tests {
             }
         );
         assert_eq!(st.next_degree, wm_strategy::NextDegreeConfig::absent());
-        assert_eq!(st.middle_fade, wm_strategy::MiddleFadeConfig::default());
+        assert_eq!(
+            st.middle_fade,
+            wm_strategy::MiddleFadeConfig {
+                enabled: false,
+                ..wm_strategy::MiddleFadeConfig::default()
+            }
+        );
         assert_eq!(st.morning_maker, wm_strategy::MorningMakerConfig::absent());
         assert_eq!(
             st.knmi_nowcast,
@@ -1641,19 +1656,34 @@ mod tests {
                 ..wm_strategy::KnmiNowcastConfig::default()
             }
         );
+        // The unwind engine leaves F alone too: it holds to settlement, as
+        // its replay does.
         assert_eq!(
             st.unwind.exempt_strategies,
-            wm_strategy::default_exempt_strategies()
+            std::iter::once("F_peak_slot".to_owned())
+                .chain(wm_strategy::default_exempt_strategies())
+                .collect::<Vec<_>>()
         );
         assert_eq!(cfg.file.knmi, KnmiSection::default());
         assert_eq!(
             cfg.file.providers.knmi.base_url,
             wm_weather::knmi::DEFAULT_BASE_URL
         );
-        // The strategy lab runs every family's main rule, paper only, with
-        // the documented defaults, and reads the documented inputs.
-        assert_eq!(st.lab, wm_strategy::LabConfig::default());
-        assert!((1..=25).all(|f| st.lab.runs(f) && !st.lab.variant(f)));
+        // The strategy lab runs every family's main rule but the seven
+        // switched off on 8 October 2026, paper only, with the documented
+        // defaults, and reads the documented inputs.
+        let off = [9u8, 12, 17, 19, 21, 22, 23];
+        assert_eq!(
+            st.lab,
+            wm_strategy::LabConfig {
+                disabled: off.iter().map(|f| format!("L{f}")).collect(),
+                ..wm_strategy::LabConfig::default()
+            }
+        );
+        for f in 1..=25 {
+            assert_eq!(st.lab.runs(f), !off.contains(&f), "L{f}");
+            assert!(!st.lab.variant(f), "L{f}");
+        }
         assert_eq!(cfg.file.lab, LabSection::default());
         // The operator moved F's slot to 75 % → 95 % after the replay; the
         // rest of the section states the documented defaults.

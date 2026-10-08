@@ -105,7 +105,7 @@ For a contract bought at price *P* with win probability *p*, per share:
 shows it permanently.) Performance is judged on EV, drawdown and confidence
 intervals, never on win rate.
 
-## Which strategies run (1 October 2026)
+## Which strategies run (8 October 2026)
 
 | | strategy | live | why |
 |---|---|---|---|
@@ -114,18 +114,19 @@ intervals, never on win rate.
 | C | split + unwind (§27) | off | research only |
 | D | decided outcomes (§27a) | off | dead buckets reprice a median 39 s after the observation, before the bot knows the report |
 | E | book-confirmed high (§27c) | off | −$7.18 over 80 replayed trades |
-| F | peak slot (§27d) | **on** | traded; slot 75 % → 95 % since 1 Oct; replay 2 Oct: +$11.13 over 80 trades (about break-even: −$60 in June–July, +$71 in August–September) |
+| F | peak slot (§27d) | **on**, books up to 0.10 wide, held to settlement (8 Oct) | traded; slot 75 % → 95 % since 1 Oct; replay 2 Oct: +$11.13 over 80 trades (about break-even: −$60 in June–July, +$71 in August–September); live 26 Sep–8 Oct 4 of 4 won (+$21.38), but on 7 Oct its books were 0.06–0.09 wide and it missed the winning bucket |
 | G | tail seller (§27e) | **on**, from 3 °C above, no model veto | replay 2 Oct: from 2 °C above −$18.04 (37 trades); from 3 above without the veto 125 of 127 won (+$76.64), out of sample 53 of 53 (+$55.09) |
 | H | next degree (§27f) | off (2 Oct) | replay 2 Oct: −$77.18 over 169 trades; its best variant lost $92.20 out of sample |
-| I | middle fade (§27g) | **on** | replay 2 Oct: +$58.79 over 90 trades; its configured rule +$10.03 in August–September (interval spans zero) |
+| I | middle fade (§27g) | off (8 Oct) | replay 2 Oct: +$58.79 over 90 trades; its configured rule +$10.03 in August–September (interval spans zero); live −$20.49 over 9 trades (2–7 Oct), on each of its five days holding the NO of the bucket that won |
 | J | morning maker (§27h) | off (2 Oct) | replay 2 Oct: −$197.52 over 250 fills; its best variant lost $171.88 out of sample |
 | K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: every trade won (4 of 4, +$81.10); out of sample too |
-| U | unwind (§28) | **on** | the exit engine; leaves G–K alone |
-| L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`) | built on 2 Oct on request, so their live record grows beside the replay's; none trades money |
+| U | unwind (§28) | **on** | the exit engine; leaves F–K alone (F since 8 Oct: its replay holds to settlement) |
+| L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`); L9, L12, L17, L19 and L21–L23 off (8 Oct) | built on 2 Oct on request, so their live record grows beside the replay's; none trades money. The seven switched off were refuted by the replay, or (L22) never find a bid to join |
 
 The review of 3 October 2026 weighs every one of them against the replays,
 the first paper days and the code, with recommendations for the operator:
-[strategy review](../research/strategy-review.md).
+[strategy review](../research/strategy-review.md). Its four recommendations
+for the shipped configuration were applied on 8 October (§5 there).
 
 A strategy switched off is not shown on the dashboard; its code stays,
 because `research market` replays A, B, E and F as baselines, and
@@ -506,6 +507,16 @@ HYPOTHESIS TO BACKTEST: `research market` replays F, five variants and a
 maker version at traded prices, and picks among them out of sample
 (§36a).
 
+**LIVE (8 October 2026).** Four of four trades won (+$21.38, 26 September –
+8 October). On 7 October F missed the winning 22 °C: for 45 minutes its
+books were 0.06–0.09 wide, wider than the risk check's 0.05, while L3 (F's
+rule on a lab book allowing 0.10) bought it at 0.95. F buys as the high's
+bucket reprices, when makers widen their quotes, and its replay has no
+spread condition, so F's own limit is now 0.10 (`max_spread` in
+`[risk.strategy_caps.F_peak_slot]`). Its positions are held to settlement,
+as in the replay: the unwind engine leaves them alone (`exempt_strategies`,
+§28).
+
 **RESIDUAL RISK.**
 
 * A second peak (warm advection, clearing cloud), or a night maximum in
@@ -643,6 +654,11 @@ market's calibration, not the model. The best variant on June–July, a
 resting NO bid (+$87.81), lost $74.85 on August–September; the configured
 rule's own result on those months (shown since this release) decides
 whether I stays on.
+
+**LIVE.** Switched off on 8 October 2026: −$20.49 over nine trades (2–7
+October), and on each of its five trading days it held the NO of the
+bucket that won. `research market` still replays it, so a later run's new
+days can bring it back.
 
 ## 27h. MORNING MAKER — strategy J
 
@@ -791,7 +807,9 @@ notional, no more than the ask offers, at least the market's minimum), a
 resting NO bid (good-till-date, one tick inside the spread unless the rule
 fixes the price) and L3's sale of its YES at the bid. `[strategies.lab]`:
 `enabled`, `disabled` and `variants` (family codes), the notional and the
-quotes' timing; `[strategies.lab.risk]`: each book's limits.
+quotes' timing; `[strategies.lab.risk]`: each book's limits. Since 8 October
+2026 the shipped configuration switches off L9, L12, L17, L19, L21, L22 and
+L23 ([strategy review §3.5](../research/strategy-review.md#35-lab-notes)).
 
 **INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
 readings of the last 36 hours, the neighbours' readings with their
@@ -835,7 +853,7 @@ data age, prices) gate every book.
   (`lab_settings_are_validated`: unknown codes, stakes the books would
   refuse, L3's stake against F's shares, timings, neighbours), the shipped
   values and older files without the sections (lab off); the catalog lists
-  L1–L25 after the unwind engine; `/lite` and `report paper` keep the lab's
+  the families that run after the unwind engine; `/lite` and `report paper` keep the lab's
   books apart (`lab_fills_are_reported_apart_from_the_main_book`); the
   taker trades' hashing and ids and the scoring schedule (`runtime/lab.rs`).
 
@@ -859,7 +877,11 @@ pub struct UnwindConfig { enabled, style, exit_below_probability /*0.50*/, max_h
   Probability-based: the same p_win as entry, across views.
 * `exempt_strategies` (default: G–K) are left alone: they buy outcomes the
   model rates below the exit level by design — a cheap YES, the NO of a
-  middle bucket, a quote's inventory — and hold them to settlement.
+  middle bucket, a quote's inventory — and hold them to settlement. The
+  shipped configuration adds F (8 October 2026): its replay holds every
+  trade to settlement, and U's exit at the best bid on the model's
+  probability was never tested with it. With A–E off, U then manages no
+  running strategy's positions; it stays on for a strategy switched back on.
 * Unwinds are *reduce* intents. They are allowed even when weather data is
   unhealthy, because reducing risk is never blocked by the weather gates.
 * Never assumes a mid-price fill: fills come from the book (§35).

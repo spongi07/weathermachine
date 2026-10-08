@@ -41,6 +41,22 @@ pub fn catalog(cfg: &AppConfig) -> Vec<StrategyDto> {
 /// Every strategy of the engine, switched on or off.
 pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
     let st = &cfg.file.strategies;
+    // The unwind engine's summary names the strategies it leaves alone, as
+    // configured, so it cannot drift from `exempt_strategies`.
+    let exempt: Vec<&str> = st
+        .unwind
+        .exempt_strategies
+        .iter()
+        .map(|s| s.split('_').next().unwrap_or(s))
+        .collect();
+    let left_alone = if exempt.is_empty() {
+        "the lab's positions".to_owned()
+    } else {
+        format!(
+            "the positions of the strategies that hold to settlement ({}) and the lab's",
+            exempt.join(", ")
+        )
+    };
     vec![
         entry(
             "A_buy_yes_final_high",
@@ -123,7 +139,9 @@ pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
             UNWIND_ID,
             "Unwind (exits)",
             st.unwind.enabled,
-            "Sells positions the evidence has turned against (the win probability fell below the exit level, or the holding time ran out). Positions of the strategies that hold to settlement by design (G–K) are left alone, and so are the lab's (they trade their own books).",
+            &format!(
+                "Sells positions the evidence has turned against (the win probability fell below the exit level, or the holding time ran out). It leaves alone {left_alone} (they trade their own books)."
+            ),
             &st.unwind,
         ),
     ]
@@ -399,32 +417,44 @@ mod tests {
         let ids: Vec<&str> = c.iter().filter(|s| !s.lab).map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
-            [
-                "F_peak_slot",
-                "G_tail_seller",
-                "I_middle_fade",
-                "K_knmi_nowcast",
-                "U_unwind"
-            ]
+            ["F_peak_slot", "G_tail_seller", "K_knmi_nowcast", "U_unwind"]
         );
         let letters: String = c
             .iter()
             .filter(|s| !s.lab)
             .map(|s| s.letter.as_str())
             .collect();
-        assert_eq!(letters, "FGIKU");
-        // The lab's 25 paper strategies follow, L1 first, every one running
-        // its main rule.
+        assert_eq!(letters, "FGKU");
+        // The unwind engine names the strategies it leaves alone.
+        let u = c.iter().find(|s| s.id == UNWIND_ID).unwrap();
+        assert!(
+            u.summary
+                .contains("hold to settlement (F, G, H, I, J, K) and the lab's"),
+            "{}",
+            u.summary
+        );
+        // The lab's paper strategies follow, L1 first, every one running its
+        // main rule; the seven families switched off on 8 October 2026 are
+        // not shown.
+        let off = [9, 12, 17, 19, 21, 22, 23];
         let lab: Vec<&StrategyDto> = c.iter().filter(|s| s.lab).collect();
         assert_eq!(
             lab.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             wm_strategy::lab::IDS
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !off.contains(&(i + 1)))
+                .map(|(_, id)| *id)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             lab.iter().map(|s| s.letter.clone()).collect::<Vec<_>>(),
-            (1..=25).map(|n| format!("L{n}")).collect::<Vec<_>>()
+            (1..=25usize)
+                .filter(|n| !off.contains(n))
+                .map(|n| format!("L{n}"))
+                .collect::<Vec<_>>()
         );
-        assert!(c.iter().skip(5).all(|s| s.lab), "after the unwind engine");
+        assert!(c.iter().skip(4).all(|s| s.lab), "after the unwind engine");
         let setting = |s: &StrategyDto, k: &str| {
             s.settings
                 .iter()
@@ -459,7 +489,7 @@ mod tests {
             l2.settings
         );
         assert!(l2.summary.contains("0.6 °C"), "{}", l2.summary);
-        // A–E, H and J are off and not shown; switched on again they come back.
+        // A–E and H–J are off and not shown; switched on again they come back.
         let all: String = every_strategy(&cfg)
             .iter()
             .filter(|s| !s.lab)

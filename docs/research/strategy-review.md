@@ -6,6 +6,8 @@ traded prices (`research market`, 123 settled days to 1 October 2026,
 the [lab's first run](strategy-lab.md#6-the-first-run-2-october-2026)), the
 live paper record (26 September – 3 October, `report paper`), and the code.
 Nothing here trades money; every recommendation is the operator's call.
+Updated on 8 October 2026 with the first live week and the four changes the
+operator applied to the shipped configuration (§5).
 
 ## 1. Verdicts
 
@@ -59,7 +61,7 @@ are exempt), so U's exits apply to an untested rule, on the signal the
 replay found weaker than the market's. L3, which exits F on KNMI's far
 better signal, did not improve it either (+$10.91 against +$11.13).
 Recommendation: `exempt_strategies` in `[strategies.unwind]` gains
-`"F_peak_slot"`, so live F is the replayed F.
+`"F_peak_slot"`, so live F is the replayed F. Applied on 8 October (§5).
 
 ### 3.2 G measures "far" from the current high
 
@@ -82,7 +84,8 @@ overpricing, so its expected profit is about that overpricing minus half
 the spread, the fee (1.25 points at 0.50) and slippage: close to zero in
 anything but a tight book. The replay without the model condition earned
 more (+$62.35). Keep it on paper and drop it if the next replay's later
-days are negative again.
+days are negative again. The live record decided first: I was switched off
+on 8 October (§5).
 
 ### 3.4 K's decisive moment is not in the log
 
@@ -117,7 +120,8 @@ KNMI lab rules reviewable.
   its 1–5¢ band.
 * Switching off the refuted families and L22 (`disabled = ["L9", "L12",
   "L17", "L19", "L21", "L22", "L23"]` in `[strategies.lab]`) keeps their
-  replay code and leaves the lab's other books untouched.
+  replay code and leaves the lab's other books untouched. Applied on
+  8 October (§5).
 
 ## 4. The live record so far
 
@@ -132,3 +136,39 @@ KNMI lab rules reviewable.
 Next: after about 20 new settled days, `research market --from 2026-10-02`
 replays only days no rule was chosen on; that, not this table, decides L4,
 L14 and the verdicts above.
+
+## 5. Applied on 8 October 2026
+
+The first live week (main book, 26 September – 8 October):
+
+| strategy | trades | result | note |
+|---|---:|---:|---|
+| F | 4 | +$21.38 | all won; on 7 October it missed the winning 22 °C (below) |
+| G | 7 | +$11.03 | all won |
+| I | 9 | −$20.49 | 2–7 October; on each of its five trading days it held the NO of the bucket that won |
+| J | 1 | −$9.88 | 2 October, before it was switched off |
+| K | 0 | — | |
+| together | | +$2.04 | |
+
+On 7 October F's slot found the winning 22 °C on books 0.06–0.09 wide for
+45 minutes, and the main risk limit of 0.05 refused it some 4,500 times,
+while L3 (F's rule on a lab book allowing 0.10) bought it at 0.95. F buys
+as the high's bucket reprices, when makers widen their quotes, and its
+replay has no spread condition.
+
+The operator applied four changes to the shipped configuration:
+
+| change | where | why |
+|---|---|---|
+| F may buy on books up to 0.10 wide | `max_spread = "0.10"` in `[risk.strategy_caps.F_peak_slot]` | the miss of 7 October, above |
+| I off | `enabled = false` in `[strategies.middle_fade]` | its live record (§3.3) |
+| L9, L12, L17, L19, L21, L22 and L23 off | `disabled` in `[strategies.lab]` | §3.5 |
+| the unwind engine leaves F alone | `"F_peak_slot"` in `exempt_strategies` | §3.1 |
+
+The engine also waits out a book its risk check would refuse since that
+day: the proposal stays in the strategy's evaluation as a blocker ("spread
+0.07 > 0.05 (the risk limit)") instead of being refused on every book
+update ([risk, per-strategy caps](../blueprint/07-risk-storage.md)). With
+F exempt and A–E off, U manages no running strategy's positions; it stays
+on for a strategy switched back on. The verdicts of §1 otherwise stand:
+the next `research market --from 2026-10-02` decides on new days.

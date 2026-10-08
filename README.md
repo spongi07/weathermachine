@@ -34,17 +34,17 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   trained automatically on first start, retrained every 30 days in the
   background and swapped in without a restart) → strategies → risk engine
   → simulated venue. Switched on in the shipped configuration (2 October
-  2026, after the first replay of G–K at traded prices; each one a
-  hypothesis that `research market` judges out of sample):
+  2026, after the first replay of G–K at traded prices, revised on 8 October
+  after the first live week; each one a hypothesis that `research market`
+  judges out of sample):
   * **F** peak slot: 100 shares of YES on the high's bucket inside the
     season's peak slot (the 75th to 95th percentile of the local time at
     which the station's history first reported its day's high), once that
-    bucket is offered above 0.90, at most 0.95;
+    bucket is offered above 0.90, at most 0.95, on books up to 0.10 wide,
+    and held to settlement as in its replay;
   * **G** tail seller: resting NO bids (the YES offered at 1–8¢) on buckets
     three or more degrees above the high, withdrawn before each report (in
     the replay 125 of 127 won; 53 of 53 out of sample);
-  * **I** middle fade: the NO of buckets priced 0.30–0.70 that the model
-    also rates lower — the middle of the ladder is overpriced;
   * **K** KNMI nowcast: the NO of the high's bucket when KNMI's ten-minute
     mean is already above the next degree, before the METAR is published
     (in the replay every K trade won, also out of sample).
@@ -52,9 +52,11 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   Switched off, code kept as research baselines (`enabled = true` brings one
   back): A (YES of the final-high bucket), B (NO above it), C (split and
   unwind), D (outcomes the observations have already decided), E (YES of
-  the high's bucket once the book confirms it), H (the cheap YES of high + 1)
-  and J (morning quotes on both sides) — H and J lost in the replay, also
-  out of sample. A and B pool the model with the market's price: the book
+  the high's bucket once the book confirms it), H (the cheap YES of high + 1),
+  I (the NO of buckets priced 0.30–0.70 that the model rates lower) and J
+  (morning quotes on both sides) — H and J lost in the replay, also out of
+  sample; I lost $20.49 live over nine trades and was switched off on
+  8 October 2026. A and B pool the model with the market's price: the book
   can veto a trade, never create one.
 * **Tries more than it trades.** `research market` also replays a
   [strategy lab](docs/research/strategy-lab.md) of 25 new strategies
@@ -63,10 +65,11 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   fog, fronts), the forecast's hourly path, KNMI's global radiation and the
   temperatures of upwind stations, and every taker's record on the days
   before. Each has a variant or a control and is judged out of sample.
-  Since 2 October 2026 all 25 also run live as **paper strategies**, each
+  Since 2 October 2026 they also run live as **paper strategies**, each
   on a paper book of its own — its own positions, limits and P&L — so none
   of them ever blocks F–K or another lab strategy (`[strategies.lab]`:
-  `disabled`, `variants`). The dashboard's lab panel, each family's page
+  `disabled`, `variants`); 18 since 8 October, when the seven families the
+  replay refuted or the books never let trade were switched off. The dashboard's lab panel, each family's page
   and `report paper` show their record apart from the main book's.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in

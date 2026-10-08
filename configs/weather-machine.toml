@@ -318,7 +318,7 @@ throttle_memory_secs = 1800
 # ---------------------------------------------------------------------------
 [risk]
 position_size_usd = "10.00"          # any strategy without its own caps
-# F ≤ $110 + G $120 + I $30 + K $50 = $310 of capital at most (H's $30
+# F ≤ $110 + G $120 + K $50 = $280 of capital at most (H's $30, I's $30
 # and J's $80 more if they are switched back on). The worst-case loss counts
 # the worst outcome of each market, where legs of different buckets hedge
 # each other, so it stays below that.
@@ -339,10 +339,16 @@ max_book_age_ms = 15000
 correction_cooldown_minutes = 10
 max_orders_per_minute = 20           # G and J post several quotes after a report
 require_approved_resolution_spec = false   # set true before any live consideration
-# F buys a fixed 100 shares (at most 0.95 each).
+# F buys a fixed 100 shares (at most 0.95 each). Its books may be up to
+# 0.10 wide (8 October 2026): F buys as the high's bucket reprices, when
+# makers widen their quotes, and its replay at traded prices had no spread
+# condition. At 0.05 F missed the winning 22 °C on 7 October, refused for
+# 45 minutes on books 0.06–0.09 wide, while L3 (F's rule on a lab book
+# allowing 0.10) bought it at 0.95.
 [risk.strategy_caps.F_peak_slot]
 position_size_usd = "100.00"
 max_strategy_exposure_usd = "110.00"
+max_spread = "0.10"
 # G: $30 a resting NO bid, at most four buckets at a time.
 [risk.strategy_caps.G_tail_seller]
 position_size_usd = "30.00"
@@ -500,8 +506,8 @@ max_data_age_minutes = 40
 # replays G–J at traded prices (K with WM_KNMI_API_KEY) and judges each on
 # the second half of the days (docs/blueprint/06-strategy.md §27e–§27i).
 # Each needs its own risk caps (above) and is off when its section is
-# missing. Their positions are held to settlement: the unwind engine leaves
-# them alone (exempt_strategies below).
+# missing. Their positions are held to settlement, like F's: the unwind
+# engine leaves them alone (exempt_strategies below).
 # ---------------------------------------------------------------------------
 
 # G — tail seller: rest a NO bid (an offer of the YES) on cheap buckets two
@@ -557,8 +563,11 @@ slippage_allowance = "0.005"      # for the EV shown (not a gate)
 # 42.8 … 48.0 %); with the model ≥ 5 points below, 51.1 % at 53.6 %. The
 # three-point edge is about what the fee and half the spread cost, so I
 # trades only on tight books.
+# Switched off on 8 October 2026: live, I lost $20.49 over nine trades
+# (2–7 October), and on each of its five trading days it held the NO of
+# the bucket that won.
 [strategies.middle_fade]
-enabled = true
+enabled = false
 min_mid = 0.30
 max_mid = 0.70
 max_spread = "0.04"               # widest YES spread whose midpoint counts
@@ -647,9 +656,13 @@ slippage_allowance = "0.01"
 # for the takers' records (built from the last [lab].wallet_history_days
 # settled days, a few minutes after the start). The sections below are
 # optional: without them the lab is off.
+# Off since 8 October 2026 (docs/research/strategy-review.md §3.5): the
+# families the replay refuted (L9, L12, L17, L19, L21, L23; L19 lost $613.09
+# on the later days and held both sides of a bucket live) and L22, whose
+# 1–5¢ band the far tails never offer. Their replay code stays.
 [strategies.lab]
 enabled = true
-disabled = []                     # e.g. ["L19", "L20"]
+disabled = ["L9", "L12", "L17", "L19", "L21", "L22", "L23"]
 variants = []                     # e.g. ["L2"]: the margin of 0.6 °C instead of 0.3 °C
 notional = "20.00"                # cost of one trade at its price (L3: F's 100 shares)
 slippage_allowance = "0.005"      # in the expected profit of a taker buy
@@ -675,8 +688,10 @@ enabled = true
 exit_below_probability = 0.5
 # Strategies that hold to settlement by design: their positions start below
 # the exit probability (a cheap YES, the NO of a middle bucket, a quote's
-# inventory), so the unwind engine leaves them alone.
-exempt_strategies = ["G_tail_seller", "H_next_degree", "I_middle_fade", "J_morning_maker", "K_knmi_nowcast"]
+# inventory), so the unwind engine leaves them alone. F too (8 October
+# 2026): its replay holds every trade to settlement, and U's exit at the
+# best bid on the model's probability was never tested with it.
+exempt_strategies = ["F_peak_slot", "G_tail_seller", "H_next_degree", "I_middle_fade", "J_morning_maker", "K_knmi_nowcast"]
 [strategies.unwind.style]
 style = "best_bid"
 
