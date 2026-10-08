@@ -19,7 +19,7 @@ use wm_core::ids::{
     DecisionId, EventSlug, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId,
 };
 use wm_core::market::{DailyTemperatureMarket, OrderBook, TakerTrade, TradePrint};
-use wm_core::portfolio::PositionBook;
+use wm_core::portfolio::{Position, PositionBook};
 use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::trading::{DecisionRecord, IntentKind, OrderStatus, RunMode, TradeIntent};
@@ -1112,6 +1112,25 @@ impl Engine {
             &self.paper[MAIN].position_strategy,
             self.now,
         ));
+        // A proposal the risk check would refuse for its book's spread waits
+        // in its strategy's evaluation instead of being refused on every book
+        // update (F on 7 October 2026: thousands of refusals in 45 minutes).
+        let mut kept = Vec::with_capacity(proposals.len());
+        for p in proposals {
+            match self.spread_refusal(&p) {
+                None => kept.push(p),
+                Some(why) => {
+                    if let Some(e) = evaluations
+                        .iter_mut()
+                        .find(|e| e.strategy == p.strategy && e.token == p.token)
+                    {
+                        e.signal = false;
+                        e.blockers.push(why);
+                    }
+                }
+            }
+        }
+        let proposals = kept;
         self.evaluations
             .insert(market.event_slug.clone(), evaluations.clone());
 
@@ -1168,6 +1187,30 @@ impl Engine {
 
         for p in proposals {
             self.process_proposal(p, &market, &loc, out);
+        }
+    }
+
+    /// Why the risk check would refuse this opening order for its book's
+    /// spread, as it does: a one-sided book, or a spread over the limit of
+    /// the strategy's own book. `None` for exits and acceptable books (and
+    /// without a book, which the risk check names itself).
+    fn spread_refusal(&self, p: &Proposal) -> Option<String> {
+        if p.kind != IntentKind::Open {
+            return None;
+        }
+        let b = self.book_index(&p.strategy);
+        let limit = self.paper[b].risk.config().max_spread_for(&p.strategy);
+        match self.books.get(&p.token)?.spread() {
+            None => Some("book one-sided".to_owned()),
+            Some(sp) if sp > limit => Some(format!(
+                "spread {sp} > {limit} ({})",
+                if b == MAIN {
+                    "the risk limit"
+                } else {
+                    "the lab book's limit"
+                }
+            )),
+            Some(_) => None,
         }
     }
 
@@ -1540,6 +1583,12 @@ impl Engine {
                 lab: self.cfg.lab.enabled.then(|| self.lab_snapshot(loc, today)),
             });
         }
+        // Closed positions of markets the kernel has forgotten stay out:
+        // their realized P&L lives on in the books' totals and the database,
+        // and the snapshot would otherwise grow with every settled day.
+        let shown = |p: &&Position| {
+            !p.shares.is_zero() || self.markets.contains_key(&p.instrument.event_slug)
+        };
         let main = &self.paper[MAIN];
         let open = self.book_orders(MAIN);
         let exposure = main.risk.exposure(&PortfolioView {
@@ -1556,7 +1605,7 @@ impl Engine {
                 let open = self.book_orders(b);
                 LabBookSnapshot {
                     strategy: strategy.clone(),
-                    positions: book.positions.iter().cloned().collect(),
+                    positions: book.positions.iter().filter(shown).cloned().collect(),
                     exposure: book.risk.exposure(&PortfolioView {
                         positions: &book.positions,
                         open_orders: &open,
@@ -1581,7 +1630,7 @@ impl Engine {
             stats: self.stats.clone(),
             locations,
             health: self.health.values().cloned().collect(),
-            positions: main.positions.iter().cloned().collect(),
+            positions: main.positions.iter().filter(shown).cloned().collect(),
             position_strategy: main
                 .position_strategy
                 .iter()

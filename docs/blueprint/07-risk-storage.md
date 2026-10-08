@@ -99,7 +99,12 @@ max_spread = "0.10"
 
 **Per-strategy caps.** `strategy_caps` gives one strategy (by id) its own
 position, per-market and per-strategy caps and its own spread limit; an
-unset one falls back to the default. The portfolio caps (global, market,
+unset one falls back to the default. The engine checks the spread before
+the risk check does: a proposal to open on a one-sided book, or on one
+wider than its strategy's limit (its lab book's for a lab strategy), waits
+in that strategy's evaluation ("spread 0.079 > 0.05 (the risk limit)")
+instead of being refused on every book update — on 7 October 2026 F was
+refused some 4,500 times in 45 minutes. The portfolio caps (global, market,
 location, daily new exposure, daily loss) count every strategy together.
 Configuration validation refuses an enabled strategy whose one order would
 not fit every cap it meets (position, market, strategy, global, location,

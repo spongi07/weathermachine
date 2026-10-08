@@ -343,6 +343,7 @@ fn paper_lifecycle_signal_risk_fill_settle() {
     assert!(engine.markets().contains_key(&m.event_slug));
     assert_eq!(engine.orders().len(), 3);
     assert!(!engine.snapshot().orders.is_empty());
+    assert_eq!(engine.snapshot().positions.len(), 3, "yesterday's, closed");
     engine.handle(&heartbeat("2026-07-04T01:00:00Z"));
     assert!(!engine.markets().contains_key(&m.event_slug));
     assert_eq!(engine.orders().len(), 0);
@@ -358,7 +359,52 @@ fn paper_lifecycle_signal_risk_fill_settle() {
         3,
         "closed positions keep their realized P&L"
     );
+    assert!(
+        snap.positions.is_empty(),
+        "a forgotten market's closed positions leave the snapshot"
+    );
     assert_eq!(snap.stats.fills_total, 3);
+}
+
+/// A book wider than the risk check allows: the proposal waits in its
+/// strategy's evaluation, with the reason, instead of being refused by the
+/// risk check on every book update.
+#[test]
+fn a_book_the_risk_check_finds_too_wide_waits_in_the_evaluation() {
+    let m = market(vec![
+        ObservationFilter::AllRows,
+        ObservationFilter::WRH_HOURLY_NWS_FAA,
+    ]);
+    let mut c = config(RunMode::Paper);
+    // YES 18 and NO 19 are 0.02 wide, NO 20 0.01.
+    c.risk.max_spread = Price::parse("0.015").unwrap();
+    let mut engine = Engine::new(c, Arc::new(FixedModel(vec![0.985, 0.012, 0.002, 0.001])));
+    let outs = run(
+        &mut engine,
+        scenario(&m, Some(ProviderHealthState::Healthy)),
+        m.fees,
+    );
+    let a = approvals(&outs);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert!(a[0].starts_with("20°C No"), "{a:?}");
+    assert!(
+        outs.iter()
+            .flat_map(|o| o.decisions.iter())
+            .all(|d| d.reasons.iter().all(|r| !r.contains("Spread"))),
+        "no refusal for the spread"
+    );
+    assert_eq!(engine.stats().rejections_total, 0);
+    let snap = engine.snapshot();
+    let yes18 = snap.locations[0]
+        .evaluations
+        .iter()
+        .find(|e| e.bucket_label == "18°C" && e.outcome_side == OutcomeSide::Yes)
+        .expect("A's evaluation of 18 °C");
+    assert!(!yes18.signal);
+    assert_eq!(
+        yes18.blockers,
+        vec!["spread 0.02 > 0.015 (the risk limit)".to_owned()]
+    );
 }
 
 /// Strategy E end to end: after the peak the high's YES offers thin out.

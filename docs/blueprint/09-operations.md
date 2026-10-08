@@ -2,7 +2,7 @@
 
 ## 38. Testing
 
-`cargo test --workspace` (574 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
+`cargo test --workspace` (575 tests, plus the dashboard's) runs in CI against a PostgreSQL 18
 service, alongside the dashboard's own tests and a container smoke test.
 
 | Kind | Where |
@@ -59,7 +59,9 @@ Provider behaviours required by the brief:
 * **Dashboard:** live SSE snapshot (500 ms) and the zero-JS `/lite` page.
   They show provider health and budgets, collector schedule, the knowledge
   delay of each report, gates with reasons, the decision log, positions and
-  orders, and kernel latency (µs).
+  orders, and kernel latency (µs). A closed position stays listed while
+  its market is (two days after its local day); the books' totals and the
+  database keep its result after that.
   The decision log is most of a snapshot's bytes (about 30 lines per
   evaluation, 80 evaluations), so a stream client gets it on connecting and
   when it changes; other events leave it out (`decisions_omitted`) and the
