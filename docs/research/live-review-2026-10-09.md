@@ -114,9 +114,11 @@ known about :24) and that repricing (about :25¾).
    the lab's KNMI rules), marked `knmi_checkpoint` with the reading and the
    report it precedes. `report paper` shows these per strategy apart from
    the routine evaluations ("At KNMI's last reading before each report"),
-   the strategy logs mark them, and the model is still scored on the
-   routine evaluations only. Until now every K line read "KNMI reading not
-   newer than the last METAR".
+   the strategy logs and the strategies' dashboard pages mark them, and the
+   model is still scored on the routine evaluations only. Until now every K
+   line read "KNMI reading not newer than the last METAR"; in the demo the
+   checkpoint line shows K's own condition instead ("KNMI mean 11.7 °C <
+   11.8 °C").
 3. **KNMI is polled faster when a reading is due.** Every reading of
    8 October was found by the poll 4 minutes after its interval, none by
    the one at 3½ minutes; the loop now asks from 3 minutes after each

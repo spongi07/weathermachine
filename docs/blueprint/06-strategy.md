@@ -773,7 +773,8 @@ about :24 and :54). It holds the lines of the strategies that read KNMI
 mean and maximum and the report it precedes, and no model views: the model
 is scored on the routine evaluations only. `report paper` lists these lines
 per strategy apart ("At KNMI's last reading before each report"), and a
-strategy's log marks them.
+strategy's log and its dashboard page mark them ("KNMI reading before the
+report").
 
 **TESTING (G–K).**
 * `wm-strategy/tests/new_strategies.rs`: each strategy's signal, the order
