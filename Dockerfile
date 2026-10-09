@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-#
 # Weather Machine — production image.
 #   build stage : Rust service (release) + Rust/WebAssembly dashboard
 #   final stage : distroless (glibc + CA certificates only), non-root, no shell
@@ -7,11 +5,16 @@
 # Build:   docker build -t weather-machine .
 # Run:     docker run --rm -p 8080:8080 weather-machine demo
 # Deploy:  see docker-compose.yml and docs/deployment/portainer.md
+#
+# Nothing is pulled from Docker Hub, whose anonymous pull limit stopped CI on
+# 9 October 2026: the Rust image comes from Google's mirror of Docker Hub
+# (mirror.gcr.io), and BuildKit's built-in Dockerfile frontend is used (no
+# `# syntax` image; it reads `RUN --mount` too).
 
 ARG RUST_VERSION=1.94.1
 ARG WASM_BINDGEN_VERSION=0.2.129
 
-FROM rust:${RUST_VERSION}-trixie AS build
+FROM mirror.gcr.io/library/rust:${RUST_VERSION}-trixie AS build
 ARG WASM_BINDGEN_VERSION
 ENV CARGO_TERM_COLOR=never \
     CARGO_INCREMENTAL=0 \

@@ -672,15 +672,18 @@ fn RunPanel(snap: Snap, strategy: Memo<Option<StrategyDto>>) -> impl IntoView {
                 .filter(|d| d.strategy == s.id)
                 .cloned()
                 .collect();
-            let trail: Vec<(i64, String)> = snap
+            // A KNMI checkpoint (the last reading before a report, the KNMI
+            // strategies' decisive moment) is marked, as in the copyable log.
+            let trail: Vec<(i64, bool, String)> = snap
                 .decisions
                 .iter()
                 .filter(|d| d.strategy == "evaluation")
                 .flat_map(|d| {
+                    let checkpoint = d.summary.starts_with("KNMI checkpoint");
                     d.details
                         .iter()
                         .filter(|l| s.owns_line(l))
-                        .map(move |l| (d.at_ms, l.clone()))
+                        .map(move |l| (d.at_ms, checkpoint, l.clone()))
                 })
                 .take(30)
                 .collect();
@@ -710,7 +713,15 @@ fn RunPanel(snap: Snap, strategy: Memo<Option<StrategyDto>>) -> impl IntoView {
             .collect::<Vec<_>>();
         let trail_rows = trail
             .iter()
-            .map(|(at, line)| view! { <li><span class="small muted">{fmt::utc_time(*at)}" "</span><span class="mono small">{line.clone()}</span></li> })
+            .map(|(at, checkpoint, line)| {
+                view! {
+                    <li>
+                        <span class="small muted">{fmt::utc_time(*at)}" "</span>
+                        {checkpoint.then(|| view! { <span class="small muted">"(KNMI reading before the report) "</span> })}
+                        <span class="mono small">{line.clone()}</span>
+                    </li>
+                }
+            })
             .collect::<Vec<_>>();
         let order_rows = orders
             .iter()
@@ -732,8 +743,8 @@ fn RunPanel(snap: Snap, strategy: Memo<Option<StrategyDto>>) -> impl IntoView {
                 <div class="panel-title"><span>"THIS RUN"</span><span class="muted small">"since the service started"</span></div>
                 <div class="panel-title sub"><span>"PROPOSALS AND RISK VERDICTS"</span></div>
                 {if prop_rows.is_empty() { view! { <div class="muted small">"None yet."</div> }.into_any() } else { view! { <ul class="plain">{prop_rows}</ul> }.into_any() }}
-                <div class="panel-title sub"><span>"ITS LINES IN THE ROUTINE EVALUATIONS"</span><span class="muted small">"latest 30"</span></div>
-                {if trail_rows.is_empty() { view! { <div class="muted small">"None in the decision log yet (one evaluation per weather report while a market is open)."</div> }.into_any() } else { view! { <ul class="plain trail">{trail_rows}</ul> }.into_any() }}
+                <div class="panel-title sub"><span>"ITS LINES IN THE EVALUATIONS"</span><span class="muted small">"latest 30"</span></div>
+                {if trail_rows.is_empty() { view! { <div class="muted small">"None in the decision log yet (one evaluation per weather report while a market is open; for the KNMI strategies also one at the reading before it)."</div> }.into_any() } else { view! { <ul class="plain trail">{trail_rows}</ul> }.into_any() }}
                 <div class="panel-title sub"><span>"ORDERS"</span></div>
                 {if order_rows.is_empty() {
                     view! { <div class="muted small">"None."</div> }.into_any()

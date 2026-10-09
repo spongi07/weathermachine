@@ -5,7 +5,8 @@
 //!   gates that block trading, its evaluation of every bucket of today's
 //!   market with the prices and what blocks it.
 //! * **This run** (the snapshot's decision log): its proposals with the risk
-//!   verdicts, its lines of the routine evaluations, its orders.
+//!   verdicts, its lines of the evaluations (KNMI checkpoints marked), its
+//!   orders.
 //! * **History** (the database, `report paper`): per day its evaluations,
 //!   signals, blockers, closest calls, proposals, orders and settled P&L.
 
@@ -427,7 +428,7 @@ fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
     }
     let _ = writeln!(
         s,
-        "\n### Its lines in the routine evaluations (latest {TRAIL_LINES})\n"
+        "\n### Its lines in the evaluations (latest {TRAIL_LINES})\n"
     );
     // A KNMI checkpoint (the last reading before a report, the KNMI
     // strategies' decisive moment) is marked as such.
