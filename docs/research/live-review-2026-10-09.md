@@ -59,10 +59,13 @@ puts the day in the model's open-ended forecast-headroom cell `above2`
 far more rise to come; the model expected a large rise that the forecast
 did not. No strategy that trades now uses the model's probability (G's
 veto is off, F and K trade on prices and KNMI), so this costs nothing
-today; splitting the cell (§5.5) is for the next training. An independent
-study finds the same order on Kalshi: the market-implied forecast of the
-next day's high beats the National Blend of Models by about 10 % and leads
-the public forecasts ([Crosier 2026, arXiv:2609.23969](https://arxiv.org/abs/2609.23969)).
+today; splitting the cell (§5.4) is for the next training. An independent
+study finds the same order on Kalshi: an hour into trading, the
+market-implied forecast of the next day's high beats the best public
+forecast, the National Blend of Models, by about 10 % in root-mean-square
+error (in six of seven US cities), and the forecast moves toward the market
+far more than the market toward it
+([Crosier 2026, arXiv:2609.23969](https://arxiv.org/abs/2609.23969)).
 
 ### 3.2 G sells close to the forecast — and that is its edge
 
@@ -133,32 +136,40 @@ Ranked by expected value; each starts as a measurement, none trades money.
    [Notification Service](https://developer.dataplatform.knmi.nl/notification-service)
    announces each new file over MQTT, which its
    [FAQ](https://developer.dataplatform.knmi.nl/faq) names the fastest way
-   to get new files (frequent polling of the Open Data API counts as
-   abuse). If those files arrive well before AWC and TGFTP (150 s), every
+   to get new files (excessive polling for new files counts as abuse). If those files arrive well before AWC and TGFTP (150 s), every
    strategy gains, and D (decided outcomes, off because the bot learns the
    report after the market has repriced) may come back. Next: measure the
    delay with an Open Data API key, then add it as a third METAR source —
    the collector already takes the first of several sources and the report
    shows which delivered first.
-2. **A faster temperature: Schiphol every 12 seconds.** KNMI also lists
-   [actual synoptic observations of Schiphol Airport per 12 seconds](https://data.overheid.nl/en/dataset/56855-meteo-data---actual-synoptic-observations-schiphol-airport-per-12-seconds)
-   (ASCII, CC BY 4.0). If it is live and open, it is minutes ahead of the
-   ten-minute readings and of the METAR — all of K's window and more. Next:
-   check its access and delay.
-3. **The ten-minute readings by notification.** KNMI's recommended way to
-   follow its datasets; it would save the last ≤ 10 s of polling and some
-   requests. The EDR API's quota is 1,000 requests an hour a key
-   ([EDR API](https://developer.dataplatform.knmi.nl/edr-api)).
-4. **F and G in more cities.** Their edges — the favourite–longshot bias
+2. **The ten-minute readings by notification.** KNMI's recommended way to
+   follow its datasets: its
+   [fair-use policy](https://developer.dataplatform.knmi.nl/fair-use) calls
+   a notification faster and cheaper than polling. The loop's polling stays
+   far inside the EDR API's quota of 1,000 requests an hour a key
+   ([EDR API](https://developer.dataplatform.knmi.nl/edr-api)) — 50–60, and
+   at 10 s only while a reading is due — but a notification would save the
+   last ≤ 10 s and most of the requests. The dataset's files are NetCDF,
+   one per ten minutes for all stations, which the bot does not read yet.
+3. **F and G in more cities.** Their edges — the favourite–longshot bias
    and the season's peak slot — are not Amsterdam's own. Polymarket lists
    daily-high markets for other cities too (New York, Chicago, Mexico City,
    Shanghai, Guangzhou, Hong Kong among them). Next: replay F and G at
    traded prices per city before any paper trading; K needs a fast local
    source and stays Schiphol's.
-5. **Split the model's forecast-headroom cell** (§3.1): `above2` from 1.5 °C
+4. **Split the model's forecast-headroom cell** (§3.1): `above2` from 1.5 °C
    upward mixes a 1.5 °C day with an 8 °C morning. At the next training,
    offered as a candidate structure and adopted only if the walk-forward
    test prefers it.
+5. **Schiphol every 12 seconds — for research, not for K.** KNMI also
+   publishes
+   [actual synoptic observations of Schiphol Airport per 12 seconds](https://data.overheid.nl/en/dataset/56855-meteo-data---actual-synoptic-observations-schiphol-airport-per-12-seconds)
+   (CC BY 4.0), but not live: the files are zipped once a day, kept on S3
+   for 100 days and not served by the Data Platform (access through
+   opendata@knmi.nl), so they cannot speed K up. Afterwards they show, at
+   12 s, how the METAR's temperature relates to the ten-minute mean and
+   maximum K and the lab's KNMI rules trigger on — a check on their margins
+   (0.3–0.8 °C over the bucket's edge). Next: ask KNMI for access.
 6. **Count maker rebates.** Weather takers pay 0.05 × p × (1 − p) a share
    and makers receive 25 % of those fees as rebates
    ([Polymarket](https://docs.polymarket.com/market-makers/maker-rebates);
@@ -167,7 +178,11 @@ Ranked by expected value; each starts as a measurement, none trades money.
    cents a fill at 0.92, so it changes no decision.
 7. **Not worth a rule: ladder arbitrage.** Buying every bucket when the
    asks sum to under $1 after fees is riskless in principle, but such gaps
-   are rare and last seconds ([arXiv:2605.00864](https://arxiv.org/abs/2605.00864));
+   are rare, brief and thin: in Polymarket's NBA markets 75 million book
+   snapshots over 173 games held 7 executable single-market gaps, open a
+   median 3.6 s, and three in four of the combinatorial ones only about
+   15 shares deep
+   ([Cheng et al. 2026, arXiv:2605.00864](https://arxiv.org/abs/2605.00864));
    with 11 buckets and fees of about 3¢ for the whole ladder, a gap would
    have to be wide.
 
