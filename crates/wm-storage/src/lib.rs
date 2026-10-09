@@ -33,6 +33,13 @@ pub use restore::RestoreFillRow;
 /// Embedded migrations (`/migrations`).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+/// Rows one retention statement deletes from the journal
+/// ([`PgStore::prune_journal_books`]). The rows are the oldest, so none is
+/// cached: 20,000 took 1.7 s on the production host (October 2026), past
+/// SQLx's one-second slow-statement warning, and an hourly pass deletes
+/// that many or more; 5,000 take about 0.4 s.
+pub const JOURNAL_PRUNE_CHUNK: i64 = 5_000;
+
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -423,7 +430,7 @@ impl PgStore {
     }
 
     /// Delete journal order-book updates and market-stream heartbeats older
-    /// than `before`, in chunks.
+    /// than `before`, in chunks of [`JOURNAL_PRUNE_CHUNK`] rows.
     /// Recent runs stay exactly replayable; older market history lives on in
     /// the sampled `orderbook_snapshots`. Returns the number of rows deleted.
     pub async fn prune_journal_books(&self, before: DateTime<Utc>) -> Result<u64> {
@@ -434,14 +441,15 @@ impl PgStore {
                    SELECT ctid FROM event_journal
                    WHERE kind IN ('order_book_update', 'market_stream_heartbeat')
                      AND available_at < $1
-                   LIMIT 20000)",
+                   LIMIT $2)",
             )
             .bind(before)
+            .bind(JOURNAL_PRUNE_CHUNK)
             .execute(&self.pool)
             .await?
             .rows_affected();
             total += n;
-            if n < 20_000 {
+            if n < JOURNAL_PRUNE_CHUNK.unsigned_abs() {
                 return Ok(total);
             }
         }

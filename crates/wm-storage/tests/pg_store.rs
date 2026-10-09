@@ -591,3 +591,54 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
     );
     db.drop_db().await;
 }
+
+async fn insert_books(
+    s: &PgStore,
+    run: &RunId,
+    seqs: std::ops::RangeInclusive<u64>,
+    at: DateTime<Utc>,
+) {
+    let events: Vec<EventEnvelope> = seqs
+        .map(|i| book_event(i, at + Duration::milliseconds(i as i64), "tok-a"))
+        .collect();
+    s.persist_engine_batch(
+        run,
+        wm_storage::EngineBatch {
+            events: &events,
+            decisions: &[],
+            orders: &[],
+            fills: &[],
+            books: &[],
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Retention deletes in statements of `JOURNAL_PRUNE_CHUNK` rows until none
+/// is left: an exact multiple of the chunk and one row over both go whole,
+/// and recent rows stay.
+#[tokio::test]
+async fn journal_retention_deletes_in_chunks_until_done() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let run = RunId::deterministic(22);
+    let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+    s.record_run(&run, RunMode::Paper, "m", &serde_json::json!({}), now)
+        .await
+        .unwrap();
+    let old = now - Duration::days(10);
+    let cutoff = now - Duration::days(7);
+    let chunk = u64::try_from(wm_storage::JOURNAL_PRUNE_CHUNK).unwrap();
+
+    insert_books(s, &run, 1..=2 * chunk, old).await;
+    insert_books(s, &run, 2 * chunk + 1..=2 * chunk + 3, now).await;
+    assert_eq!(s.prune_journal_books(cutoff).await.unwrap(), 2 * chunk);
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 3);
+
+    insert_books(s, &run, 2 * chunk + 4..=3 * chunk + 4, old).await;
+    assert_eq!(s.prune_journal_books(cutoff).await.unwrap(), chunk + 1);
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 3);
+    assert_eq!(s.prune_journal_books(cutoff).await.unwrap(), 0);
+    db.drop_db().await;
+}

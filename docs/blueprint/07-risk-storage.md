@@ -207,7 +207,10 @@ and all other events are never shed.
 **Bounded growth.** Order-book updates are ~99 % of engine inputs (about
 1.5 million a day for three days of Amsterdam markets). They are journaled
 with 5 levels per side and deleted from the journal after
-`journal_book_retention_days` (7; `WM_JOURNAL_RETENTION_DAYS`, 0 = keep).
+`journal_book_retention_days` (7; `WM_JOURNAL_RETENTION_DAYS`, 0 = keep),
+hourly, 5,000 rows a statement (`JOURNAL_PRUNE_CHUNK`): the oldest rows
+are never cached, and 20,000 took 1.7 s on the production host, past
+SQLx's one-second slow-statement warning.
 Market history lives on in `orderbook_snapshots` (changes only, ≤ 1 per
 10 s per token). Nightly backups exclude the replay journal by default
 (`WM_BACKUP_JOURNAL=true` includes it). In memory the engine keeps a
