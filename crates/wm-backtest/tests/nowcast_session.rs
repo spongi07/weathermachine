@@ -298,3 +298,142 @@ fn k_buys_the_no_of_the_high_before_the_metar_that_kills_it() {
         Some(utc("2026-07-01T11:50:00Z"))
     );
 }
+
+/// The KNMI strategies' records in a run: the evaluation records carrying
+/// a KNMI checkpoint.
+fn checkpoints(d: &[wm_core::trading::DecisionRecord]) -> Vec<&wm_core::trading::DecisionRecord> {
+    d.iter()
+        .filter(|d| {
+            d.strategy.as_str() == "evaluation" && d.inputs.get("knmi_checkpoint").is_some()
+        })
+        .collect()
+}
+
+/// The evaluation lines of a record.
+fn lines(d: &wm_core::trading::DecisionRecord) -> Vec<String> {
+    d.outputs["evaluations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_last_reading_before_a_report_records_the_knmi_strategies_decisive_moment() {
+    let m = wm_core::synthetic::synthetic_temperature_market(
+        &loc(),
+        &eham(),
+        NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+        chrono_tz::Europe::Amsterdam,
+        13,
+        24,
+        utc("2026-06-30T20:00:00Z"),
+    );
+    // F evaluates too; it does not read KNMI.
+    let mut cfg = config();
+    cfg.peak_slot.enabled = true;
+    let mut s = SimulationSession::new(
+        cfg,
+        SimConfig::default(),
+        Duration::hours(2),
+        Arc::new(NoEdgeModel),
+    );
+    let mut h =
+        ProviderHealthSnapshot::new(ProviderId::awc(), Some(eham()), utc("2026-06-30T21:00:00Z"));
+    h.state = ProviderHealthState::Healthy;
+    s.push(env(
+        utc("2026-06-30T21:00:00Z"),
+        WeatherMachineEvent::ProviderHealthChanged(ProviderHealthEvent {
+            previous_state: None,
+            snapshot: h,
+        }),
+    ));
+    s.push(env(
+        utc("2026-06-30T21:00:01Z"),
+        WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+    ));
+    let mut t = utc("2026-06-30T22:25:00Z");
+    while t <= utc("2026-07-01T11:25:00Z") {
+        let whole = if t < utc("2026-07-01T09:00:00Z") {
+            15
+        } else {
+            18
+        };
+        s.push(report(t, whole));
+        t += Duration::minutes(30);
+    }
+    let out = s.run_until(utc("2026-07-01T11:30:00Z"));
+    assert!(checkpoints(&out.decisions).is_empty(), "no reading yet");
+    let routine: Vec<_> = out
+        .decisions
+        .iter()
+        .filter(|d| d.strategy.as_str() == "evaluation")
+        .collect();
+    let last = routine.last().unwrap();
+    assert!(
+        lines(last).iter().any(|l| l.starts_with("F ")) && last.inputs.get("views").is_some(),
+        "the routine evaluation keeps every strategy and the model's views"
+    );
+
+    // 11:44: the 11:30–11:40 reading. The 11:50 one comes before the 11:55
+    // report: no checkpoint.
+    s.push(no_book(&m, utc("2026-07-01T11:44:00Z")));
+    s.push(reading(
+        "2026-07-01T11:40:00Z",
+        182,
+        184,
+        "2026-07-01T11:44:00Z",
+    ));
+    let out = s.run_until(utc("2026-07-01T11:44:00Z"));
+    assert!(
+        checkpoints(&out.decisions).is_empty(),
+        "{:?}",
+        out.decisions
+    );
+
+    // 11:54: the 11:40–11:50 reading, the last before the 11:55 report — K's
+    // decisive moment: 18.9 °C is over 18.8 °C, so K signals and buys. Its
+    // line is recorded, F's is not, and the record carries no model views
+    // (the model is scored on the routine evaluations only).
+    s.push(no_book(&m, utc("2026-07-01T11:54:00Z")));
+    s.push(reading(
+        "2026-07-01T11:50:00Z",
+        189,
+        191,
+        "2026-07-01T11:54:00Z",
+    ));
+    let out = s.run_until(utc("2026-07-01T11:54:00Z"));
+    let cp = checkpoints(&out.decisions);
+    assert_eq!(cp.len(), 1, "{:?}", out.decisions);
+    let c = &cp[0].inputs["knmi_checkpoint"];
+    assert_eq!(c["interval_end"], "2026-07-01T11:50:00Z");
+    assert_eq!(c["report_at"], "2026-07-01T11:55:00Z");
+    assert_eq!(
+        (c["mean_tenths"].as_i64(), c["max_tenths"].as_i64()),
+        (Some(189), Some(191))
+    );
+    assert!(cp[0].inputs.get("views").is_none());
+    let l = lines(cp[0]);
+    assert!(
+        !l.is_empty() && l.iter().all(|x| x.starts_with("K ")),
+        "{l:?}"
+    );
+    assert!(l.iter().any(|x| x.contains("SIGNAL")), "{l:?}");
+    assert!(
+        cp[0].summary.starts_with(
+            "KNMI checkpoint: the 11:40–11:50 UTC reading, the last before the 11:55 UTC report"
+        ),
+        "{}",
+        cp[0].summary
+    );
+    assert_eq!(out.approved.len(), 1, "K buys at its decisive moment");
+
+    // The report itself: a routine evaluation again, with F.
+    s.push(report(utc("2026-07-01T11:55:00Z"), 19));
+    let out = s.run_until(utc("2026-07-01T11:58:00Z"));
+    assert!(checkpoints(&out.decisions).is_empty());
+    assert!(out.decisions.iter().any(
+        |d| d.strategy.as_str() == "evaluation" && lines(d).iter().any(|l| l.starts_with("F "))
+    ));
+}

@@ -16,7 +16,7 @@ market` replays all of them at traded prices on the settled Amsterdam
 markets, each with a variant or a control, and judges each family out of
 sample. Since 2 October 2026 they also run in the live service as
 **paper strategies**, each on a paper book of its own, so they never block
-A–K or each other; 18 of them since 8 October (§7). None trades money: a family that holds up on days
+A–K or each other; 17 of them since 9 October (§7). None trades money: a family that holds up on days
 it was not chosen on, again on the next run's new days and in its paper
 record is a candidate, nothing more.
 
@@ -380,7 +380,10 @@ readings as A–K, at the same moments, and their record is kept apart. All
 25 ran from 2 October 2026; since 8 October the shipped configuration
 switches off the six families the replay refuted (L9, L12, L17, L19, L21,
 L23) and L22, whose 1–5¢ band the far tails never offer
-([strategy review §3.5](strategy-review.md#35-lab-notes)). Their replay
+([strategy review §3.5](strategy-review.md#35-lab-notes)); since 9 October
+L1 too: its shield brought the next-degree maker to about zero, the
+replay's later days lost $25.01 over 41 trades and its first live week
+$7.00 over three ([live review](live-review-2026-10-09.md)). Their replay
 code stays.
 
 **Own books.** Each lab strategy trades a paper book of its own: its

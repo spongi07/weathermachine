@@ -18,7 +18,7 @@ live run · ⏳ not started · ⛔ deliberately blocked.
 | 10 | Split/unwind backtest | 🟡 strategy C (research-only) and unwind styles ready | C vs wait-and-confirm on identical data, net of all costs |
 | 11 | Forecast integration | ✅ Open-Meteo day-1 series live + history, forecast rise and headroom, prequential evaluation with placebo control and automatic adoption, walk-forward model-structure selection (§36b); 🟡 verdicts on real EHAM data come from the trainings on the host | A forecast feature improves walk-forward calibration (decided by the evaluation, §19) |
 | 12 | Portfolio research | 🟡 scenario exposure and limits built | Correlation across days/cities measured; limits reviewed |
-| 13 | Paper trading | ✅ running in Portainer since late September 2026 with the model trained on the host; open paper positions, realized P&L and the daily limits carried across restarts; F, G and K live (I until 8 October), the strategy lab (L1–L25) on books of their own since 2 October (18 families since 8 October) | 🟡 ≥ 4 weeks of paper results consistent with the replays (`report paper` against `research market`) |
+| 13 | Paper trading | ✅ running in Portainer since late September 2026 with the model trained on the host; open paper positions, realized P&L and the daily limits carried across restarts; F, G and K live (I until 8 October), the strategy lab (L1–L25) on books of their own since 2 October (17 families since 9 October) | 🟡 ≥ 4 weeks of paper results consistent with the replays (`report paper` against `research market`) |
 | 14 | Live trading | ⛔ | See [09-operations.md §42](09-operations.md#42-live-trading) |
 
 ## First data experiment (brief §37) — how to run it

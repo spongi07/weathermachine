@@ -135,6 +135,12 @@ pub fn is_lab_id(id: &str) -> bool {
     family_of(id).is_some_and(|f| IDS[usize::from(f - 1)] == id)
 }
 
+/// Whether family `family` reads KNMI's ten-minute readings
+/// ([`KNMI_FAMILIES`]).
+pub fn reads_knmi(family: u8) -> bool {
+    KNMI_FAMILIES.contains(&family)
+}
+
 /// The engine id of family `family` (1–25).
 pub fn id_of(family: u8) -> Option<&'static str> {
     IDS.get(usize::from(family.checked_sub(1)?)).copied()
@@ -398,6 +404,10 @@ impl Strategy for LabStrategy {
 
     fn enabled(&self) -> bool {
         self.cfg.runs(self.family)
+    }
+
+    fn reads_nowcast(&self) -> bool {
+        reads_knmi(self.family)
     }
 
     fn evaluate(&mut self, ctx: &StrategyContext<'_>) -> StrategyOutput {

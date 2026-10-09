@@ -150,7 +150,8 @@ pub struct KnmiSection {
     /// EDR location id; empty: the WIGOS id of the station's WMO number
     /// (`0-20000-0-06240` for Schiphol).
     pub location_id: String,
-    /// Poll interval, seconds.
+    /// Poll interval while a reading is due (the first three minutes from
+    /// three minutes after each interval's end), seconds; slower after that.
     pub poll_seconds: u64,
     /// Each poll asks for the readings of the last this-many minutes.
     pub lookback_minutes: i64,
@@ -163,7 +164,7 @@ impl Default for KnmiSection {
             mean_parameter: "ta".into(),
             max_parameter: "tx".into(),
             location_id: String::new(),
-            poll_seconds: 30,
+            poll_seconds: 10,
             lookback_minutes: 40,
         }
     }
@@ -998,8 +999,10 @@ impl AppConfig {
             bail!("forecast.min_eval_days must be ≥ 30");
         }
         let k = &self.file.knmi;
-        if k.poll_seconds < 20 {
-            bail!("knmi.poll_seconds must be ≥ 20 (the readings change every ten minutes)");
+        if !(10..=60).contains(&k.poll_seconds) {
+            bail!(
+                "knmi.poll_seconds must be 10..=60 (the cadence while a reading is due; the readings change every ten minutes)"
+            );
         }
         if !(10..=180).contains(&k.lookback_minutes) {
             bail!("knmi.lookback_minutes must be 10..=180");
@@ -1670,9 +1673,9 @@ mod tests {
             wm_weather::knmi::DEFAULT_BASE_URL
         );
         // The strategy lab runs every family's main rule but the seven
-        // switched off on 8 October 2026, paper only, with the documented
-        // defaults, and reads the documented inputs.
-        let off = [9u8, 12, 17, 19, 21, 22, 23];
+        // switched off on 8 October 2026 and L1 (9 October), paper only, with
+        // the documented defaults, and reads the documented inputs.
+        let off = [1u8, 9, 12, 17, 19, 21, 22, 23];
         assert_eq!(
             st.lab,
             wm_strategy::LabConfig {
@@ -1713,6 +1716,20 @@ mod tests {
             AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
         cfg.file.providers.awc.policy.min_interval = std::time::Duration::from_secs(1);
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn knmi_cadence_is_validated() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        // The shipped cadence while a reading is due: 10 s, inside the
+        // provider's 5 s minimum interval.
+        assert_eq!(cfg.file.knmi.poll_seconds, 10);
+        assert!(cfg.file.providers.knmi.policy.min_interval <= std::time::Duration::from_secs(10));
+        for (secs, ok) in [(9, false), (10, true), (60, true), (61, false)] {
+            cfg.file.knmi.poll_seconds = secs;
+            assert_eq!(cfg.validate().is_ok(), ok, "{secs} s");
+        }
     }
 
     #[test]

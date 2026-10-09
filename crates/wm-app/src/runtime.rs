@@ -922,7 +922,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 tasks.push(tokio::spawn(knmi_loop(
                     client,
                     targets,
-                    std::time::Duration::from_secs(cfg.file.knmi.poll_seconds.max(20)),
+                    std::time::Duration::from_secs(cfg.file.knmi.poll_seconds.max(10)),
                     Duration::minutes(cfg.file.knmi.lookback_minutes),
                     events_tx.clone(),
                     Arc::clone(&side),
@@ -1731,28 +1731,43 @@ async fn knmi_loop(
 }
 
 /// How long the KNMI loop waits before asking again. KNMI publishes each
-/// ten-minute reading some minutes after its interval ends (4–5 minutes
-/// seen live): once every station holds its newest reading, nothing new can
-/// come before the next interval's end plus [`KNMI_EARLIEST_DELAY`], so the
-/// loop sleeps until then and polls every `poll` from there on. A station
-/// without a reading yet keeps the plain cadence.
+/// ten-minute reading some minutes after its interval ends (3½–4 minutes
+/// seen live in October 2026): once every station holds its newest reading,
+/// nothing new can come before the next interval's end plus
+/// [`KNMI_EARLIEST_DELAY`], so the loop sleeps until then and polls every
+/// `poll` for [`KNMI_FAST_WINDOW`] — K races the METAR, and every second of
+/// it counts. A reading later than that is asked for every 30 s, after a
+/// quarter of an hour every minute, so an outage cannot use up the
+/// provider's daily budget. Without a reading yet: every 30 s.
 fn knmi_pause(
     now: DateTime<Utc>,
     newest: Option<DateTime<Utc>>,
     poll: std::time::Duration,
 ) -> std::time::Duration {
+    let slow = std::time::Duration::from_secs(30).max(poll);
     let Some(newest) = newest else {
-        return poll;
+        return slow;
     };
     let due = newest + Duration::minutes(10) + KNMI_EARLIEST_DELAY;
-    (due - now)
-        .to_std()
-        .map_or(poll, |d| d.clamp(poll, std::time::Duration::from_secs(600)))
+    if let Ok(wait) = (due - now).to_std() {
+        return wait.clamp(poll, std::time::Duration::from_secs(600));
+    }
+    let late = now - due;
+    if late < KNMI_FAST_WINDOW {
+        poll
+    } else if late < Duration::minutes(15) {
+        slow
+    } else {
+        std::time::Duration::from_secs(60).max(poll)
+    }
 }
 
 /// The soonest after its interval's end a KNMI ten-minute reading is
 /// expected; the loop resumes polling from there.
-const KNMI_EARLIEST_DELAY: Duration = Duration::minutes(2);
+const KNMI_EARLIEST_DELAY: Duration = Duration::minutes(3);
+
+/// How long after [`KNMI_EARLIEST_DELAY`] the loop keeps its fast cadence.
+const KNMI_FAST_WINDOW: Duration = Duration::minutes(3);
 
 /// A location whose day-1 forecast is fetched.
 #[derive(Debug, Clone)]
@@ -2120,39 +2135,67 @@ mod tests {
     #[test]
     fn knmi_polls_only_when_a_reading_can_be_due() {
         let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
-        let poll = std::time::Duration::from_secs(30);
-        // The 20:50 reading arrived at 20:54:17: the 21:00 one is due from 21:02.
+        let secs = std::time::Duration::from_secs;
+        let poll = secs(10);
+        let pause = |now: &str| knmi_pause(t(now), Some(t("2026-10-03T20:50:00Z")), poll);
+        // The 20:50 reading arrived at 20:54:17: the 21:00 one is due from 21:03.
+        assert_eq!(pause("2026-10-03T20:54:17Z"), secs(8 * 60 + 43));
+        // From then on, every 10 s for three minutes …
+        assert_eq!(pause("2026-10-03T21:03:00Z"), poll);
+        assert_eq!(pause("2026-10-03T21:05:50Z"), poll);
+        // … then every 30 s, and after a quarter of an hour every minute: an
+        // outage cannot use up the daily budget.
+        assert_eq!(pause("2026-10-03T21:06:00Z"), secs(30));
+        assert_eq!(pause("2026-10-03T21:17:59Z"), secs(30));
+        assert_eq!(pause("2026-10-03T21:18:00Z"), secs(60));
+        assert_eq!(pause("2026-10-03T23:30:00Z"), secs(60));
+        assert_eq!(
+            knmi_pause(t("2026-10-03T21:00:00Z"), None, poll),
+            secs(30),
+            "no reading yet"
+        );
+        // A cadence slower than those steps is kept.
         assert_eq!(
             knmi_pause(
-                t("2026-10-03T20:54:17Z"),
+                t("2026-10-03T21:20:00Z"),
+                Some(t("2026-10-03T20:50:00Z")),
+                secs(90)
+            ),
+            secs(90)
+        );
+        // At most ten minutes' sleep, at least the cadence.
+        assert_eq!(
+            knmi_pause(
+                t("2026-10-03T20:40:00Z"),
                 Some(t("2026-10-03T20:50:00Z")),
                 poll
             ),
-            std::time::Duration::from_secs(7 * 60 + 43)
+            secs(600)
         );
-        // From then on, every 30 s until it is in.
         assert_eq!(
             knmi_pause(
-                t("2026-10-03T21:02:10Z"),
+                t("2026-10-03T21:02:58Z"),
                 Some(t("2026-10-03T20:50:00Z")),
                 poll
             ),
             poll
         );
-        assert_eq!(
-            knmi_pause(
-                t("2026-10-03T21:30:00Z"),
-                Some(t("2026-10-03T20:50:00Z")),
-                poll
-            ),
-            poll,
-            "a late reading keeps the cadence"
-        );
-        assert_eq!(
-            knmi_pause(t("2026-10-03T21:00:00Z"), None, poll),
-            poll,
-            "no reading yet"
-        );
+    }
+
+    #[test]
+    fn knmi_requests_stay_inside_the_daily_budget() {
+        // Readings never arrive (an outage) from 00:00: the loop's requests
+        // over a day stay well under the provider's 4,000.
+        let t0: DateTime<Utc> = "2026-10-03T00:00:00Z".parse().unwrap();
+        let newest = Some(t0 - Duration::minutes(10));
+        let mut now = t0;
+        let mut requests = 0;
+        while now < t0 + Duration::days(1) {
+            requests += 1;
+            now += Duration::from_std(knmi_pause(now, newest, std::time::Duration::from_secs(10)))
+                .unwrap();
+        }
+        assert!(requests < 1_600, "{requests}");
     }
     use wm_core::market::BookLevel;
     use wm_core::units::{Price, Shares};

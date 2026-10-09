@@ -353,8 +353,8 @@ beyond the KNMI key:
 
 * **KNMI** (`WM_KNMI_API_KEY`): Schiphol's ten-minute readings with global
   radiation, and after each new reading one request each for Voorschoten,
-  De Bilt and Berkhout — about 140 requests an hour in all, well inside a
-  registered key's 1,000. Without the key the KNMI rules stay idle (one
+  De Bilt and Berkhout — about 50 requests an hour in all (every 10 s only
+  while a reading is due), well inside a registered key's 1,000. Without the key the KNMI rules stay idle (one
   alert says so).
 * **Polymarket Data API** (public, no key): today's taker trades every
   20 s for L18–L21, and once a day the settled markets on which every taker
@@ -396,6 +396,9 @@ everything. The report reads it back, day by day:
   blockers and then the highest ask; for the other rules (G–K, the lab) by
   fewest blockers and then the EV, since a rule's probability only holds
   once its trigger fires;
+* for K and the lab's KNMI rules also the same at KNMI's last reading before
+  each report ("At KNMI's last reading before each report"): their decisive
+  moment, which the evaluation after the report cannot show;
 * the model against the market on the bucket that won: average
   probability, log loss, and who was sure (≥ 0.90) first. Evaluations
   where that bucket still lay in the model's open last cell ("≥ high + 3")

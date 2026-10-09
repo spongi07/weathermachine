@@ -659,10 +659,13 @@ slippage_allowance = "0.01"
 # Off since 8 October 2026 (docs/research/strategy-review.md §3.5): the
 # families the replay refuted (L9, L12, L17, L19, L21, L23; L19 lost $613.09
 # on the later days and held both sides of a bucket live) and L22, whose
-# 1–5¢ band the far tails never offer. Their replay code stays.
+# 1–5¢ band the far tails never offer. L1 since 9 October 2026
+# (docs/research/live-review-2026-10-09.md): its shield brought the
+# next-degree maker to about zero, the replay's later days lost $25.01 over
+# 41 trades and its first live week $7.00 over three. Their replay code stays.
 [strategies.lab]
 enabled = true
-disabled = ["L9", "L12", "L17", "L19", "L21", "L22", "L23"]
+disabled = ["L1", "L9", "L12", "L17", "L19", "L21", "L22", "L23"]
 variants = []                     # e.g. ["L2"]: the margin of 0.6 °C instead of 0.3 °C
 notional = "20.00"                # cost of one trade at its price (L3: F's 100 shares)
 slippage_allowance = "0.005"      # in the expected profit of a taker buy
@@ -738,7 +741,7 @@ enabled = true
 mean_parameter = "ta"             # mean 1.5 m air temperature over the ten minutes
 max_parameter = "tx"              # its maximum
 location_id = ""                  # empty: the WIGOS id of the station's WMO number (0-20000-0-06240)
-poll_seconds = 30                 # while a reading can be due (from 2 min after each interval's end)
+poll_seconds = 10                 # while a reading is due (3–6 min after each interval's end; then every 30 s, after 15 min every minute)
 lookback_minutes = 40
 
 # What the strategy lab reads beyond A–K's inputs (with [strategies.lab]).

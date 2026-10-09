@@ -5,7 +5,7 @@ use crate::snapshot::{
     EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LocationSnapshot,
     NeighbourSnapshot, ViewSnapshot,
 };
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -559,7 +559,7 @@ impl Engine {
                 self.temps.apply_observation(&o.observation);
                 self.note_report(&o.observation);
                 if let Some(i) = self.location_index_for_station(o.observation.station()) {
-                    self.evaluate_location(i, true, &mut out);
+                    self.evaluate_location(i, Record::Report, &mut out);
                 }
             }
             WeatherMachineEvent::WeatherCorrection(c) => {
@@ -574,7 +574,7 @@ impl Engine {
                     c.current.version
                 ));
                 if let Some(i) = self.location_index_for_station(&c.current.key.station) {
-                    self.evaluate_location(i, true, &mut out);
+                    self.evaluate_location(i, Record::Report, &mut out);
                 }
             }
             WeatherMachineEvent::ForecastUpdate(f) => {
@@ -595,7 +595,7 @@ impl Engine {
                                 received_at: env.available_at,
                             },
                         );
-                        self.evaluate_location(i, false, &mut out);
+                        self.evaluate_location(i, Record::None, &mut out);
                     }
                 }
             }
@@ -612,7 +612,15 @@ impl Engine {
                 if newer {
                     self.nowcasts.insert(o.station.clone(), o.clone());
                     if let Some(i) = self.location_index_for_station(&o.station) {
-                        self.evaluate_location(i, false, &mut out);
+                        // The last reading before a routine report is the
+                        // KNMI strategies' decisive moment: it is recorded.
+                        let record =
+                            knmi_checkpoint(o.interval_end, &self.cfg.locations[i].routine_minutes)
+                                .map_or(Record::None, |report_at| Record::KnmiCheckpoint {
+                                    interval_end: o.interval_end,
+                                    report_at,
+                                });
+                        self.evaluate_location(i, record, &mut out);
                     }
                 }
             }
@@ -627,7 +635,7 @@ impl Engine {
                 let loc = m.location.clone();
                 self.markets.insert(m.event_slug.clone(), m);
                 if let Some(i) = self.location_index(&loc) {
-                    self.evaluate_location(i, false, &mut out);
+                    self.evaluate_location(i, Record::None, &mut out);
                 }
             }
             WeatherMachineEvent::OrderBookUpdate(b) => {
@@ -644,7 +652,7 @@ impl Engine {
                         .map(|m| m.location.clone())
                     && let Some(i) = self.location_index(&loc)
                 {
-                    self.evaluate_location(i, false, &mut out);
+                    self.evaluate_location(i, Record::None, &mut out);
                 }
             }
             WeatherMachineEvent::MarketStreamHeartbeat(h) => {
@@ -682,7 +690,7 @@ impl Engine {
                 if self.cfg.lab.enabled {
                     for loc in touched {
                         if let Some(i) = self.location_index(&loc) {
-                            self.evaluate_location(i, false, &mut out);
+                            self.evaluate_location(i, Record::None, &mut out);
                         }
                     }
                 }
@@ -694,12 +702,12 @@ impl Engine {
             WeatherMachineEvent::Timer(t) => match &t.kind {
                 TimerKind::Evaluate { location } => {
                     if let Some(i) = self.location_index(location) {
-                        self.evaluate_location(i, false, &mut out);
+                        self.evaluate_location(i, Record::None, &mut out);
                     }
                 }
                 TimerKind::Heartbeat => {
                     for i in 0..self.cfg.locations.len() {
-                        self.evaluate_location(i, false, &mut out);
+                        self.evaluate_location(i, Record::None, &mut out);
                     }
                     self.forget_history();
                 }
@@ -1002,7 +1010,7 @@ impl Engine {
             .cloned()
     }
 
-    fn evaluate_location(&mut self, idx: usize, from_weather: bool, out: &mut EngineOutput) {
+    fn evaluate_location(&mut self, idx: usize, record: Record, out: &mut EngineOutput) {
         let Some(loc) = self.cfg.locations.get(idx).cloned() else {
             return;
         };
@@ -1036,6 +1044,8 @@ impl Engine {
             .collect();
         let mut proposals: Vec<Proposal> = Vec::new();
         let mut evaluations: Vec<BucketEvaluation> = Vec::new();
+        // The strategies whose lines a KNMI checkpoint records.
+        let mut nowcast_readers: HashSet<StrategyId> = HashSet::new();
         if complete && !views.is_empty() {
             let model = Arc::clone(&self.model);
             let today = local_date(self.now, loc.timezone);
@@ -1093,6 +1103,9 @@ impl Engine {
                 let o = s.evaluate(&ctx);
                 proposals.extend(o.proposals);
                 evaluations.extend(o.evaluations);
+                if s.reads_nowcast() {
+                    nowcast_readers.insert(s.id().clone());
+                }
             }
         }
         // Unwind runs even when views are incomplete (exits are risk-reducing).
@@ -1134,23 +1147,56 @@ impl Engine {
         self.evaluations
             .insert(market.event_slug.clone(), evaluations.clone());
 
-        if from_weather {
+        if let Record::KnmiCheckpoint {
+            interval_end,
+            report_at,
+        } = record
+        {
+            let mine: Vec<&BucketEvaluation> = evaluations
+                .iter()
+                .filter(|e| nowcast_readers.contains(&e.strategy))
+                .collect();
+            if !mine.is_empty() {
+                let id = self.alloc_decision();
+                let reading = self.nowcasts.get(&loc.station);
+                let tenths = |t: Option<wm_core::units::TempC>| t.map(|t| t.tenths());
+                let rec = DecisionRecord {
+                    decision_id: id,
+                    strategy: StrategyId::from_static("evaluation"),
+                    at: self.now,
+                    location: loc.location.clone(),
+                    event_slug: Some(market.event_slug.clone()),
+                    summary: format!(
+                        "KNMI checkpoint: the {}–{} UTC reading, the last before the {} UTC report; {} line(s) of the strategies that read it; closest: {}",
+                        (interval_end - Duration::minutes(10)).format("%H:%M"),
+                        interval_end.format("%H:%M"),
+                        report_at.format("%H:%M"),
+                        mine.len(),
+                        closest_evaluation(mine.iter().copied())
+                            .map_or_else(|| "none priced".to_owned(), evaluation_line)
+                    ),
+                    // No views: the model against the market is scored on
+                    // the routine evaluations only.
+                    inputs: serde_json::json!({ "knmi_checkpoint": {
+                        "interval_end": interval_end,
+                        "report_at": report_at,
+                        "mean_tenths": reading.and_then(|r| tenths(r.mean)),
+                        "max_tenths": reading.and_then(|r| tenths(r.max)),
+                    } }),
+                    outputs: serde_json::json!({
+                        "evaluations": mine.iter().map(|e| evaluation_line(e)).collect::<Vec<_>>()
+                    }),
+                    approved: false,
+                    reasons: Vec::new(),
+                };
+                self.push_decision(rec.clone());
+                out.decisions.push(rec);
+            }
+        }
+        if record == Record::Report {
             let id = self.alloc_decision();
             let blockers: Vec<String> = evaluations.iter().map(evaluation_line).collect();
-            // The bucket that came closest to a trade: the fewest blockers,
-            // then the highest EV. A rule's EV assumes its trigger holds, so
-            // EV alone would crown the line furthest from trading (K's fixed
-            // 0.94 against a NO offered at 0.001).
-            let blocked = |e: &BucketEvaluation| if e.signal { 0 } else { e.blockers.len() };
-            let closest = evaluations
-                .iter()
-                .filter_map(|e| e.ev_per_share.map(|ev| (ev, e)))
-                .min_by(|a, b| {
-                    blocked(a.1)
-                        .cmp(&blocked(b.1))
-                        .then_with(|| b.0.total_cmp(&a.0))
-                })
-                .map(|(_, e)| e);
+            let closest = closest_evaluation(evaluations.iter());
             let rec = DecisionRecord {
                 decision_id: id,
                 strategy: StrategyId::from_static("evaluation"),
@@ -1748,6 +1794,65 @@ fn strategy_tag(s: &StrategyId) -> &str {
 /// `A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge …`.
 /// A maker (G, J) also names the bid it would rest, where its EV is taken:
 /// `G 20°C NO · ask 0.26 · bid 0.24 (maker) · p 0.248 · EV +0.0078 — …`.
+/// Which evaluation record an evaluation leaves in the decision log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// None: book updates, timers, forecasts, trades.
+    None,
+    /// The routine evaluation after a weather report (every strategy).
+    Report,
+    /// KNMI's last reading before a routine report (the strategies that read
+    /// it): their decisive moment.
+    KnmiCheckpoint {
+        interval_end: DateTime<Utc>,
+        report_at: DateTime<Utc>,
+    },
+}
+
+/// The routine report a ten-minute reading ending at `interval_end` is the
+/// last one before: the first routine report time after its end, when that
+/// lies at most ten minutes later (the next reading ends with or after the
+/// report, and arrives minutes later still). Schiphol reports at :25 and
+/// :55, so the readings ending at :20 and :50; a station reporting at :00
+/// would have those ending at :50.
+fn knmi_checkpoint(interval_end: DateTime<Utc>, routine_minutes: &[u8]) -> Option<DateTime<Utc>> {
+    let hour = interval_end
+        .date_naive()
+        .and_hms_opt(interval_end.hour(), 0, 0)?
+        .and_utc();
+    routine_minutes
+        .iter()
+        .filter(|m| **m < 60)
+        .map(|m| {
+            let t = hour + Duration::minutes(i64::from(*m));
+            if t <= interval_end {
+                t + Duration::hours(1)
+            } else {
+                t
+            }
+        })
+        .min()
+        .filter(|t| *t - interval_end <= Duration::minutes(10))
+}
+
+/// The bucket that came closest to a trade: the fewest blockers, then the
+/// highest EV. A rule's EV assumes its trigger holds, so EV alone would crown
+/// the line furthest from trading (K's fixed 0.94 against a NO offered at
+/// 0.001).
+fn closest_evaluation<'a>(
+    evaluations: impl Iterator<Item = &'a BucketEvaluation>,
+) -> Option<&'a BucketEvaluation> {
+    let blocked = |e: &BucketEvaluation| if e.signal { 0 } else { e.blockers.len() };
+    evaluations
+        .filter_map(|e| e.ev_per_share.map(|ev| (ev, e)))
+        .min_by(|a, b| {
+            blocked(a.1)
+                .cmp(&blocked(b.1))
+                .then_with(|| b.0.total_cmp(&a.0))
+        })
+        .map(|(_, e)| e)
+}
+
 fn evaluation_line(e: &BucketEvaluation) -> String {
     let mut price = e
         .ask
@@ -1784,6 +1889,35 @@ mod tests {
     use super::*;
     use wm_core::market::OutcomeSide;
     use wm_core::units::Price;
+
+    #[test]
+    fn the_last_reading_before_a_routine_report_is_a_checkpoint() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let eham = [25u8, 55];
+        // Schiphol: the readings ending at :20 and :50, five minutes before
+        // the :25 and :55 reports.
+        for (end, report) in [
+            ("2026-10-07T11:20:00Z", Some("2026-10-07T11:25:00Z")),
+            ("2026-10-07T11:50:00Z", Some("2026-10-07T11:55:00Z")),
+            ("2026-10-07T23:50:00Z", Some("2026-10-07T23:55:00Z")),
+            ("2026-10-07T11:10:00Z", None),
+            ("2026-10-07T11:30:00Z", None),
+            ("2026-10-07T11:40:00Z", None),
+            ("2026-10-07T11:00:00Z", None),
+        ] {
+            assert_eq!(knmi_checkpoint(t(end), &eham), report.map(t), "{end}");
+        }
+        // A station reporting on the hour: the reading ending ten minutes
+        // before it, also across midnight; not the one ending with it, which
+        // arrives after the report is known.
+        assert_eq!(
+            knmi_checkpoint(t("2026-10-07T23:50:00Z"), &[0]),
+            Some(t("2026-10-08T00:00:00Z"))
+        );
+        assert_eq!(knmi_checkpoint(t("2026-10-08T00:00:00Z"), &[0]), None);
+        assert_eq!(knmi_checkpoint(t("2026-10-07T11:20:00Z"), &[]), None);
+        assert_eq!(knmi_checkpoint(t("2026-10-07T11:20:00Z"), &[75]), None);
+    }
 
     fn eval(maker_bid: Option<Price>) -> BucketEvaluation {
         BucketEvaluation {

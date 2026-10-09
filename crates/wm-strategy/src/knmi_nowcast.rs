@@ -162,6 +162,10 @@ impl Strategy for KnmiNowcast {
         self.config.enabled
     }
 
+    fn reads_nowcast(&self) -> bool {
+        true
+    }
+
     fn evaluate(&mut self, ctx: &StrategyContext<'_>) -> StrategyOutput {
         let cfg = &self.config;
         let mut out = StrategyOutput::default();

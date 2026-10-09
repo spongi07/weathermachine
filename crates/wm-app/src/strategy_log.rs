@@ -429,23 +429,31 @@ fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
         s,
         "\n### Its lines in the routine evaluations (latest {TRAIL_LINES})\n"
     );
-    let trail: Vec<(i64, &String)> = snap
+    // A KNMI checkpoint (the last reading before a report, the KNMI
+    // strategies' decisive moment) is marked as such.
+    let trail: Vec<(i64, bool, &String)> = snap
         .decisions
         .iter()
         .filter(|d| d.strategy == "evaluation")
         .flat_map(|d| {
+            let checkpoint = d.summary.starts_with("KNMI checkpoint");
             d.details
                 .iter()
                 .filter(|l| strategy.owns_line(l))
-                .map(move |l| (d.at_ms, l))
+                .map(move |l| (d.at_ms, checkpoint, l))
         })
         .take(TRAIL_LINES)
         .collect();
     if trail.is_empty() {
         s.push_str("None in the dashboard's decision log.\n");
     }
-    for (at, line) in trail {
-        let _ = writeln!(s, "- {} {line}", stamp(at, tz));
+    for (at, checkpoint, line) in trail {
+        let mark = if checkpoint {
+            "(KNMI reading before the report) "
+        } else {
+            ""
+        };
+        let _ = writeln!(s, "- {} {mark}{line}", stamp(at, tz));
     }
     s.push_str("\n### Orders\n\n");
     let orders: Vec<_> = snap
@@ -744,6 +752,18 @@ mod tests {
                         "E 21°C YES · ask 0.31 — E line".into(),
                     ],
                 },
+                // A KNMI checkpoint record (it holds the KNMI strategies'
+                // lines; the log marks whatever line of the strategy at hand
+                // it finds there).
+                DecisionDto {
+                    id: 7,
+                    at_ms: 1_789_998_000_000,
+                    strategy: "evaluation".into(),
+                    summary: "KNMI checkpoint: the 08:40–08:50 UTC reading, the last before the 08:55 UTC report; 1 line(s) of the strategies that read it; closest: none priced".into(),
+                    approved: false,
+                    reasons: vec![],
+                    details: vec!["F 21°C YES · ask 0.30 — checkpoint line".into()],
+                },
             ],
             orders: vec![OrderDto {
                 client_order_id: "wm-1".into(),
@@ -788,6 +808,7 @@ mod tests {
             "| 21°C ◀ high | YES | 0.310 | – | 0.500 | – | – | -0.1000 | 11:12 outside the autumn slot 13:25–15:26; ask 0.31 not above 0.90 |",
             "**REJECTED** — BUY YES 21°C 100 @ ≤ 0.94 — PositionSize: cost $94.00 > position size $10.00",
             "UTC F 21°C YES · ask 0.31 — 10:55 outside the autumn slot 13:25–15:26",
+            "UTC (KNMI reading before the report) F 21°C YES · ask 0.30 — checkpoint line",
             "No database: the day-by-day history",
         ] {
             assert!(md.contains(part), "missing {part:?} in\n{md}");

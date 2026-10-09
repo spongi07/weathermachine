@@ -261,6 +261,12 @@ pub struct DayReport {
     /// Evaluation records (one per weather report while a market was open).
     pub evaluations: usize,
     pub strategies: Vec<StrategyDay>,
+    /// KNMI checkpoints: records of the last ten-minute reading before each
+    /// routine report, with the lines of the strategies that read KNMI (K
+    /// and the lab's KNMI rules). That is their decisive moment; the routine
+    /// evaluation comes after the report, when the reading is already old.
+    pub knmi_checkpoints: usize,
+    pub knmi: Vec<StrategyDay>,
     pub model_vs_market: Option<ModelVsMarket>,
     pub proposals: Vec<ProposalRow>,
     pub orders: Vec<OrderRow>,
@@ -750,12 +756,16 @@ fn build_day(
 
     let decisions: Vec<&ReportDecision> =
         inputs.decisions.iter().filter(|d| within(d.at)).collect();
-    let evaluations: Vec<&ReportDecision> = decisions
+    // The routine evaluations (after each report) and the KNMI checkpoints
+    // (before it) apart: the model is scored, and the evaluations counted,
+    // on the routine ones only.
+    let (checkpoints, evaluations): (Vec<&ReportDecision>, Vec<&ReportDecision>) = decisions
         .iter()
         .filter(|d| d.strategy == "evaluation")
         .copied()
-        .collect();
+        .partition(|d| d.inputs.get("knmi_checkpoint").is_some());
     let strategies = strategy_days(&evaluations, &buckets, high, fee_rate, tz);
+    let knmi = strategy_days(&checkpoints, &buckets, high, fee_rate, tz);
     let model_vs_market = won.and_then(|w| {
         let tops = inputs.books.get(&w.yes_token)?;
         model_vs_market(&evaluations, &w.label, &bucket_of(w), tops, tz)
@@ -857,6 +867,8 @@ fn build_day(
         market,
         evaluations: evaluations.len(),
         strategies,
+        knmi_checkpoints: checkpoints.len(),
+        knmi,
         model_vs_market,
         proposals,
         orders,
@@ -1381,7 +1393,7 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
     let (mut ll_model, mut ll_market) = (0.0, 0.0);
     for d in days {
         t.evaluations += d.evaluations;
-        for s in &d.strategies {
+        for s in d.strategies.iter().chain(&d.knmi) {
             *t.signals.entry(s.strategy.clone()).or_default() += s.signals.len();
         }
         t.proposals += d.proposals.len();
@@ -1693,6 +1705,41 @@ pub fn markdown(r: &PaperReport) -> String {
     s
 }
 
+/// Each strategy's lines in a set of evaluation records: how often each
+/// blocker stopped it, its signals and its closest calls.
+fn strategies_markdown(s: &mut String, list: &[StrategyDay]) {
+    for st in list {
+        let _ = writeln!(
+            s,
+            "  - **{}**: {} bucket evaluations, {} signal(s).",
+            st.strategy,
+            st.lines,
+            st.signals.len()
+        );
+        if !st.blockers.is_empty() {
+            let b: Vec<String> = st
+                .blockers
+                .iter()
+                .map(|b| {
+                    format!(
+                        "`{}` ×{} (e.g. \"{}\")",
+                        cell(&b.pattern),
+                        b.count,
+                        cell(&b.example)
+                    )
+                })
+                .collect();
+            let _ = writeln!(s, "    - Blocked by: {}", b.join("; "));
+        }
+        for c in &st.signals {
+            let _ = writeln!(s, "    - Signal: {}", cell(&call_text(c)));
+        }
+        for c in &st.closest {
+            let _ = writeln!(s, "    - Closest: {}", cell(&call_text(c)));
+        }
+    }
+}
+
 fn day_markdown(s: &mut String, d: &DayReport) {
     let _ = writeln!(
         s,
@@ -1847,35 +1894,14 @@ fn day_markdown(s: &mut String, d: &DayReport) {
         );
     }
     let _ = writeln!(s, "- **Evaluations:** {}", d.evaluations);
-    for st in &d.strategies {
+    strategies_markdown(s, &d.strategies);
+    if d.knmi_checkpoints > 0 {
         let _ = writeln!(
             s,
-            "  - **{}**: {} bucket evaluations, {} signal(s).",
-            st.strategy,
-            st.lines,
-            st.signals.len()
+            "- **At KNMI's last reading before each report:** {} (K and the lab's KNMI rules decide on it; the routine evaluation comes after the report)",
+            d.knmi_checkpoints
         );
-        if !st.blockers.is_empty() {
-            let b: Vec<String> = st
-                .blockers
-                .iter()
-                .map(|b| {
-                    format!(
-                        "`{}` ×{} (e.g. \"{}\")",
-                        cell(&b.pattern),
-                        b.count,
-                        cell(&b.example)
-                    )
-                })
-                .collect();
-            let _ = writeln!(s, "    - Blocked by: {}", b.join("; "));
-        }
-        for c in &st.signals {
-            let _ = writeln!(s, "    - Signal: {}", cell(&call_text(c)));
-        }
-        for c in &st.closest {
-            let _ = writeln!(s, "    - Closest: {}", cell(&call_text(c)));
-        }
+        strategies_markdown(s, &d.knmi);
     }
     if d.proposals.is_empty() {
         let _ = writeln!(s, "- **Proposals:** none.");
@@ -2188,6 +2214,120 @@ mod tests {
         let r = build(&main_only, &plan, t("2026-10-02T08:00:00Z"));
         assert_eq!(r.days[0].lab_pnl_usd, None);
         assert!(!markdown(&r).contains("Strategy lab"));
+    }
+
+    /// The KNMI strategies' decisive moment: the checkpoint records (the
+    /// last reading before a report) are reported apart, per strategy, and
+    /// stay out of the routine counts and the model against the market.
+    #[test]
+    fn knmi_checkpoints_are_reported_apart() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let outcome = |value: i32| ReportOutcome {
+            event_slug: "eham-oct-7".into(),
+            local_date: date,
+            label: format!("{value}°C"),
+            lower: Some(value),
+            upper: Some(value),
+            yes_token: format!("y{value}"),
+            no_token: format!("n{value}"),
+            taker_fee_rate_micros: 50_000,
+        };
+        let record = |at: &str, inputs: serde_json::Value, lines: &[&str]| ReportDecision {
+            at: t(at),
+            strategy: "evaluation".into(),
+            event_slug: Some("eham-oct-7".into()),
+            summary: String::new(),
+            inputs,
+            outputs: serde_json::json!({ "evaluations": lines }),
+            approved: false,
+            reasons: vec![],
+        };
+        let routine = record(
+            "2026-10-07T11:57:30Z",
+            serde_json::json!({ "views": [{"view": "all", "high_whole": 21, "p": [0.6, 0.3, 0.1]}] }),
+            &[
+                "F 21°C YES · ask 0.46 · p 0.658 · EV +0.1809 — 13:57 outside the autumn slot 14:55–17:26; ask 0.46 not above 0.90",
+                "K 21°C NO · ask 0.74 · p 0.940 · EV +0.1804 — KNMI reading not newer than the last METAR",
+            ],
+        );
+        let checkpoint = record(
+            "2026-10-07T11:54:00Z",
+            serde_json::json!({ "knmi_checkpoint": {
+                "interval_end": "2026-10-07T11:50:00Z",
+                "report_at": "2026-10-07T11:55:00Z",
+                "mean_tenths": 213,
+                "max_tenths": 215,
+            } }),
+            &[
+                "K 21°C NO · ask 0.74 · p 0.940 · EV +0.1804 — KNMI mean 21.3 °C < 21.8 °C (high 21 + 0.5 + 0.3 °C)",
+            ],
+        );
+        let inputs = ReportInputs {
+            observations: vec![ReportObservation {
+                observed_at: t("2026-10-07T11:55:00Z"),
+                report_type: "METAR".into(),
+                version: 1,
+                temperature_dc: Some(220),
+                provider: "awc".into(),
+                fetched_at: t("2026-10-07T11:57:30Z"),
+                from_failover: false,
+            }],
+            outcomes: vec![outcome(21), outcome(22)],
+            decisions: vec![checkpoint, routine],
+            books: HashMap::from([(
+                "y22".to_owned(),
+                vec![ReportBookTop {
+                    captured_at: t("2026-10-07T11:57:00Z"),
+                    bid_micros: Some(880_000),
+                    ask_micros: Some(920_000),
+                }],
+            )]),
+            ..ReportInputs::default()
+        };
+        let plan = PaperReportPlan {
+            location: "amsterdam".into(),
+            station: "EHAM".into(),
+            tz: chrono_tz::Europe::Amsterdam,
+            from: date,
+            to: date,
+        };
+        let r = build(&inputs, &plan, t("2026-10-08T08:00:00Z"));
+        let d = &r.days[0];
+        assert_eq!((d.evaluations, d.knmi_checkpoints), (1, 1));
+        let k = |list: &[StrategyDay]| list.iter().find(|s| s.strategy == "K").cloned();
+        assert_eq!(k(&d.strategies).unwrap().lines, 1, "the routine line only");
+        assert_eq!(
+            k(&d.strategies).unwrap().blockers[0].pattern,
+            "KNMI reading not newer than the last METAR"
+        );
+        let at_reading = k(&d.knmi).unwrap();
+        assert_eq!(at_reading.lines, 1);
+        assert_eq!(
+            at_reading.blockers[0].example,
+            "KNMI mean 21.3 °C < 21.8 °C (high 21 + 0.5 + 0.3 °C)"
+        );
+        assert_eq!(at_reading.closest[0].at, "13:54");
+        assert!(
+            d.knmi.iter().all(|s| s.strategy != "F"),
+            "F does not read KNMI"
+        );
+        // The model is scored on the routine evaluation alone.
+        assert_eq!(d.model_vs_market.as_ref().map(|m| m.samples), Some(1));
+        let md = markdown(&r);
+        assert!(
+            md.contains("- **At KNMI's last reading before each report:** 1 (K and the lab's KNMI rules decide on it; the routine evaluation comes after the report)"),
+            "{md}"
+        );
+        assert!(md.contains("KNMI mean 21.3 °C < 21.8 °C"), "{md}");
+        // Without checkpoints, no such line.
+        let without = ReportInputs {
+            decisions: inputs.decisions[1..].to_vec(),
+            ..inputs.clone()
+        };
+        let r = build(&without, &plan, t("2026-10-08T08:00:00Z"));
+        assert_eq!(r.days[0].knmi_checkpoints, 0);
+        assert!(!markdown(&r).contains("At KNMI's last reading"));
     }
 
     #[test]

@@ -433,10 +433,10 @@ mod tests {
             "{}",
             u.summary
         );
-        // The lab's paper strategies follow, L1 first, every one running its
-        // main rule; the seven families switched off on 8 October 2026 are
-        // not shown.
-        let off = [9, 12, 17, 19, 21, 22, 23];
+        // The lab's paper strategies follow, lowest number first, every one
+        // running its main rule; the families switched off on 8 and 9
+        // October 2026 are not shown.
+        let off = [1, 9, 12, 17, 19, 21, 22, 23];
         let lab: Vec<&StrategyDto> = c.iter().filter(|s| s.lab).collect();
         assert_eq!(
             lab.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
@@ -465,13 +465,14 @@ mod tests {
             lab.iter()
                 .all(|s| setting(s, "rule").as_deref() == Some("main rule"))
         );
-        assert_eq!(setting(lab[0], "notional").as_deref(), Some("20.00"));
+        let family = |letter: &str| *lab.iter().find(|s| s.letter == letter).unwrap();
+        assert_eq!(setting(family("L2"), "notional").as_deref(), Some("20.00"));
         assert_eq!(
-            setting(lab[2], "notional").as_deref(),
+            setting(family("L3"), "notional").as_deref(),
             Some("F's 100 shares")
         );
         assert_eq!(
-            setting(lab[2], "book.position_size_usd").as_deref(),
+            setting(family("L3"), "book.position_size_usd").as_deref(),
             Some("100.00")
         );
         assert!(lab.iter().all(|s| s.summary.contains("Paper only")));

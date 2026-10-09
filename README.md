@@ -68,8 +68,9 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   Since 2 October 2026 they also run live as **paper strategies**, each
   on a paper book of its own — its own positions, limits and P&L — so none
   of them ever blocks F–K or another lab strategy (`[strategies.lab]`:
-  `disabled`, `variants`); 18 since 8 October, when the seven families the
-  replay refuted or the books never let trade were switched off. The dashboard's lab panel, each family's page
+  `disabled`, `variants`); 17 since 9 October: the seven families the
+  replay refuted or the books never let trade were switched off on 8
+  October, L1 on 9 October. The dashboard's lab panel, each family's page
   and `report paper` show their record apart from the main book's.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in

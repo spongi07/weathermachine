@@ -123,6 +123,13 @@ pub trait Strategy: Send {
     /// Every order-book update the engine receives, also when the strategy
     /// is not evaluated then (for strategies that keep the book's history).
     fn observe_book(&mut self, _book: &OrderBook) {}
+    /// Whether the strategy decides on KNMI's ten-minute readings. The
+    /// engine then also records its evaluation at the last reading before
+    /// each routine report — its decisive moment; the routine evaluation
+    /// comes after the report, when that reading is already old.
+    fn reads_nowcast(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

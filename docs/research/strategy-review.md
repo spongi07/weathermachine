@@ -172,3 +172,10 @@ update ([risk, per-strategy caps](../blueprint/07-risk-storage.md)). With
 F exempt and A–E off, U manages no running strategy's positions; it stays
 on for a strategy switched back on. The verdicts of §1 otherwise stand:
 the next `research market --from 2026-10-02` decides on new days.
+
+## 6. The paper week of 4–8 October
+
+Weighed in the [live review of 9 October 2026](live-review-2026-10-09.md):
+I's switch-off confirmed (−$20.11 that week), F, G and K kept, L1 switched
+off, and K's decisive moment — missing from the log (§3.4) — now recorded
+at KNMI's last reading before each report.

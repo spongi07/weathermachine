@@ -105,7 +105,7 @@ For a contract bought at price *P* with win probability *p*, per share:
 shows it permanently.) Performance is judged on EV, drawdown and confidence
 intervals, never on win rate.
 
-## Which strategies run (8 October 2026)
+## Which strategies run (9 October 2026)
 
 | | strategy | live | why |
 |---|---|---|---|
@@ -121,12 +121,14 @@ intervals, never on win rate.
 | J | morning maker (§27h) | off (2 Oct) | replay 2 Oct: −$197.52 over 250 fills; its best variant lost $171.88 out of sample |
 | K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: every trade won (4 of 4, +$81.10); out of sample too |
 | U | unwind (§28) | **on** | the exit engine; leaves F–K alone (F since 8 Oct: its replay holds to settlement) |
-| L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`); L9, L12, L17, L19 and L21–L23 off (8 Oct) | built on 2 Oct on request, so their live record grows beside the replay's; none trades money. The seven switched off were refuted by the replay, or (L22) never find a bid to join |
+| L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`); L9, L12, L17, L19 and L21–L23 off (8 Oct), L1 off (9 Oct) | built on 2 Oct on request, so their live record grows beside the replay's; none trades money. The seven switched off on 8 Oct were refuted by the replay, or (L22) never find a bid to join; L1 lost on the replay's later days and in its first live week |
 
 The review of 3 October 2026 weighs every one of them against the replays,
 the first paper days and the code, with recommendations for the operator:
 [strategy review](../research/strategy-review.md). Its four recommendations
-for the shipped configuration were applied on 8 October (§5 there).
+for the shipped configuration were applied on 8 October (§5 there); the
+paper week of 4–8 October is weighed in the
+[live review](../research/live-review-2026-10-09.md).
 
 A strategy switched off is not shown on the dashboard; its code stays,
 because `research market` replays A, B, E and F as baselines, and
@@ -760,6 +762,19 @@ dashboard's *KNMI 10-minute* box measure the real delay.
 and the dashboard says why. The readings never change the observed high,
 the views or settlement.
 
+**ITS DECISIVE MOMENT IS RECORDED.** The routine evaluation is recorded
+after each report, when K's reading is already older than it; every K line
+there says "KNMI reading not newer than the last METAR". So the engine also
+records an evaluation when KNMI's last reading before a routine report
+arrives (`knmi_checkpoint`: the reading whose interval ends at most ten
+minutes before the report — at Schiphol the ones ending :20 and :50, known
+about :24 and :54). It holds the lines of the strategies that read KNMI
+(`Strategy::reads_nowcast`: K and the lab's `KNMI_FAMILIES`), the reading's
+mean and maximum and the report it precedes, and no model views: the model
+is scored on the routine evaluations only. `report paper` lists these lines
+per strategy apart ("At KNMI's last reading before each report"), and a
+strategy's log marks them.
+
 **TESTING (G–K).**
 * `wm-strategy/tests/new_strategies.rs`: each strategy's signal, the order
   it proposes (price, size, time in force) and its blockers; H never pays
@@ -773,7 +788,12 @@ the views or settlement.
 * `wm-backtest/tests/nowcast_session.rs`: K in the shared session loop — a
   reading older than the last METAR does nothing; one that arrives as the
   next METAR is taken buys the high's NO, which fills; a late, older
-  reading neither replaces the newer one nor buys again.
+  reading neither replaces the newer one nor buys again; the last reading
+  before a report records K's lines (not F's) as a KNMI checkpoint, an
+  earlier one does not.
+* `wm-engine` (`the_last_reading_before_a_routine_report_is_a_checkpoint`):
+  which readings are checkpoints, for :25/:55 and hourly reports, across
+  midnight.
 * The demo (`weather-machine demo`) feeds synthetic ten-minute readings of
   its own temperature curve, labelled *synthetic*, so K and its dashboard
   box can be watched without a key.
@@ -809,7 +829,8 @@ fixes the price) and L3's sale of its YES at the bid. `[strategies.lab]`:
 `enabled`, `disabled` and `variants` (family codes), the notional and the
 quotes' timing; `[strategies.lab.risk]`: each book's limits. Since 8 October
 2026 the shipped configuration switches off L9, L12, L17, L19, L21, L22 and
-L23 ([strategy review §3.5](../research/strategy-review.md#35-lab-notes)).
+L23 ([strategy review §3.5](../research/strategy-review.md#35-lab-notes)),
+since 9 October L1 too ([live review](../research/live-review-2026-10-09.md)).
 
 **INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
 readings of the last 36 hours, the neighbours' readings with their
