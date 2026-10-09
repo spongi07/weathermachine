@@ -68,15 +68,17 @@ nothing (fail closed). K enabled without a key raises a warning and stays
 idle. KNMI publishes a reading 3½–4 minutes after its interval ends (every
 reading of 8 October 2026 was found by the 4-minute poll, none by the
 3½-minute one), so the loop asks only when one can be due: from three
-minutes after each interval's end, every `poll_seconds` (10) for three
-minutes, then every 30 s, after a quarter of an hour every minute; once the
-reading is in it sleeps until the next one can be due. K races the METAR:
-the reading of the interval ending at :20 arrives about :24, the :25 report
-reaches the bot about :27½ and the market reprices from about :25¾, so
-finding a reading 10 s sooner on average (the old cadence was 30 s from two
-minutes) is a tenth of K's window. That is about 50 requests an hour with
-the lab's neighbours (some 1,300 a day); an outage in which no reading comes
-costs about 1,500 a day, inside the provider's budget of 4,000 and KNMI's
+minutes after each interval's end, every `poll_seconds` (10) for two and a
+half minutes, then every minute; once the reading is in it sleeps until the
+next one can be due. K races the METAR: the reading of the interval ending
+at :20 arrives about :24, the :25 report reaches the bot about :27½ and the
+market reprices from about :25¾, so finding a reading 10 s sooner on
+average (the old cadence was 30 s from two minutes) is a tenth of K's
+window, and a reading still missing 5½ minutes after its interval has lost
+the race. That is 50–60 requests an hour with the lab's neighbours (48 at
+the old cadence); an outage in which no reading comes costs about 1,450 a
+day, and readings that come late every time at most about 3,750 (when
+about 11½ minutes late), inside the provider's budget of 4,000 and KNMI's
 quota of 1,000 an hour.
 
 With the strategy lab on (`[strategies.lab]`), the same loop also asks for

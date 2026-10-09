@@ -1790,10 +1790,6 @@ fn strategy_tag(s: &StrategyId) -> &str {
     s.as_str().split('_').next().unwrap_or(s.as_str())
 }
 
-/// One audit line per bucket evaluation, with the numbers behind the verdict:
-/// `A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge …`.
-/// A maker (G, J) also names the bid it would rest, where its EV is taken:
-/// `G 20°C NO · ask 0.26 · bid 0.24 (maker) · p 0.248 · EV +0.0078 — …`.
 /// Which evaluation record an evaluation leaves in the decision log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Record {
@@ -1813,8 +1809,8 @@ enum Record {
 /// last one before: the first routine report time after its end, when that
 /// lies at most ten minutes later (the next reading ends with or after the
 /// report, and arrives minutes later still). Schiphol reports at :25 and
-/// :55, so the readings ending at :20 and :50; a station reporting at :00
-/// would have those ending at :50.
+/// :55, so its checkpoints are the readings ending at :20 and :50; for a
+/// station reporting at :00 it is the reading ending at :50.
 fn knmi_checkpoint(interval_end: DateTime<Utc>, routine_minutes: &[u8]) -> Option<DateTime<Utc>> {
     let hour = interval_end
         .date_naive()
@@ -1853,6 +1849,10 @@ fn closest_evaluation<'a>(
         .map(|(_, e)| e)
 }
 
+/// One audit line per bucket evaluation, with the numbers behind the verdict:
+/// `A 21°C YES · ask 0.97 · p 0.955 (model 0.970, market 0.940) · EV -0.0215 — edge …`.
+/// A maker (G, J) also names the bid it would rest, where its EV is taken:
+/// `G 20°C NO · ask 0.26 · bid 0.24 (maker) · p 0.248 · EV +0.0078 — …`.
 fn evaluation_line(e: &BucketEvaluation) -> String {
     let mut price = e
         .ask

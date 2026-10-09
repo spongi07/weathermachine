@@ -246,9 +246,11 @@ max_body_bytes = 8388608
 # automatic weather station (predictive input for strategy K, never
 # observation or resolution data). Needs WM_KNMI_API_KEY — a free key from
 # the KNMI Developer Portal, sent in the Authorization header, never logged.
-# Live: two requests a minute, plus one per [lab] neighbour after each new
-# reading (about 140 an hour with three neighbours, well inside the 1,000 a
-# registered key allows); `research market`: one per week of history.
+# Live: every [knmi].poll_seconds while a reading is due, plus one per [lab]
+# neighbour after each new reading — 50–60 an hour with three neighbours, at
+# most about 3,750 a day when KNMI publishes late, inside the budget below
+# and the 1,000 an hour a registered key allows; `research market`: one per
+# week of history.
 [providers.knmi]
 enabled = true
 base_url = "https://api.dataplatform.knmi.nl/edr/v1/collections/10-minute-in-situ-meteorological-observations"
@@ -741,7 +743,7 @@ enabled = true
 mean_parameter = "ta"             # mean 1.5 m air temperature over the ten minutes
 max_parameter = "tx"              # its maximum
 location_id = ""                  # empty: the WIGOS id of the station's WMO number (0-20000-0-06240)
-poll_seconds = 10                 # while a reading is due (3–6 min after each interval's end; then every 30 s, after 15 min every minute)
+poll_seconds = 10                 # while a reading is due (3–5½ min after each interval's end; later every minute)
 lookback_minutes = 40
 
 # What the strategy lab reads beyond A–K's inputs (with [strategies.lab]).

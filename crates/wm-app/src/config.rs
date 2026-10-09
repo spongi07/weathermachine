@@ -150,8 +150,9 @@ pub struct KnmiSection {
     /// EDR location id; empty: the WIGOS id of the station's WMO number
     /// (`0-20000-0-06240` for Schiphol).
     pub location_id: String,
-    /// Poll interval while a reading is due (the first three minutes from
-    /// three minutes after each interval's end), seconds; slower after that.
+    /// Poll interval while a reading is due (two and a half minutes from
+    /// three minutes after each interval's end), seconds; every minute after
+    /// that.
     pub poll_seconds: u64,
     /// Each poll asks for the readings of the last this-many minutes.
     pub lookback_minutes: i64,

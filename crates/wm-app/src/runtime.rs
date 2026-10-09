@@ -1735,16 +1735,16 @@ async fn knmi_loop(
 /// seen live in October 2026): once every station holds its newest reading,
 /// nothing new can come before the next interval's end plus
 /// [`KNMI_EARLIEST_DELAY`], so the loop sleeps until then and polls every
-/// `poll` for [`KNMI_FAST_WINDOW`] — K races the METAR, and every second of
-/// it counts. A reading later than that is asked for every 30 s, after a
-/// quarter of an hour every minute, so an outage cannot use up the
-/// provider's daily budget. Without a reading yet: every 30 s.
+/// `poll` for [`KNMI_FAST_WINDOW`] — K races the routine report, and every
+/// second counts. A reading later than that has lost the race and is asked
+/// for every minute, so late readings or an outage stay inside the
+/// provider's daily budget. Without a reading yet: every minute.
 fn knmi_pause(
     now: DateTime<Utc>,
     newest: Option<DateTime<Utc>>,
     poll: std::time::Duration,
 ) -> std::time::Duration {
-    let slow = std::time::Duration::from_secs(30).max(poll);
+    let slow = std::time::Duration::from_secs(60).max(poll);
     let Some(newest) = newest else {
         return slow;
     };
@@ -1752,13 +1752,10 @@ fn knmi_pause(
     if let Ok(wait) = (due - now).to_std() {
         return wait.clamp(poll, std::time::Duration::from_secs(600));
     }
-    let late = now - due;
-    if late < KNMI_FAST_WINDOW {
+    if now - due < KNMI_FAST_WINDOW {
         poll
-    } else if late < Duration::minutes(15) {
-        slow
     } else {
-        std::time::Duration::from_secs(60).max(poll)
+        slow
     }
 }
 
@@ -1766,8 +1763,11 @@ fn knmi_pause(
 /// expected; the loop resumes polling from there.
 const KNMI_EARLIEST_DELAY: Duration = Duration::minutes(3);
 
-/// How long after [`KNMI_EARLIEST_DELAY`] the loop keeps its fast cadence.
-const KNMI_FAST_WINDOW: Duration = Duration::minutes(3);
+/// How long after [`KNMI_EARLIEST_DELAY`] the loop keeps its fast cadence:
+/// to 5½ minutes after the interval's end. Schiphol reports 5 minutes after
+/// the intervals ending :20 and :50 and the market prices the report about
+/// 40 s later, so a reading published after that has lost K's race.
+const KNMI_FAST_WINDOW: Duration = Duration::seconds(150);
 
 /// A location whose day-1 forecast is fetched.
 #[derive(Debug, Clone)]
@@ -2130,7 +2130,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
-    /// With the newest reading in, the loop sleeps until two minutes after
+    /// With the newest reading in, the loop sleeps until three minutes after
     /// the next interval's end and polls at its cadence from there.
     #[test]
     fn knmi_polls_only_when_a_reading_can_be_due() {
@@ -2140,18 +2140,17 @@ mod tests {
         let pause = |now: &str| knmi_pause(t(now), Some(t("2026-10-03T20:50:00Z")), poll);
         // The 20:50 reading arrived at 20:54:17: the 21:00 one is due from 21:03.
         assert_eq!(pause("2026-10-03T20:54:17Z"), secs(8 * 60 + 43));
-        // From then on, every 10 s for three minutes …
+        // From then on, every 10 s for two and a half minutes (to 21:05:30;
+        // for a reading ending :20 or :50 that is about when the market
+        // prices the report five minutes after it) …
         assert_eq!(pause("2026-10-03T21:03:00Z"), poll);
-        assert_eq!(pause("2026-10-03T21:05:50Z"), poll);
-        // … then every 30 s, and after a quarter of an hour every minute: an
-        // outage cannot use up the daily budget.
-        assert_eq!(pause("2026-10-03T21:06:00Z"), secs(30));
-        assert_eq!(pause("2026-10-03T21:17:59Z"), secs(30));
-        assert_eq!(pause("2026-10-03T21:18:00Z"), secs(60));
+        assert_eq!(pause("2026-10-03T21:05:29Z"), poll);
+        // … then every minute.
+        assert_eq!(pause("2026-10-03T21:05:30Z"), secs(60));
         assert_eq!(pause("2026-10-03T23:30:00Z"), secs(60));
         assert_eq!(
             knmi_pause(t("2026-10-03T21:00:00Z"), None, poll),
-            secs(30),
+            secs(60),
             "no reading yet"
         );
         // A cadence slower than those steps is kept.
@@ -2182,20 +2181,64 @@ mod tests {
         );
     }
 
+    /// Whether KNMI publishes its readings on time, late or not at all, the
+    /// loop's requests over a day — one a poll, plus one per lab neighbour
+    /// after each new reading — stay inside the shipped daily budget, with
+    /// room left for restarts.
     #[test]
     fn knmi_requests_stay_inside_the_daily_budget() {
-        // Readings never arrive (an outage) from 00:00: the loop's requests
-        // over a day stay well under the provider's 4,000.
+        let cfg = crate::config::AppConfig::load(Some(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../configs/weather-machine.toml"),
+        ))
+        .unwrap();
+        let budget = cfg.file.providers.knmi.policy.daily_budget.unwrap();
+        let poll = std::time::Duration::from_secs(cfg.file.knmi.poll_seconds);
+        let neighbours = u32::try_from(cfg.file.lab.neighbours.len()).unwrap();
         let t0: DateTime<Utc> = "2026-10-03T00:00:00Z".parse().unwrap();
-        let newest = Some(t0 - Duration::minutes(10));
-        let mut now = t0;
-        let mut requests = 0;
-        while now < t0 + Duration::days(1) {
-            requests += 1;
-            now += Duration::from_std(knmi_pause(now, newest, std::time::Duration::from_secs(10)))
-                .unwrap();
+        // Each reading is published `delay` after its interval's end (never
+        // with None); returns the requests of a day and the mean wait from a
+        // reading's publication to its poll.
+        let day = |delay: Option<Duration>| {
+            let mut now = t0;
+            let mut newest = t0 - Duration::minutes(10);
+            let (mut requests, mut waited, mut found) = (0u32, Duration::zero(), 0i32);
+            while now < t0 + Duration::days(1) {
+                requests += 1;
+                if let Some(delay) = delay {
+                    let published = t0
+                        + Duration::seconds((now - delay - t0).num_seconds().div_euclid(600) * 600);
+                    if published > newest {
+                        newest = published;
+                        requests += neighbours;
+                        waited += now - (published + delay);
+                        found += 1;
+                    }
+                }
+                now += Duration::from_std(knmi_pause(now, Some(newest), poll)).unwrap();
+            }
+            (requests, waited / found.max(1))
+        };
+        let (outage, _) = day(None);
+        assert!(outage < 1_500, "an outage: {outage} requests");
+        let mut worst = (0, 0);
+        for delay in (180..=1_800).step_by(5) {
+            let (requests, wait) = day(Some(Duration::seconds(delay)));
+            worst = worst.max((requests, delay));
+            // Inside the window seen live (3½–5½ minutes after the interval),
+            // a reading is polled within one poll of its publication.
+            if (210..=330).contains(&delay) {
+                assert!(
+                    wait < Duration::from_std(poll).unwrap(),
+                    "{delay} s: {wait}"
+                );
+            }
         }
-        assert!(requests < 1_600, "{requests}");
+        // At most 95 % of the budget on the worst day: restarts fetch history.
+        assert!(worst.0 * 20 < budget * 19, "{worst:?} of {budget}");
+        // On time (3½–4 minutes, as seen live), about 55 requests an hour.
+        let (on_time, _) = day(Some(Duration::seconds(225)));
+        assert!((1_100..=1_450).contains(&on_time), "{on_time}");
     }
     use wm_core::market::BookLevel;
     use wm_core::units::{Price, Shares};

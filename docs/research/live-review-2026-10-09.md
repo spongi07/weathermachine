@@ -117,9 +117,11 @@ known about :24) and that repricing (about :25¾).
 3. **KNMI is polled faster when a reading is due.** Every reading of
    8 October was found by the poll 4 minutes after its interval, none by
    the one at 3½ minutes; the loop now asks from 3 minutes after each
-   interval's end every 10 s for three minutes (then every 30 s, after a
-   quarter of an hour every minute), so a reading reaches K about 10 s
-   sooner on average at the same request count (about 50 an hour).
+   interval's end every 10 s for two and a half minutes — to 5½ minutes,
+   about when the market prices the report the reading precedes — and every
+   minute after that, so a reading reaches K about 10 s sooner on average, for
+   50–60 requests an hour instead of 48; readings that come late or not at
+   all stay inside the daily budget.
 
 ## 5. What to build next
 
