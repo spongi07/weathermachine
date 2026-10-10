@@ -500,6 +500,18 @@ fn l4_buys_the_high_bucket_when_knmi_shows_the_cooling() {
     assert!((pr.p_win - 0.97).abs() < 1e-9);
     // F's band (0.90–0.98) is the variant.
     assert_blocked(&w.run(4, true), "YES ask 0.82 outside [0.90, 0.98]");
+    // A mean that fell too little, or rose, says which.
+    w.knmi[8].mean = Some(TempC::from_tenths(198));
+    assert_blocked(
+        &w.run(4, false),
+        "KNMI mean fell 0.3 °C in an hour < 0.6 °C",
+    );
+    w.knmi[8].mean = Some(TempC::from_tenths(205));
+    assert_blocked(
+        &w.run(4, false),
+        "KNMI mean rose 0.4 °C in an hour (needs a fall of 0.6 °C)",
+    );
+    w.knmi[8].mean = Some(TempC::from_tenths(189));
     // One warm maximum in the window keeps it out.
     w.knmi[3].max = Some(TempC::from_tenths(214));
     assert_blocked(&w.run(4, false), "KNMI maximum 21.4 °C");

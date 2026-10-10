@@ -267,6 +267,10 @@ pub(crate) fn cooling_lock(day: &Day<'_, '_>, variant: bool, out: &mut StrategyO
                         r.mean.map(|m| m.tenths()),
                         day.mean_at(r.interval_end - Duration::minutes(60)),
                     ) {
+                        (Some(now), Some(ago)) if now > ago => blockers.push(format!(
+                            "KNMI mean rose {} in an hour (needs a fall of 0.6 °C)",
+                            c(now - ago)
+                        )),
                         (Some(now), Some(ago)) if now > ago - 6 => blockers.push(format!(
                             "KNMI mean fell {} in an hour < 0.6 °C",
                             c(ago - now)
