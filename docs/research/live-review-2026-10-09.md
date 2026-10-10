@@ -129,8 +129,8 @@ known about :24) and that repricing (about :25¾).
    interval's end every 10 s for two and a half minutes — to 5½ minutes,
    about when the market prices the report the reading precedes — and every
    minute after that, so a reading reaches K about 10 s sooner on average, for
-   50–60 requests an hour instead of 48; readings that come late or not at
-   all stay inside the daily budget.
+   55–65 requests an hour instead of 48 (62 on 10 October); readings that
+   come late or not at all stay inside the daily budget.
 
 ## 5. What to build next
 
@@ -153,7 +153,7 @@ Ranked by expected value; each starts as a measurement, none trades money.
    [fair-use policy](https://developer.dataplatform.knmi.nl/fair-use) calls
    a notification faster and cheaper than polling. The loop's polling stays
    far inside the EDR API's quota of 1,000 requests an hour a key
-   ([EDR API](https://developer.dataplatform.knmi.nl/edr-api)) — 50–60, and
+   ([EDR API](https://developer.dataplatform.knmi.nl/edr-api)) — about 60, and
    at 10 s only while a reading is due — but a notification would save the
    last ≤ 10 s and most of the requests. The dataset's files are NetCDF,
    one per ten minutes for all stations, which the bot does not read yet.

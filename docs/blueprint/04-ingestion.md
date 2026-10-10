@@ -75,8 +75,9 @@ at :20 arrives about :24, the :25 report reaches the bot about :27½ and the
 market reprices from about :25¾, so finding a reading 10 s sooner on
 average (the old cadence was 30 s from two minutes) is a tenth of K's
 window, and a reading still missing 5½ minutes after its interval has lost
-the race. That is 50–60 requests an hour with the lab's neighbours (48 at
-the old cadence); an outage in which no reading comes costs about 1,450 a
+the race. That is 55–65 requests an hour with the lab's neighbours,
+depending on when KNMI publishes (62 on 10 October, with readings found
+about 4 minutes after their interval; 48 at the old cadence); an outage in which no reading comes costs about 1,450 a
 day, and readings that come late every time at most about 3,750 (when
 about 11½ minutes late), inside the provider's budget of 4,000 and KNMI's
 quota of 1,000 an hour.

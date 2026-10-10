@@ -247,7 +247,7 @@ max_body_bytes = 8388608
 # observation or resolution data). Needs WM_KNMI_API_KEY — a free key from
 # the KNMI Developer Portal, sent in the Authorization header, never logged.
 # Live: every [knmi].poll_seconds while a reading is due, plus one per [lab]
-# neighbour after each new reading — 50–60 an hour with three neighbours, at
+# neighbour after each new reading — 55–65 an hour with three neighbours, at
 # most about 3,750 a day when KNMI publishes late, inside the budget below
 # and the 1,000 an hour a registered key allows; `research market`: one per
 # week of history.

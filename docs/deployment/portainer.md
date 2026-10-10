@@ -353,7 +353,7 @@ beyond the KNMI key:
 
 * **KNMI** (`WM_KNMI_API_KEY`): Schiphol's ten-minute readings with global
   radiation, and after each new reading one request each for Voorschoten,
-  De Bilt and Berkhout — 50–60 requests an hour in all (every 10 s only
+  De Bilt and Berkhout — about 60 requests an hour in all (every 10 s only
   while a reading is due), well inside a registered key's 1,000. Without the key the KNMI rules stay idle (one
   alert says so).
 * **Polymarket Data API** (public, no key): today's taker trades every
