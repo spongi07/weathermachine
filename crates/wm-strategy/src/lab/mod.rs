@@ -317,6 +317,9 @@ pub struct LabInputs<'a> {
     pub reports: &'a [WxReport],
     /// Today's day-1 hourly forecast, usable from its knowledge time.
     pub forecast: Option<&'a ForecastDay>,
+    /// When today's forecast may be used at the earliest (the knowledge
+    /// rule's ready time), also while `forecast` is still absent.
+    pub forecast_ready: Option<DateTime<Utc>>,
     /// Yesterday's observed high minus its forecast maximum (tenths °C).
     pub yesterday_error_tenths: Option<i32>,
     /// Today's market's taker trades, oldest first.
@@ -334,6 +337,7 @@ impl LabInputs<'static> {
         neighbours: &[],
         reports: &[],
         forecast: None,
+        forecast_ready: None,
         yesterday_error_tenths: None,
         takers: &[],
         wallets: None,

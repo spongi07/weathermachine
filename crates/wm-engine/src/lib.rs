@@ -18,8 +18,8 @@ mod restore;
 mod snapshot;
 
 pub use engine::{
-    Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, NeighbourStation, StationHint,
-    default_rejection_dedup_secs, lab_risk_config,
+    Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, KNMI_CHECKPOINT_LATEST,
+    NeighbourStation, StationHint, default_rejection_dedup_secs, lab_risk_config,
 };
 pub use restore::{RestoreState, RestoreSummary, RestoredFill};
 pub use snapshot::{

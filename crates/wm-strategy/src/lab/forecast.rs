@@ -39,7 +39,14 @@ pub(crate) fn forecast_peak(fc: &ForecastDay) -> Option<DateTime<Utc>> {
 /// The forecast (usable now) or why not, shown on the high's bucket.
 fn usable<'a>(day: &Day<'_, 'a>, out: &mut StrategyOutput) -> Option<&'a ForecastDay> {
     let why = match day.lab.forecast {
-        None => "no day-1 forecast for today (the [forecast] loop, Open-Meteo)".to_owned(),
+        None => match day.lab.forecast_ready {
+            // Before the knowledge rule's ready time: yesterday's fetch
+            // does not count for today.
+            Some(at) if day.now() < at => {
+                format!("the forecast is usable from {} UTC", at.format("%H:%M"))
+            }
+            _ => "no day-1 forecast for today (the [forecast] loop, Open-Meteo)".to_owned(),
+        },
         Some(fc) if day.now() < fc.known_at => format!(
             "the forecast is usable from {} UTC",
             fc.known_at.format("%H:%M")

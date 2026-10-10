@@ -398,7 +398,9 @@ everything. The report reads it back, day by day:
   once its trigger fires;
 * for K and the lab's KNMI rules also the same at KNMI's last reading before
   each report ("At KNMI's last reading before each report"): their decisive
-  moment, which the evaluation after the report cannot show;
+  moment, which the evaluation after the report cannot show (a reading that
+  arrives more than ten minutes after its report, such as a start's
+  history, is none);
 * the model against the market on the bucket that won: average
   probability, log loss, and who was sure (≥ 0.90) first. Evaluations
   where that bucket still lay in the model's open last cell ("≥ high + 3")

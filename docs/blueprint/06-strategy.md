@@ -768,13 +768,17 @@ there says "KNMI reading not newer than the last METAR". So the engine also
 records an evaluation when KNMI's last reading before a routine report
 arrives (`knmi_checkpoint`: the reading whose interval ends at most ten
 minutes before the report — at Schiphol the ones ending :20 and :50, known
-about :24 and :54). It holds the lines of the strategies that read KNMI
+about :24 and :54), if it arrives at most ten minutes after that report:
+the readings a start reads at once (the last hours) or a backlog after an
+outage are no strategy's decisive moment and leave no checkpoint. It holds
+the lines of the strategies that read KNMI
 (`Strategy::reads_nowcast`: K and the lab's `KNMI_FAMILIES`), the reading's
 mean and maximum and the report it precedes, and no model views: the model
 is scored on the routine evaluations only. `report paper` lists these lines
-per strategy apart ("At KNMI's last reading before each report"), and a
-strategy's log and its dashboard page mark them ("KNMI reading before the
-report").
+per strategy apart ("At KNMI's last reading before each report") and leaves
+out those recorded more than ten minutes after their report (a start's
+history, recorded as checkpoints until 10 October 2026); a strategy's log
+and its dashboard page mark them ("KNMI reading before the report").
 
 **TESTING (G–K).**
 * `wm-strategy/tests/new_strategies.rs`: each strategy's signal, the order
@@ -791,10 +795,12 @@ report").
   next METAR is taken buys the high's NO, which fills; a late, older
   reading neither replaces the newer one nor buys again; the last reading
   before a report records K's lines (not F's) as a KNMI checkpoint, an
-  earlier one does not.
-* `wm-engine` (`the_last_reading_before_a_routine_report_is_a_checkpoint`):
-  which readings are checkpoints, for :25/:55 and hourly reports, across
-  midnight.
+  earlier one does not; a start that reads three hours of readings at once
+  records only the checkpoint whose report is still ahead.
+* `wm-engine` (`the_last_reading_before_a_routine_report_is_a_checkpoint`,
+  `a_reading_that_arrives_long_after_its_report_is_no_checkpoint`): which
+  readings are checkpoints, for :25/:55 and hourly reports, across
+  midnight, and how late one may arrive.
 * The demo (`weather-machine demo`) feeds synthetic ten-minute readings of
   its own temperature curve, labelled *synthetic*, so K and its dashboard
   box can be watched without a key.

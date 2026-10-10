@@ -761,7 +761,7 @@ fn build_day(
     // on the routine ones only.
     let (checkpoints, evaluations): (Vec<&ReportDecision>, Vec<&ReportDecision>) = decisions
         .iter()
-        .filter(|d| d.strategy == "evaluation")
+        .filter(|d| d.strategy == "evaluation" && !late_checkpoint(d))
         .copied()
         .partition(|d| d.inputs.get("knmi_checkpoint").is_some());
     let strategies = strategy_days(&evaluations, &buckets, high, fee_rate, tz);
@@ -1158,6 +1158,16 @@ fn closeness(l: &EvalLine) -> Option<Closeness> {
 
 fn by_closeness(a: Closeness, b: Closeness) -> std::cmp::Ordering {
     a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+}
+
+/// A KNMI checkpoint recorded too long after the report it precedes to have
+/// been anyone's decisive moment: the history read at a start, which the
+/// engine recorded as checkpoints until 10 October 2026.
+fn late_checkpoint(d: &ReportDecision) -> bool {
+    d.inputs
+        .get("knmi_checkpoint")
+        .and_then(|c| c.get("report_at")?.as_str()?.parse::<DateTime<Utc>>().ok())
+        .is_some_and(|report_at| d.at - report_at > wm_engine::KNMI_CHECKPOINT_LATEST)
 }
 
 fn strategy_days(
@@ -2263,6 +2273,21 @@ mod tests {
                 "K 21°C NO · ask 0.74 · p 0.940 · EV +0.1804 — KNMI mean 21.3 °C < 21.8 °C (high 21 + 0.5 + 0.3 °C)",
             ],
         );
+        // The history a start read, which the engine recorded as checkpoints
+        // until 10 October: two and a half hours after its report it counts
+        // as nothing.
+        let history = record(
+            "2026-10-07T11:54:00Z",
+            serde_json::json!({ "knmi_checkpoint": {
+                "interval_end": "2026-10-07T09:20:00Z",
+                "report_at": "2026-10-07T09:25:00Z",
+                "mean_tenths": 180,
+                "max_tenths": 182,
+            } }),
+            &[
+                "K 21°C NO · ask 0.74 · p 0.940 · EV +0.1804 — KNMI reading not newer than the last METAR; KNMI reading 154 min old > 12",
+            ],
+        );
         let inputs = ReportInputs {
             observations: vec![ReportObservation {
                 observed_at: t("2026-10-07T11:55:00Z"),
@@ -2274,7 +2299,7 @@ mod tests {
                 from_failover: false,
             }],
             outcomes: vec![outcome(21), outcome(22)],
-            decisions: vec![checkpoint, routine],
+            decisions: vec![checkpoint, routine, history],
             books: HashMap::from([(
                 "y22".to_owned(),
                 vec![ReportBookTop {

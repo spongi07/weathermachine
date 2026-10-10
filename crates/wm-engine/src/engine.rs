@@ -613,13 +613,19 @@ impl Engine {
                     self.nowcasts.insert(o.station.clone(), o.clone());
                     if let Some(i) = self.location_index_for_station(&o.station) {
                         // The last reading before a routine report is the
-                        // KNMI strategies' decisive moment: it is recorded.
-                        let record =
-                            knmi_checkpoint(o.interval_end, &self.cfg.locations[i].routine_minutes)
-                                .map_or(Record::None, |report_at| Record::KnmiCheckpoint {
-                                    interval_end: o.interval_end,
-                                    report_at,
-                                });
+                        // KNMI strategies' decisive moment: it is recorded
+                        // when it arrives in time.
+                        let record = knmi_checkpoint(
+                            o.interval_end,
+                            &self.cfg.locations[i].routine_minutes,
+                            self.now,
+                        )
+                        .map_or(Record::None, |report_at| {
+                            Record::KnmiCheckpoint {
+                                interval_end: o.interval_end,
+                                report_at,
+                            }
+                        });
                         self.evaluate_location(i, record, &mut out);
                     }
                 }
@@ -928,20 +934,23 @@ impl Engine {
         })
     }
 
-    /// The lab's day-1 forecast for `date` (the configured product, else
-    /// the model's) and yesterday's error: its observed high (whole °C, the
-    /// location's view) minus its forecast maximum, tenths.
+    /// The lab's forecast product: the configured one, else the model's.
+    fn lab_forecast_product(&self) -> Option<&ForecastProduct> {
+        self.cfg
+            .lab_forecast
+            .as_ref()
+            .or_else(|| self.model.forecast_product())
+    }
+
+    /// The lab's day-1 forecast for `date` and yesterday's error: its
+    /// observed high (whole °C, the location's view) minus its forecast
+    /// maximum, tenths.
     fn lab_forecast(
         &self,
         loc: &EngineLocation,
         date: NaiveDate,
     ) -> (Option<ForecastDay>, Option<i32>) {
-        let Some(product) = self
-            .cfg
-            .lab_forecast
-            .as_ref()
-            .or_else(|| self.model.forecast_product())
-        else {
+        let Some(product) = self.lab_forecast_product() else {
             return (None, None);
         };
         let key = (
@@ -1054,6 +1063,9 @@ impl Engine {
             } else {
                 (None, None)
             };
+            let forecast_ready = self
+                .lab_forecast_product()
+                .map(|p| p.usable_from(today, loc.timezone));
             let day_start = local_day_bounds(today, loc.timezone).0;
             let reports: &[WxReport] = self.lab.reports.get(&loc.station).map_or(&[], |r| {
                 &r[r.partition_point(|x| x.observed_at < day_start)..]
@@ -1072,6 +1084,7 @@ impl Engine {
                 neighbours: &neighbours,
                 reports,
                 forecast: forecast.as_ref(),
+                forecast_ready,
                 yesterday_error_tenths: yesterday_error,
                 takers: self
                     .lab
@@ -1805,13 +1818,25 @@ enum Record {
     },
 }
 
+/// How long after the report it precedes a KNMI reading may arrive and
+/// still be recorded as a checkpoint.
+pub const KNMI_CHECKPOINT_LATEST: Duration = Duration::minutes(10);
+
 /// The routine report a ten-minute reading ending at `interval_end` is the
 /// last one before: the first routine report time after its end, when that
 /// lies at most ten minutes later (the next reading ends with or after the
 /// report, and arrives minutes later still). Schiphol reports at :25 and
 /// :55, so its checkpoints are the readings ending at :20 and :50; for a
-/// station reporting at :00 it is the reading ending at :50.
-fn knmi_checkpoint(interval_end: DateTime<Utc>, routine_minutes: &[u8]) -> Option<DateTime<Utc>> {
+/// station reporting at :00 it is the reading ending at :50. None as well
+/// when the reading `arrived` more than [`KNMI_CHECKPOINT_LATEST`] after
+/// that report — the history read at a start, a backlog after an outage:
+/// by then the report is known and the next reading due, so it was no
+/// strategy's decisive moment.
+fn knmi_checkpoint(
+    interval_end: DateTime<Utc>,
+    routine_minutes: &[u8],
+    arrived: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
     let hour = interval_end
         .date_naive()
         .and_hms_opt(interval_end.hour(), 0, 0)?
@@ -1829,6 +1854,7 @@ fn knmi_checkpoint(interval_end: DateTime<Utc>, routine_minutes: &[u8]) -> Optio
         })
         .min()
         .filter(|t| *t - interval_end <= Duration::minutes(10))
+        .filter(|t| arrived - *t <= KNMI_CHECKPOINT_LATEST)
 }
 
 /// The bucket that came closest to a trade: the fewest blockers, then the
@@ -1893,6 +1919,8 @@ mod tests {
     #[test]
     fn the_last_reading_before_a_routine_report_is_a_checkpoint() {
         let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        // Readings arrive about four minutes after their interval's end.
+        let on_time = |end: &str| t(end) + Duration::minutes(4);
         let eham = [25u8, 55];
         // Schiphol: the readings ending at :20 and :50, five minutes before
         // the :25 and :55 reports.
@@ -1905,18 +1933,56 @@ mod tests {
             ("2026-10-07T11:40:00Z", None),
             ("2026-10-07T11:00:00Z", None),
         ] {
-            assert_eq!(knmi_checkpoint(t(end), &eham), report.map(t), "{end}");
+            assert_eq!(
+                knmi_checkpoint(t(end), &eham, on_time(end)),
+                report.map(t),
+                "{end}"
+            );
         }
         // A station reporting on the hour: the reading ending ten minutes
         // before it, also across midnight; not the one ending with it, which
         // arrives after the report is known.
         assert_eq!(
-            knmi_checkpoint(t("2026-10-07T23:50:00Z"), &[0]),
+            knmi_checkpoint(
+                t("2026-10-07T23:50:00Z"),
+                &[0],
+                on_time("2026-10-07T23:50:00Z")
+            ),
             Some(t("2026-10-08T00:00:00Z"))
         );
-        assert_eq!(knmi_checkpoint(t("2026-10-08T00:00:00Z"), &[0]), None);
-        assert_eq!(knmi_checkpoint(t("2026-10-07T11:20:00Z"), &[]), None);
-        assert_eq!(knmi_checkpoint(t("2026-10-07T11:20:00Z"), &[75]), None);
+        for (end, minutes) in [
+            ("2026-10-08T00:00:00Z", &[0u8][..]),
+            ("2026-10-07T11:20:00Z", &[]),
+            ("2026-10-07T11:20:00Z", &[75]),
+        ] {
+            assert_eq!(knmi_checkpoint(t(end), minutes, on_time(end)), None);
+        }
+    }
+
+    #[test]
+    fn a_reading_that_arrives_long_after_its_report_is_no_checkpoint() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let eham = [25u8, 55];
+        let end = t("2026-10-09T21:20:00Z");
+        let report = Some(t("2026-10-09T21:25:00Z"));
+        // Late, but up to ten minutes after the report it precedes.
+        assert_eq!(
+            knmi_checkpoint(end, &eham, t("2026-10-09T21:31:36Z")),
+            report
+        );
+        assert_eq!(
+            knmi_checkpoint(end, &eham, t("2026-10-09T21:35:00Z")),
+            report
+        );
+        assert_eq!(knmi_checkpoint(end, &eham, t("2026-10-09T21:35:01Z")), None);
+        // 9 October 21:55:56: the start reads three hours of history at
+        // once; only the 21:50 reading still precedes a report in time.
+        let start = t("2026-10-09T21:55:56Z");
+        let checkpoints: Vec<_> = (0..18)
+            .map(|i| t("2026-10-09T19:00:00Z") + Duration::minutes(10 * i))
+            .filter_map(|end| knmi_checkpoint(end, &eham, start))
+            .collect();
+        assert_eq!(checkpoints, vec![t("2026-10-09T21:55:00Z")]);
     }
 
     fn eval(maker_bid: Option<Price>) -> BucketEvaluation {

@@ -59,6 +59,7 @@ struct World {
     knmi: Vec<TenMinuteObservation>,
     neighbours: Vec<(String, f64, Vec<TenMinuteObservation>)>,
     forecast: Option<ForecastDay>,
+    forecast_ready: Option<DateTime<Utc>>,
     yesterday_error: Option<i32>,
     takers: Vec<TakerTrade>,
     wallets: Option<WalletScores>,
@@ -87,6 +88,7 @@ impl World {
             knmi: Vec::new(),
             neighbours: Vec::new(),
             forecast: None,
+            forecast_ready: None,
             yesterday_error: None,
             takers: Vec::new(),
             wallets: None,
@@ -221,6 +223,7 @@ impl World {
             neighbours: &neighbours,
             reports: &reports,
             forecast: self.forecast.as_ref(),
+            forecast_ready: self.forecast_ready,
             yesterday_error_tenths: self.yesterday_error,
             takers: &self.takers,
             wallets: self.wallets.as_ref(),
@@ -876,6 +879,15 @@ fn l14_buys_the_bucket_the_morning_departure_points_to() {
     // Without a forecast the rule says so.
     let mut none = World::new("08:30");
     none.temps(&[("08:25", 190)]);
+    assert_blocked(&none.run(14, false), "no day-1 forecast");
+    // Before today's ready time it says from when: yesterday's fetch does
+    // not count for today.
+    none.forecast_ready = Some(z("09:00"));
+    assert_blocked(
+        &none.run(14, false),
+        "the forecast is usable from 09:00 UTC",
+    );
+    none.forecast_ready = Some(z("08:00"));
     assert_blocked(&none.run(14, false), "no day-1 forecast");
 }
 

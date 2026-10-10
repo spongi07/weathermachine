@@ -434,7 +434,7 @@ stale or throttled weather source.
 | global radiation `qg` against the clear sky | the same request | L25 |
 | Voorschoten, De Bilt, Berkhout | one KNMI request each after every new reading | L24 |
 | the METAR's wind, weather, cloud, pressure and TREND | the reports' raw text | L8–L13, L23, L24 |
-| the hourly day-1 forecast and yesterday's error | Open-Meteo, read even when the model does not use it | L14–L17 |
+| the hourly day-1 forecast and yesterday's error | Open-Meteo, read even when the model does not use it; today's series from the knowledge rule's ready time (08:00 local), which the rules name until then | L14–L17 |
 | today's taker trades, wallets hashed as in `research market`'s cache | Data API, every 20 s | L18–L21 |
 | every taker's record on the last 60 settled days | Gamma and the Data API, at start and at 07:00 local | L19, L20 |
 

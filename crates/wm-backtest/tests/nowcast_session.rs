@@ -437,3 +437,66 @@ fn the_last_reading_before_a_report_records_the_knmi_strategies_decisive_moment(
         |d| d.strategy.as_str() == "evaluation" && lines(d).iter().any(|l| l.starts_with("F "))
     ));
 }
+
+#[test]
+fn a_start_reads_the_history_at_once_and_records_only_the_checkpoint_still_ahead() {
+    let m = wm_core::synthetic::synthetic_temperature_market(
+        &loc(),
+        &eham(),
+        NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+        chrono_tz::Europe::Amsterdam,
+        13,
+        24,
+        utc("2026-06-30T20:00:00Z"),
+    );
+    let mut s = SimulationSession::new(
+        config(),
+        SimConfig::default(),
+        Duration::hours(2),
+        Arc::new(NoEdgeModel),
+    );
+    let mut h =
+        ProviderHealthSnapshot::new(ProviderId::awc(), Some(eham()), utc("2026-06-30T21:00:00Z"));
+    h.state = ProviderHealthState::Healthy;
+    s.push(env(
+        utc("2026-06-30T21:00:00Z"),
+        WeatherMachineEvent::ProviderHealthChanged(ProviderHealthEvent {
+            previous_state: None,
+            snapshot: h,
+        }),
+    ));
+    s.push(env(
+        utc("2026-06-30T21:00:01Z"),
+        WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m.clone() }),
+    ));
+    let mut t = utc("2026-06-30T22:25:00Z");
+    while t <= utc("2026-07-01T11:25:00Z") {
+        s.push(report(t, 15));
+        t += Duration::minutes(30);
+    }
+    // 11:56, a minute after the 11:55 report and before it is known: the
+    // service starts and reads three hours of KNMI readings at once, oldest
+    // first. Of the six that were the last before a report, only the 11:50
+    // one arrives in time for it; the others' reports are long known.
+    s.push(no_book(&m, utc("2026-07-01T11:56:00Z")));
+    let mut end = utc("2026-07-01T09:00:00Z");
+    while end <= utc("2026-07-01T11:50:00Z") {
+        s.push(reading(&end.to_rfc3339(), 150, 152, "2026-07-01T11:56:00Z"));
+        end += Duration::minutes(10);
+    }
+    let out = s.run_until(utc("2026-07-01T11:56:00Z"));
+    assert_eq!(
+        s.engine().nowcast(&eham()).map(|n| n.interval_end),
+        Some(utc("2026-07-01T11:50:00Z"))
+    );
+    let cp = checkpoints(&out.decisions);
+    assert_eq!(
+        cp.len(),
+        1,
+        "{:?}",
+        cp.iter().map(|d| &d.summary).collect::<Vec<_>>()
+    );
+    let c = &cp[0].inputs["knmi_checkpoint"];
+    assert_eq!(c["interval_end"], "2026-07-01T11:50:00Z");
+    assert_eq!(c["report_at"], "2026-07-01T11:55:00Z");
+}

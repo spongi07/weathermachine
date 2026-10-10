@@ -182,8 +182,12 @@ fn market() -> DailyTemperatureMarket {
 
 /// A day up to the 11:25Z report (18 °C) in a fresh session.
 fn session(families: &[u8], m: &DailyTemperatureMarket) -> SimulationSession {
+    session_with(config(families), m)
+}
+
+fn session_with(cfg: EngineConfig, m: &DailyTemperatureMarket) -> SimulationSession {
     let mut s = SimulationSession::new(
-        config(families),
+        cfg,
         SimConfig::default(),
         Duration::hours(2),
         Arc::new(NoEdgeModel),
@@ -594,4 +598,71 @@ fn the_lab_reads_yesterdays_error_and_counts_each_taker_trade_once() {
     );
     assert_eq!(lab.taker_trades, 1);
     assert_eq!(lab.wallet_days, None, "no records loaded");
+}
+
+#[test]
+fn before_todays_ready_time_the_forecast_rules_say_when_the_forecast_is_usable() {
+    use wm_core::event::ForecastEvent;
+    use wm_core::forecast::ForecastProduct;
+    let m = market();
+    let mut cfg = config(&[14]);
+    cfg.lab_forecast = Some(ForecastProduct {
+        provider: ProviderId::open_meteo(),
+        model: "test".into(),
+        lead_days: 1,
+        ready_local_minute: 480, // 08:00 CEST = 06:00Z
+    });
+    let mut s = session_with(cfg, &m);
+    // The day-1 series of 1 July (local), as fetched at `at`.
+    let fetched = |at: &str| {
+        let start = utc("2026-06-30T22:00:00Z");
+        env(
+            utc(at),
+            WeatherMachineEvent::ForecastUpdate(ForecastEvent {
+                location: loc(),
+                provider: ProviderId::open_meteo(),
+                model: "test".into(),
+                issued_at: utc(at),
+                predicted_max: None,
+                hourly: (0..=24)
+                    .map(|h: i32| {
+                        let at = start + Duration::hours(i64::from(h));
+                        (at, TempC::from_tenths(150 + 2 * h))
+                    })
+                    .collect(),
+                lead_days: Some(1),
+            }),
+        )
+    };
+    // The last fetch of 30 June does not count for 1 July: until 06:00Z the
+    // L14 line names the ready time, not a missing forecast.
+    s.push(fetched("2026-06-30T21:30:00Z"));
+    let l14 = |out: &wm_backtest::SessionOutput| {
+        out.decisions
+            .iter()
+            .rev()
+            .filter(|d| d.strategy.as_str() == "evaluation")
+            .find_map(|d| {
+                d.outputs["evaluations"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|l| l.as_str())
+                    .find(|l| l.starts_with("L14 "))
+                    .map(str::to_owned)
+            })
+            .unwrap()
+    };
+    let line = l14(&s.run_until(utc("2026-07-01T05:58:00Z")));
+    assert!(
+        line.contains("the forecast is usable from 06:00 UTC"),
+        "{line}"
+    );
+    // Fetched again at 06:02, it is in use: L14 waits for its window only.
+    s.push(fetched("2026-07-01T06:02:00Z"));
+    let line = l14(&s.run_until(utc("2026-07-01T06:28:00Z")));
+    assert!(line.contains("outside 10:00–12:30"), "{line}");
+    assert!(
+        !line.contains("forecast is usable") && !line.contains("no day-1 forecast"),
+        "{line}"
+    );
 }

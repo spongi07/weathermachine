@@ -118,7 +118,11 @@ known about :24) and that repricing (about :25¾).
    model is still scored on the routine evaluations only. Until now every K
    line read "KNMI reading not newer than the last METAR"; in the demo the
    checkpoint line shows K's own condition instead ("KNMI mean 11.7 °C <
-   11.8 °C").
+   11.8 °C"). Since 10 October a reading counts only if it arrives at most
+   ten minutes after the report it precedes: each restart on the evening of
+   9 October had read the last three hours at once and recorded each
+   reading before a long-known report as a checkpoint (five at 21:55 UTC),
+   which `report paper` now leaves out.
 3. **KNMI is polled faster when a reading is due.** Every reading of
    8 October was found by the poll 4 minutes after its interval, none by
    the one at 3½ minutes; the loop now asks from 3 minutes after each
