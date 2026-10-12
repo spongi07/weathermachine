@@ -202,6 +202,10 @@ pub struct Settlement {
     /// The lab books' P&L together.
     #[serde(default)]
     pub lab_pnl: Usd,
+    /// The live book's P&L (real money; settled here at the observed high,
+    /// paid out by the venue when the winning shares are redeemed).
+    #[serde(default)]
+    pub live_pnl: Usd,
     pub at: DateTime<Utc>,
 }
 
@@ -218,6 +222,9 @@ pub struct SessionOutput {
     pub hints: Vec<(StationId, StationHint)>,
     pub trades: Vec<TradeRecord>,
     pub settlements: Vec<Settlement>,
+    /// Approved orders of the live book: the runtime hands them to the live
+    /// venue (they never reach the simulated exchange).
+    pub live_orders: Vec<ApprovedIntent>,
 }
 
 impl SessionOutput {
@@ -439,6 +446,12 @@ impl SimulationSession {
         for a in &result.approved {
             self.strategy_of
                 .insert(a.client_order_id().clone(), a.intent().strategy.clone());
+            // The live book's orders go to the venue, never to the simulator;
+            // the venue's updates come back as order events.
+            if self.engine.is_live_strategy(&a.intent().strategy) {
+                out.live_orders.push(a.clone());
+                continue;
+            }
             let fees = self
                 .engine
                 .markets()
@@ -477,6 +490,7 @@ impl SimulationSession {
                 continue;
             };
             let lab_before = self.engine.lab_realized_pnl_total();
+            let live_before = self.engine.live_realized_pnl();
             let pnl = self.engine.settle(&slug, final_value);
             out.settlements.push(Settlement {
                 event_slug: slug,
@@ -484,6 +498,7 @@ impl SimulationSession {
                 final_value,
                 pnl,
                 lab_pnl: self.engine.lab_realized_pnl_total() - lab_before,
+                live_pnl: self.engine.live_realized_pnl() - live_before,
                 at: now,
             });
         }

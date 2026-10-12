@@ -137,6 +137,8 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
         evaluate_on_book_updates: true,
         decision_log_capacity: 2_000,
         rejection_dedup_secs: wm_engine::default_rejection_dedup_secs(),
+        // the paper runtime adds the live book when the live twin is on
+        live: None,
     })
 }
 

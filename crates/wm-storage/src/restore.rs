@@ -61,6 +61,42 @@ impl PgStore {
             .collect()
     }
 
+    /// Every fill of one strategy's orders, oldest first (the live twin's
+    /// loss stop counts its settled days across restarts).
+    pub async fn strategy_fills(&self, strategy: &str) -> Result<Vec<RestoreFillRow>> {
+        let rows = sqlx::query(
+            "SELECT f.client_order_id, o.strategy, o.location_id, o.event_slug, m.local_date,
+                    f.token_id, f.side, f.price_micros, f.shares_micros, f.fee_micros,
+                    f.liquidity, f.ts
+             FROM fills f
+             JOIN orders o ON o.client_order_id = f.client_order_id
+             JOIN markets m ON m.event_slug = o.event_slug
+             WHERE o.strategy = $1
+             ORDER BY f.ts, f.id",
+        )
+        .bind(strategy)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(RestoreFillRow {
+                    client_order_id: r.try_get("client_order_id")?,
+                    strategy: r.try_get("strategy")?,
+                    location_id: r.try_get("location_id")?,
+                    event_slug: r.try_get("event_slug")?,
+                    local_date: r.try_get("local_date")?,
+                    token_id: r.try_get("token_id")?,
+                    side: r.try_get("side")?,
+                    price_micros: r.try_get("price_micros")?,
+                    shares_micros: r.try_get("shares_micros")?,
+                    fee_micros: r.try_get("fee_micros")?,
+                    liquidity: r.try_get("liquidity")?,
+                    ts: r.try_get("ts")?,
+                })
+            })
+            .collect()
+    }
+
     /// Strategy, limit price and filled shares (micros) of the opening buy
     /// orders created at or after `since`: what their approvals left in the
     /// daily new exposure once the unfilled parts ended (an order still

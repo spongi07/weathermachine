@@ -278,7 +278,10 @@ pub struct DayReport {
     /// The same for the strategy lab's paper strategies (L1–L25), each on
     /// its own book (`None`: the lab traded nothing settled that day).
     pub lab_pnl_usd: Option<f64>,
-    /// Both per strategy (engine id; fills of orders placed before the
+    /// The live twin's (`G_live`): real money, on its own book (`None`: it
+    /// held nothing settled that day).
+    pub live_pnl_usd: Option<f64>,
+    /// All per strategy (engine id; fills of orders placed before the
     /// report's first day count as `?`).
     pub strategy_pnl: BTreeMap<String, f64>,
     pub providers: Vec<ProviderDay>,
@@ -487,7 +490,9 @@ pub struct Totals {
     pub pnl_usd: f64,
     /// The same of the strategy lab's own books.
     pub lab_pnl_usd: f64,
-    /// Both per strategy.
+    /// The live twin's: real money.
+    pub live_pnl_usd: f64,
+    /// All per strategy.
     pub pnl_by_strategy: BTreeMap<String, f64>,
     pub forecast_days: usize,
     pub forecast_mean_error_c: Option<f64>,
@@ -515,8 +520,8 @@ pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) 
     let highs: HashMap<NaiveDate, i32> = daily_highs(&inputs.observations, plan.tz)
         .into_iter()
         .collect();
-    // The main book's total leaves out the lab's fills: each lab strategy
-    // trades a paper book of its own (its P&L is listed apart).
+    // The main book's total leaves out the lab's fills and the live twin's:
+    // each trades a book of its own (its P&L is listed apart).
     let strategy_of: HashMap<&str, &str> = inputs
         .orders
         .iter()
@@ -528,7 +533,7 @@ pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) 
         .filter(|f| {
             !strategy_of
                 .get(f.client_order_id.as_str())
-                .is_some_and(|s| wm_strategy::lab::is_lab_id(s))
+                .is_some_and(|s| own_book(s))
         })
         .cloned()
         .collect();
@@ -546,6 +551,10 @@ pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) 
             .map(|(_, v)| *v)
             .collect();
         day.lab_pnl_usd = (!lab.is_empty()).then(|| lab.iter().sum());
+        day.live_pnl_usd = day
+            .strategy_pnl
+            .get(wm_strategy::tail_seller::LIVE_ID)
+            .copied();
         days.push(day);
         match date.succ_opt() {
             Some(d) => date = d,
@@ -679,6 +688,21 @@ fn settle(
         *out.entry(info.date).or_insert(0.0) += cash + payout;
     }
     out
+}
+
+/// Settled P&L of `fills` at the METAR high of their market's day (days
+/// before `today`), as the report settles it: the live twin's loss stop
+/// counts earlier runs' settled days with it.
+pub(crate) fn settled_total(
+    fills: &[ReportFill],
+    outcomes: &[ReportOutcome],
+    observations: &[ReportObservation],
+    tz: Tz,
+    today: NaiveDate,
+) -> f64 {
+    let tokens = token_index(outcomes);
+    let highs: HashMap<NaiveDate, i32> = daily_highs(observations, tz).into_iter().collect();
+    settle(fills, &tokens, &highs, today).values().sum()
 }
 
 /// [`settle`] per strategy: each fill counts for its order's strategy.
@@ -875,6 +899,7 @@ fn build_day(
         fills,
         pnl_usd: pnl.get(&date).copied(),
         lab_pnl_usd: None,
+        live_pnl_usd: None,
         strategy_pnl: BTreeMap::new(),
         providers,
         health_changes,
@@ -1412,6 +1437,7 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
         t.fills += d.fills;
         t.pnl_usd += d.pnl_usd.unwrap_or(0.0);
         t.lab_pnl_usd += d.lab_pnl_usd.unwrap_or(0.0);
+        t.live_pnl_usd += d.live_pnl_usd.unwrap_or(0.0);
         for (k, v) in &d.strategy_pnl {
             *t.pnl_by_strategy.entry(k.clone()).or_default() += v;
         }
@@ -1461,10 +1487,18 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
 
 /// `$+1.20 (A_buy_yes_final_high $+1.20)`: a total with its split per
 /// strategy, when there is one.
-/// The main book's strategies and the lab's, apart.
+/// A strategy that trades a book of its own: a lab strategy, or the live
+/// twin.
+fn own_book(strategy: &str) -> bool {
+    wm_strategy::lab::is_lab_id(strategy) || strategy == wm_strategy::tail_seller::LIVE_ID
+}
+
+/// The main book's strategies and the lab's, apart (the live twin in
+/// neither: its real money is reported on its own line).
 fn split_books(split: &BTreeMap<String, f64>) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
     split
         .iter()
+        .filter(|(k, _)| k.as_str() != wm_strategy::tail_seller::LIVE_ID)
         .map(|(k, v)| (k.clone(), *v))
         .partition(|(k, _)| !wm_strategy::lab::is_lab_id(k))
 }
@@ -1509,12 +1543,14 @@ pub(crate) fn usd(v: f64) -> String {
 /// A settlement's P&L: the main book's, then the lab books' together when
 /// they held the market ("PnL $2.56; the lab books −$14.00").
 pub(crate) fn settled_pnl(s: &wm_backtest::Settlement) -> String {
-    let main = format!("PnL {}", usd(s.pnl.as_f64()));
-    if s.lab_pnl.is_zero() {
-        main
-    } else {
-        format!("{main}; the lab books {}", usd(s.lab_pnl.as_f64()))
+    let mut text = format!("PnL {}", usd(s.pnl.as_f64()));
+    if !s.lab_pnl.is_zero() {
+        text.push_str(&format!("; the lab books {}", usd(s.lab_pnl.as_f64())));
     }
+    if !s.live_pnl.is_zero() {
+        text.push_str(&format!("; LIVE (real money) {}", usd(s.live_pnl.as_f64())));
+    }
+    text
 }
 
 /// A price as the book quotes it: two decimals, three on a sub-cent tick
@@ -1612,6 +1648,16 @@ pub fn markdown(r: &PaperReport) -> String {
             s,
             "- Strategy lab (paper, each strategy on its own book): settled P&L {}.",
             with_split(usd(t.lab_pnl_usd), &lab)
+        );
+    }
+    if t.pnl_by_strategy
+        .contains_key(wm_strategy::tail_seller::LIVE_ID)
+    {
+        let _ = writeln!(
+            s,
+            "- **LIVE (real money), {}:** settled P&L {} at the METAR high; the venue pays a win out when its shares are redeemed.",
+            wm_strategy::tail_seller::LIVE_ID,
+            usd(t.live_pnl_usd)
         );
     }
     let _ = writeln!(
@@ -1984,6 +2030,9 @@ fn day_markdown(s: &mut String, d: &DayReport) {
             with_split(usd(p), &lab)
         );
     }
+    if let Some(p) = d.live_pnl_usd {
+        let _ = writeln!(s, "- **LIVE (real money), settled:** {}", usd(p));
+    }
     if !d.providers.is_empty() {
         let p: Vec<String> = d
             .providers
@@ -2058,6 +2107,7 @@ mod tests {
             final_value: 20,
             pnl: Usd::parse(pnl).unwrap(),
             lab_pnl: Usd::parse(lab).unwrap(),
+            live_pnl: Usd::ZERO,
             at: Utc::now(),
         };
         assert_eq!(
@@ -2065,6 +2115,11 @@ mod tests {
             "PnL $2.56; the lab books −$14.00"
         );
         assert_eq!(settled_pnl(&settled("2.56", "0")), "PnL $2.56");
+        let live = wm_backtest::Settlement {
+            live_pnl: Usd::parse("0.80").unwrap(),
+            ..settled("2.56", "0")
+        };
+        assert_eq!(settled_pnl(&live), "PnL $2.56; LIVE (real money) $0.80");
     }
 
     /// Inside the model's open last cell ("≥ high + 3") a bucket's

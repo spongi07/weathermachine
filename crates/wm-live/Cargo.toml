@@ -1,0 +1,31 @@
+[package]
+name = "wm-live"
+description = "Weather Machine live venue: Polymarket CLOB order signing (EIP-712), API auth, post-only orders, reconciliation and the readiness gates. The only crate that can move money."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wm-core.workspace = true
+base64.workspace = true
+chrono.workspace = true
+hex.workspace = true
+hmac.workspace = true
+k256.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock.workspace = true
+
+[lints]
+workspace = true

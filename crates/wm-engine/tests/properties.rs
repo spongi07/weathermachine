@@ -95,6 +95,7 @@ fn config() -> EngineConfig {
         evaluate_on_book_updates: true,
         decision_log_capacity: 1000,
         rejection_dedup_secs: 0,
+        live: None,
     }
 }
 

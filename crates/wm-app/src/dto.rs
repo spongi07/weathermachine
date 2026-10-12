@@ -7,7 +7,7 @@ use wm_core::health::ProviderHealthSnapshot;
 use wm_core::ids::{StationId, TokenId};
 use wm_core::market::{OrderBook, OutcomeSide, TemperatureBucket};
 use wm_core::resolution::{ObservationFilter, ResolutionSourceKind};
-use wm_core::units::Price;
+use wm_core::units::{Price, Usd};
 use wm_dashboard_api::*;
 use wm_engine::{EngineSnapshot, LocationSnapshot};
 use wm_polymarket::StreamStatus;
@@ -37,6 +37,8 @@ pub struct DtoInputs<'a> {
     /// Strategy F's settings and the installed model's peak times.
     pub peak_slot: &'a wm_strategy::PeakSlotConfig,
     pub peak_times: Option<&'a wm_strategy::PeakTimes>,
+    /// The live venue's status (`None`: the live twin is off or did not start).
+    pub live: Option<&'a wm_live::LiveStatus>,
 }
 
 fn evaluation_dto(e: &wm_strategy::BucketEvaluation) -> EvaluationDto {
@@ -796,7 +798,7 @@ pub fn build(
         kill_switch: snap.kill_switch.clone(),
         storage_ok: snap.storage_ok,
         execution_ok: snap.execution_ok,
-        live_trading_enabled: false,
+        live_trading_enabled: snap.live.is_some(),
         engine: EngineDto {
             events_total: snap.stats.events_total,
             evaluations_total: snap.stats.evaluations_total,
@@ -843,7 +845,51 @@ pub fn build(
             .collect(),
         strategies,
         lab: lab_dto(snap),
+        live: live_dto(snap, inp.live, generated_at),
     }
+}
+
+/// The live twin: the venue's word and the live book.
+fn live_dto(
+    snap: &EngineSnapshot,
+    status: Option<&wm_live::LiveStatus>,
+    now: DateTime<Utc>,
+) -> Option<LiveDto> {
+    let book = snap.live.as_ref()?;
+    let open: Vec<_> = book
+        .positions
+        .iter()
+        .filter(|p| p.shares.micros() > 0)
+        .collect();
+    let mut dto = LiveDto {
+        strategy: book.strategy.to_string(),
+        ready: book.blocked.is_none(),
+        blockers: book
+            .blocked
+            .as_deref()
+            .map(|b| b.split("; ").map(str::to_owned).collect())
+            .unwrap_or_default(),
+        open_positions: open.len(),
+        capital_usd: open.iter().map(|p| p.cost_basis.as_f64()).sum(),
+        worst_case_usd: book.exposure.global_worst_case.as_f64(),
+        max_open_usd: book.risk.global_max_exposure_usd.as_f64(),
+        today_realized_usd: book.daily_realized_pnl.as_f64(),
+        realized_since_live_usd: book.realized_since_live.as_f64(),
+        max_total_loss_usd: book.max_total_loss.map(Usd::as_f64),
+        ..LiveDto::default()
+    };
+    if let Some(st) = status {
+        dto.signer = st.signer.clone();
+        dto.funder = st.funder.clone();
+        dto.location = st.location.clone();
+        dto.protocol = st.protocol;
+        dto.balance_usd = st.balance.map(Usd::as_f64);
+        dto.reserved_usd = st.reserved.as_f64();
+        dto.heartbeat_age_s = st.heartbeat_at.map(|t| (now - t).num_seconds());
+        dto.resting_orders = st.resting;
+        dto.unresolved_orders = st.unresolved;
+    }
+    Some(dto)
 }
 
 /// The strategy lab: its inputs per location and each strategy's own book

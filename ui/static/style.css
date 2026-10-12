@@ -81,6 +81,8 @@ b, .strong { font-weight: 600; }
 .banner.demo { color: #ffd479; background: rgba(240, 176, 63, 0.1); border-color: rgba(240, 176, 63, 0.4); }
 .banner.bad { color: #ffb4ae; background: var(--bad-bg); border-color: rgba(255, 90, 87, 0.45); }
 .banner.info { color: #a9cdfa; background: var(--info-bg); border-color: rgba(78, 161, 255, 0.35); font-weight: 500; }
+.banner.live { color: #ffd479; background: rgba(240, 176, 63, 0.12); border-color: rgba(240, 176, 63, 0.55); }
+ul.plain { list-style: none; margin: 0 0 6px; padding: 0; }
 
 /* KPI strip ---------------------------------------------------------------- */
 /* Eight cards: one row on desktop, 4 × 2 on tablets, 2 × 4 on phones — never a lone card. */

@@ -119,6 +119,7 @@ fn config() -> BacktestConfig {
             evaluate_on_book_updates: true,
             decision_log_capacity: 1000,
             rejection_dedup_secs: 60,
+            live: None,
         },
         sim: SimConfig {
             latency_ms: 500,

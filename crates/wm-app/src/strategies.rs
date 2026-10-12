@@ -107,6 +107,17 @@ pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
             "Sells the far tails: rests a NO bid, one tick inside the spread, on every bucket two or more degrees above the day's high whose YES is offered cheaply — an offer of that longshot to the takers who buy it — when the model rates the bucket no higher than that price. Orders expire ten minutes before each report; a filled order is held to settlement.",
             &st.tail_seller,
         ),
+        {
+            let mut e = entry(
+                wm_strategy::tail_seller::LIVE_ID,
+                "Tail seller — LIVE (real money)",
+                cfg.file.live.enabled,
+                "Strategy G's live twin: G's rule on a live book of its own, its post-only NO bids placed on Polymarket with real money (sized to whole cents), beside paper G. It places an order only while the live venue's checks pass (credentials, location, heartbeats, the venue's positions against the books, collateral) and stops after its total-loss limit. Held to settlement; a win is paid out when its shares are redeemed.",
+                &cfg.file.live,
+            );
+            e.letter = "GL".to_owned();
+            e
+        },
         entry(
             wm_strategy::next_degree::ID,
             "Next degree",
@@ -498,7 +509,26 @@ mod tests {
             .filter(|s| !s.lab)
             .map(|s| s.letter.as_str())
             .collect();
-        assert_eq!(all, "ABCDEFGHIJKU");
+        assert_eq!(all, "ABCDEFGGLHIJKU", "GL: G's live twin");
+        // the live twin is listed only while it is switched on
+        assert!(!c.iter().any(|s| s.id == wm_strategy::tail_seller::LIVE_ID));
+        let mut live = cfg.clone();
+        live.file.live.enabled = true;
+        let gl = catalog(&live)
+            .into_iter()
+            .find(|s| s.id == wm_strategy::tail_seller::LIVE_ID)
+            .unwrap();
+        assert!(gl.name.contains("real money"));
+        assert!(
+            gl.settings
+                .iter()
+                .any(|(k, v)| k == "notional" && v == "10.00")
+        );
+        assert!(
+            gl.settings
+                .iter()
+                .any(|(k, v)| k == "max_total_loss_usd" && v == "20.00")
+        );
         assert_eq!(every_strategy(&fewer).iter().filter(|s| s.lab).count(), 25);
         let mut again = cfg.clone();
         again.file.strategies.buy_yes.enabled = true;

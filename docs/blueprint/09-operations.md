@@ -185,9 +185,15 @@ until the new one is swapped in (MODEL ↻ on the dashboard).
 
 ## 42. Live trading
 
-**Not implemented, by design.** The risk engine rejects `mode = live`
-(`CheckId::Mode`), the runtime refuses to start in live mode, and
-`DisabledLiveVenue` is the only live venue.
+**One strategy, behind a gate.** The run is always paper (`mode = live` is
+refused at start). Strategy G's live twin, `G_live` ([deployment/live.md](../deployment/live.md)),
+trades a live book of its own: its intents pass the risk check in live mode,
+and the live venue (`crates/wm-live`: EIP-712 signing of CLOB orders for
+protocol 2 or 3, L1/L2 auth, post-only GTD bids, reconciliation through the
+orders' records, the heartbeat switch, the geoblock and position checks)
+places them. **The risk engine still refuses every live-mode intent**
+(`CheckId::Mode`, the Phase 14 gate), so this build places no real order:
+lifting that refusal for the live book is a separate, reviewed change.
 
 Prerequisites for Phase 14 (all must hold):
 1. Positive out-of-sample EV with stable parameters across walk-forward

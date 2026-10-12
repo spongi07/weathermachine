@@ -713,6 +713,60 @@ pub struct AppConfigFile {
     pub knmi: KnmiSection,
     #[serde(default)]
     pub lab: LabSection,
+    #[serde(default)]
+    pub live: LiveSection,
+}
+
+/// Strategy G's live twin (`G_live`): G's rule placing real orders on
+/// Polymarket beside paper G, with its own small limits. It runs only when
+/// switched on (`enabled`, or `WM_LIVE_G=true`) with the wallet in the
+/// environment (`WM_POLY_PRIVATE_KEY`, `WM_POLY_FUNDER`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LiveSection {
+    pub enabled: bool,
+    /// One order's cost at its NO price.
+    #[serde(with = "decimal_serde::usd")]
+    pub notional: Usd,
+    /// Resting bids and positions held together, at cost.
+    #[serde(with = "decimal_serde::usd")]
+    pub max_open_usd: Usd,
+    /// A UTC day's realized loss that stops the live twin for the day.
+    #[serde(with = "decimal_serde::usd")]
+    pub max_daily_loss_usd: Usd,
+    /// The realized loss since going live that stops the live twin.
+    #[serde(with = "decimal_serde::usd")]
+    pub max_total_loss_usd: Usd,
+    /// 0 EOA, 1 POLY_PROXY (an e-mail or Magic login), 2 POLY_GNOSIS_SAFE
+    /// (a browser wallet). `WM_POLY_SIG_TYPE` overrides it.
+    pub signature_type: u8,
+    /// Which API key the wallet's L1 signature derives (dailyprofit uses 0).
+    pub api_key_nonce: u64,
+    /// No order goes out unless the venue takes the heartbeats (its switch
+    /// that cancels our orders when this process stops).
+    pub require_heartbeat: bool,
+    pub clob_url: String,
+    pub geoblock_url: String,
+    /// Replaces the built-in list of places where the API is close-only.
+    pub geo_api_close_only: Option<Vec<String>>,
+}
+
+impl Default for LiveSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            notional: Usd::from_whole(10),
+            max_open_usd: Usd::from_whole(40),
+            max_daily_loss_usd: Usd::from_whole(20),
+            max_total_loss_usd: Usd::from_whole(20),
+            signature_type: 1,
+            api_key_nonce: 1,
+            require_heartbeat: true,
+            clob_url: "https://clob.polymarket.com".to_owned(),
+            geoblock_url: "https://polymarket.com/api/geoblock".to_owned(),
+            geo_api_close_only: None,
+        }
+    }
 }
 
 /// Per-location file.
@@ -806,6 +860,10 @@ pub struct EnvSettings {
     pub open_meteo_api_key: Option<String>,
     /// KNMI Data Platform API key (never logged or stored).
     pub knmi_api_key: Option<String>,
+    /// The live twin's funder: the wallet that holds the money (public).
+    /// Its signer key, `WM_POLY_PRIVATE_KEY`, is read once by the live
+    /// venue and kept nowhere else.
+    pub poly_funder: Option<String>,
 }
 
 /// Secrets (database URL with its password, tokens, keys) are never printed.
@@ -819,6 +877,7 @@ impl std::fmt::Debug for EnvSettings {
             .field("admin_token", &set(&self.admin_token))
             .field("open_meteo_api_key", &set(&self.open_meteo_api_key))
             .field("knmi_api_key", &set(&self.knmi_api_key))
+            .field("poly_funder", &self.poly_funder)
             .finish()
     }
 }
@@ -924,6 +983,14 @@ impl AppConfig {
         if let Some(v) = env_nonempty("WM_FORECAST_MODEL") {
             file.forecast.model = v;
         }
+        if let Some(v) = env_nonempty("WM_LIVE_G") {
+            file.live.enabled = parse_bool("WM_LIVE_G", &v)?;
+        }
+        if let Some(v) = env_nonempty("WM_POLY_SIG_TYPE") {
+            file.live.signature_type = v
+                .parse()
+                .with_context(|| format!("WM_POLY_SIG_TYPE must be 0, 1 or 2, got '{v}'"))?;
+        }
         let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let loc_dir = {
             let p = PathBuf::from(&file.app.locations_dir);
@@ -956,6 +1023,7 @@ impl AppConfig {
             admin_token: env_nonempty("WM_ADMIN_TOKEN"),
             open_meteo_api_key: env_nonempty("WM_OPEN_METEO_API_KEY"),
             knmi_api_key: env_nonempty("WM_KNMI_API_KEY"),
+            poly_funder: env_nonempty("WM_POLY_FUNDER"),
         };
         let cfg = Self {
             file,
@@ -1332,7 +1400,67 @@ impl AppConfig {
                 "one trade",
             )?;
         }
-        self.validate_lab()
+        self.validate_lab()?;
+        self.validate_live()
+    }
+
+    /// The live twin: limits that fit each other, a known wallet type, and
+    /// G's rule switched on (the twin trades it). The wallet itself is
+    /// checked by the live venue at start.
+    fn validate_live(&self) -> Result<()> {
+        let l = &self.file.live;
+        if l.notional <= Usd::ZERO || l.max_open_usd < l.notional {
+            bail!("live: notional must be positive and at most max_open_usd");
+        }
+        if l.max_daily_loss_usd <= Usd::ZERO || l.max_total_loss_usd <= Usd::ZERO {
+            bail!("live: the loss limits must be positive");
+        }
+        if l.signature_type > 2 {
+            bail!(
+                "live.signature_type must be 0 (EOA), 1 (proxy) or 2 (safe); a deposit wallet (3) is not supported"
+            );
+        }
+        if !l.clob_url.starts_with("https://") || !l.geoblock_url.starts_with("https://") {
+            bail!("live: clob_url and geoblock_url must be https URLs");
+        }
+        if l.enabled && !self.file.strategies.tail_seller.enabled {
+            bail!(
+                "live: the live twin trades strategy G's rule, so [strategies.tail_seller] must be on"
+            );
+        }
+        Ok(())
+    }
+
+    /// The live book of a paper run: G's rule at the live notional, sized to
+    /// whole cents, under the live limits (`None`: the twin is off).
+    pub fn live_book(&self) -> Option<wm_engine::LiveBookConfig> {
+        let l = &self.file.live;
+        if !l.enabled {
+            return None;
+        }
+        let g = wm_core::ids::StrategyId::from_static(wm_strategy::tail_seller::ID);
+        let main = &self.file.risk;
+        Some(wm_engine::LiveBookConfig {
+            tail_seller: wm_strategy::TailSellerConfig {
+                notional: l.notional,
+                whole_cent_sizes: true,
+                ..self.file.strategies.tail_seller.clone()
+            },
+            risk: RiskConfig {
+                position_size_usd: l.notional,
+                global_max_exposure_usd: l.max_open_usd,
+                max_market_exposure_usd: Some(l.max_open_usd),
+                max_location_exposure_usd: Some(l.max_open_usd),
+                max_strategy_exposure_usd: Some(l.max_open_usd),
+                max_daily_new_exposure_usd: Some(l.max_open_usd),
+                max_daily_loss_usd: Some(l.max_daily_loss_usd),
+                // paper G's spread rule, so the twins see the same books
+                max_spread: main.max_spread_for(&g),
+                strategy_caps: std::collections::BTreeMap::new(),
+                ..main.clone()
+            },
+            max_total_loss: l.max_total_loss_usd,
+        })
     }
 
     /// The strategy lab: known family codes, a stake its own books allow,
@@ -1571,6 +1699,62 @@ mod tests {
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// The live twin ships off; switched on it trades G's rule at its own
+    /// notional, in whole cents, under its own small limits; limits that do
+    /// not fit each other are refused.
+    #[test]
+    fn the_live_twin_ships_off_and_derives_its_own_book() {
+        let mut cfg =
+            AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        let usd = wm_core::units::Usd::from_whole;
+        assert!(!cfg.file.live.enabled, "real money is opt-in");
+        assert!(cfg.live_book().is_none());
+        assert_eq!(cfg.file.live.notional, usd(10));
+        assert_eq!(cfg.file.live.max_open_usd, usd(40));
+        assert_eq!(cfg.file.live.max_total_loss_usd, usd(20));
+        assert_eq!(cfg.file.live.api_key_nonce, 1, "not dailyprofit's key");
+        cfg.file.live.enabled = true;
+        cfg.validate().unwrap();
+        let book = cfg.live_book().unwrap();
+        assert_eq!(book.tail_seller.notional, usd(10));
+        assert!(book.tail_seller.whole_cent_sizes);
+        assert_eq!(
+            book.tail_seller.min_distance, cfg.file.strategies.tail_seller.min_distance,
+            "G's own rule"
+        );
+        assert_eq!(book.risk.position_size_usd, usd(10));
+        assert_eq!(book.risk.global_max_exposure_usd, usd(40));
+        assert_eq!(book.risk.max_daily_loss_usd, Some(usd(20)));
+        assert!(book.risk.strategy_caps.is_empty());
+        assert_eq!(
+            book.risk.max_spread, cfg.file.risk.max_spread,
+            "paper G's spread rule"
+        );
+        assert_eq!(book.max_total_loss, usd(20));
+        book.risk.validate().unwrap();
+        let bad = |f: &dyn Fn(&mut AppConfig)| {
+            let mut c = cfg.clone();
+            f(&mut c);
+            c.validate().is_err()
+        };
+        assert!(
+            bad(&|c| c.file.live.max_open_usd = usd(5)),
+            "a bid larger than the cap"
+        );
+        assert!(bad(&|c| c.file.live.max_total_loss_usd = usd(0)));
+        assert!(
+            bad(&|c| c.file.live.signature_type = 3),
+            "deposit wallets are not signed"
+        );
+        assert!(bad(
+            &|c| c.file.live.clob_url = "http://clob.polymarket.com".into()
+        ));
+        assert!(
+            bad(&|c| c.file.strategies.tail_seller.enabled = false),
+            "the twin needs G's rule"
+        );
     }
 
     #[test]
@@ -2120,6 +2304,7 @@ mod tests {
             admin_token: Some("tok-secret".into()),
             open_meteo_api_key: Some("key-secret".into()),
             knmi_api_key: Some("knmi-secret".into()),
+            poly_funder: Some("0x81f4f47aa3bBcF441cDe0B7C6e2A38a706b6d77e".into()),
         };
         let text = format!("{env:?}");
         for secret in ["hunter2", "tok-secret", "key-secret", "knmi-secret"] {

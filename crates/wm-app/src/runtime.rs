@@ -21,6 +21,7 @@ use crate::setup::{self, ModelLoad, Providers};
 use crate::training::{self, Progress, TrainPlan};
 
 mod lab;
+mod live;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -654,7 +655,9 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         }
     };
     let run_id = RunId::new_v7();
-    let engine_cfg = setup::engine_config(&cfg, RunMode::Paper, run_id)?;
+    let mut engine_cfg = setup::engine_config(&cfg, RunMode::Paper, run_id)?;
+    // Strategy G's live twin: its own book, its orders on the live venue.
+    engine_cfg.live = cfg.live_book();
     let model_status: SharedModel = Arc::new(Mutex::new(ModelDto::default()));
     let mut invalid_model: Option<String> = None;
     // Model file the maintenance task keeps current, and the model it starts from.
@@ -730,6 +733,26 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
     if let Some(msg) = invalid_model {
         with_side(&side, |st| st.alert("critical", msg));
+    }
+
+    // -- The live venue (strategy G's live twin) -------------------------------------
+    // Its order updates come back through the events channel; a twin that
+    // cannot start stays blocked with the reason.
+    let mut live_link: Option<live::LiveLink> = None;
+    let mut live_off: Option<String> = None;
+    if engine_cfg.live.is_some() {
+        match live::start(&cfg, &user_agent, events_tx.clone(), shutdown.clone()) {
+            Ok((link, task)) => {
+                tasks.push(task);
+                live_link = Some(link);
+            }
+            Err(why) => {
+                let msg = format!("strategy G's live twin is on but cannot start: {why}");
+                tracing::error!("{msg}");
+                with_side(&side, |st| st.alert("critical", msg));
+                live_off = Some(why);
+            }
+        }
     }
 
     // -- Probability model: first training, forecast evaluation, periodic retraining ----
@@ -1105,6 +1128,9 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         SimulationSession::new(engine_cfg, SimConfig::default(), settle_grace(), model)
             .with_event_capture(true);
     session.engine_mut().set_storage_ok(store.is_some());
+    if let Some(why) = &live_off {
+        session.engine_mut().set_live_gate(vec![why.clone()], false);
+    }
     let mut last_knowledge = DateTime::<Utc>::MIN_UTC;
     for e in warm_events {
         last_knowledge = last_knowledge.max(e.available_at);
@@ -1127,6 +1153,22 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     // without seeing them.
     if let Some(s) = &store {
         restore_paper_book(s, &cfg, &mut session, clock.now(), &side).await;
+        // The live twin's loss stop counts the days settled before this run.
+        if session.engine().live_realized_total().is_some() {
+            match crate::restore::live_settled_before(s, &cfg, clock.now(), settle_grace()).await {
+                Ok(pnl) => {
+                    session.engine_mut().set_live_realized_before(pnl);
+                    tracing::info!(pnl = %pnl, "the live twin's settled days before this run");
+                }
+                Err(e) => {
+                    let why = format!("the live book's settled history could not be read: {e:#}");
+                    with_side(&side, |st| st.alert("critical", why.clone()));
+                    if let Some(link) = live_link.as_mut() {
+                        link.hold(&mut session, why);
+                    }
+                }
+            }
+        }
     }
 
     // Every gate that is not a station's METAR source (those report through
@@ -1211,7 +1253,14 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         let ok = storage_ok.load(Ordering::Acquire) && !loop_state.backlogged;
         session.engine_mut().set_storage_ok(ok);
         metrics::gauge!("wm_storage_ok").set(if ok { 1.0 } else { 0.0 });
-        let out = session.run_until(clock.now());
+        let mut out = session.run_until(clock.now());
+        if let Some(link) = live_link.as_mut() {
+            let orders = std::mem::take(&mut out.live_orders);
+            link.forward(&mut session, orders, last_knowledge);
+            link.sync(&mut session, |level, text| {
+                with_side(&side, |st| st.alert(level, text));
+            });
+        }
         loop_state.absorb(&session, out, &persist_tx, &storage_ok, &hint_txs, &side);
         loop_state.flush(clock.now(), &persist_tx, &storage_ok, &side);
         if publish {
@@ -1240,6 +1289,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            let live_status = live_link.as_ref().map(live::LiveLink::status);
             let inputs = DtoInputs {
                 demo: false,
                 instance: &cfg.file.app.instance,
@@ -1255,6 +1305,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 strategies: &strategy_catalog,
                 peak_slot: &peak_slot_cfg,
                 peak_times: peak_times.as_ref(),
+                live: live_status.as_ref(),
             };
             publisher.publish(dto::build(&snap, &inputs, now));
         }
@@ -1975,8 +2026,13 @@ impl EngineLoopState {
             .trades
             .iter()
             .map(|t| {
+                let kind = if session.engine().is_live_strategy(&t.strategy) {
+                    "LIVE fill (real money)"
+                } else {
+                    "paper fill"
+                };
                 let text = format!(
-                    "paper fill {} {} {} @ {} × {}",
+                    "{kind} {} {} {} @ {} × {}",
                     t.strategy, t.side, t.bucket_label, t.price, t.shares
                 );
                 tracing::info!(slug = %t.event_slug, "{text}");

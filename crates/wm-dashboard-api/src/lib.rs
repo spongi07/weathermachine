@@ -60,6 +60,41 @@ pub struct DashboardSnapshot {
     /// their own books. `None` with the lab off.
     #[serde(default)]
     pub lab: Option<LabDto>,
+    /// Strategy G's live twin (`G_live`): real money. `None`: it is off.
+    #[serde(default)]
+    pub live: Option<LiveDto>,
+}
+
+/// The live twin at a glance: the venue's checks and the live book.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LiveDto {
+    pub strategy: String,
+    /// The twin may place an order now.
+    pub ready: bool,
+    /// Why it may not: the venue's checks, the loss stop.
+    pub blockers: Vec<String>,
+    pub signer: String,
+    pub funder: String,
+    /// Where the venue sees this server, e.g. `NL-NH: API allowed`.
+    pub location: Option<String>,
+    pub protocol: Option<u32>,
+    /// The account's collateral at the venue, and what the resting bids
+    /// may still cost of it.
+    pub balance_usd: Option<f64>,
+    pub reserved_usd: f64,
+    /// Seconds since the venue last took a heartbeat.
+    pub heartbeat_age_s: Option<i64>,
+    pub resting_orders: usize,
+    pub unresolved_orders: usize,
+    pub open_positions: usize,
+    /// Cost of the open positions, and their worst-case loss with the bids.
+    pub capital_usd: f64,
+    pub worst_case_usd: f64,
+    pub max_open_usd: f64,
+    pub today_realized_usd: f64,
+    /// Realized since going live (earlier runs' settled days included).
+    pub realized_since_live_usd: f64,
+    pub max_total_loss_usd: Option<f64>,
 }
 
 /// The strategy lab at a glance.

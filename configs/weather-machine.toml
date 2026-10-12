@@ -778,3 +778,30 @@ wmo = "06249"
 name = "Berkhout"
 latitude = 52.644
 longitude = 4.979
+
+# ---------------------------------------------------------------------------
+# Strategy G's live twin (G_live): G's rule placing REAL orders on Polymarket,
+# beside paper G, on a live book of its own. Off unless switched on here or
+# with WM_LIVE_G=true, AND the wallet is in the environment:
+#   WM_POLY_PRIVATE_KEY  the signer's private key (read once, never logged)
+#   WM_POLY_FUNDER       the Polymarket wallet that holds the money
+#   WM_POLY_SIG_TYPE     0 EOA, 1 proxy (e-mail/Magic login), 2 safe (browser wallet)
+# Its orders are post-only NO bids, good till ten minutes before the next
+# report, sized to whole cents. It places one only while the live venue's
+# checks pass: API credentials, the CLOB's protocol (2 or 3), not closed-only,
+# this server allowed to trade on the API (geoblock), the heartbeats taken
+# (the venue cancels our orders ten seconds after they stop), an earlier run's
+# leftovers cancelled, the venue's positions equal to the books', collateral
+# read. Guide: docs/deployment/live.md.
+# ---------------------------------------------------------------------------
+[live]
+enabled = false
+notional = "10.00"                # one bid's cost at its NO price (about 10 shares)
+max_open_usd = "40.00"            # resting bids and positions together, at cost
+max_daily_loss_usd = "20.00"      # a UTC day's realized loss that stops it for the day
+max_total_loss_usd = "20.00"      # the realized loss since going live that stops it
+signature_type = 1                # the account's wallet: 1 = proxy (as dailyprofit's)
+api_key_nonce = 1                 # its own API key (dailyprofit derives nonce 0)
+require_heartbeat = true
+clob_url = "https://clob.polymarket.com"
+geoblock_url = "https://polymarket.com/api/geoblock"

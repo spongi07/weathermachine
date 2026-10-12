@@ -17,6 +17,7 @@ wm-backtest.workspace = true
 wm-core.workspace = true
 wm-dashboard-api.workspace = true
 wm-engine.workspace = true
+wm-live.workspace = true
 wm-execution.workspace = true
 wm-net.workspace = true
 wm-polymarket.workspace = true

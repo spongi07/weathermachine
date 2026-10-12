@@ -50,6 +50,9 @@ use wm_core::units::{
 
 /// Engine id of strategy G.
 pub const ID: &str = "G_tail_seller";
+/// Engine id of G's live twin: the same rule on the live book, its orders
+/// placed on the venue (`[live]`), sized to whole cents.
+pub const LIVE_ID: &str = "G_live";
 
 /// Configuration of strategy G. Every threshold is a research parameter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +83,9 @@ pub struct TailSellerConfig {
     pub min_rest_minutes: i64,
     pub max_data_age_minutes: i64,
     pub max_book_age_ms: i64,
+    /// Size each order down to whole cents at its bid (the live venue's
+    /// rule for a buy); paper G keeps its record's sizes.
+    pub whole_cent_sizes: bool,
 }
 
 impl Default for TailSellerConfig {
@@ -97,6 +103,7 @@ impl Default for TailSellerConfig {
             min_rest_minutes: 3,
             max_data_age_minutes: 40,
             max_book_age_ms: 15_000,
+            whole_cent_sizes: false,
         }
     }
 }
@@ -119,10 +126,12 @@ pub struct TailSeller {
 
 impl TailSeller {
     pub fn new(config: TailSellerConfig) -> Self {
-        Self {
-            id: StrategyId::from_static(ID),
-            config,
-        }
+        Self::with_id(StrategyId::from_static(ID), config)
+    }
+
+    /// The same rule under another id (the live twin, [`LIVE_ID`]).
+    pub fn with_id(id: StrategyId, config: TailSellerConfig) -> Self {
+        Self { id, config }
     }
 }
 
@@ -242,7 +251,11 @@ impl TailSeller {
         }
         let shares = bid.and_then(|p| {
             let raw = shares_for_notional(cfg.notional, p, Rounding::Down);
-            let s = round_shares_to_lot(raw, wm_core::units::Shares::from_whole(1), Rounding::Down);
+            let mut s =
+                round_shares_to_lot(raw, wm_core::units::Shares::from_whole(1), Rounding::Down);
+            if cfg.whole_cent_sizes {
+                s = wm_core::units::whole_cent_shares(s, p);
+            }
             (s >= o.min_order_size && s.micros() > 0).then_some(s)
         });
         if bid.is_some() && shares.is_none() {

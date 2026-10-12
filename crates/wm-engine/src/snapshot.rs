@@ -114,6 +114,24 @@ pub struct LabBookSnapshot {
     pub realized_pnl_total: Usd,
 }
 
+/// The live book: G's twin on real money.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveBookSnapshot {
+    pub strategy: StrategyId,
+    pub positions: Vec<Position>,
+    pub exposure: ExposureSummary,
+    pub risk: RiskConfig,
+    pub daily_new_exposure: Usd,
+    pub daily_realized_pnl: Usd,
+    /// This run's realized P&L of the live book (restored markets included).
+    pub realized_pnl_total: Usd,
+    /// Since it went live: earlier runs' settled markets included.
+    pub realized_since_live: Usd,
+    pub max_total_loss: Option<Usd>,
+    /// Why the live twin opens nothing now (`None`: it may).
+    pub blocked: Option<String>,
+}
+
 /// Full engine snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineSnapshot {
@@ -148,4 +166,7 @@ pub struct EngineSnapshot {
     /// Each lab strategy's own book (the fields above are the main book's).
     #[serde(default)]
     pub lab_books: Vec<LabBookSnapshot>,
+    /// The live book (`None`: none).
+    #[serde(default)]
+    pub live: Option<LiveBookSnapshot>,
 }

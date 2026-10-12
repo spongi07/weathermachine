@@ -196,6 +196,7 @@ pub fn App() -> impl IntoView {
 fn Dashboard(snap: Snap) -> impl IntoView {
     view! {
         <KpiStrip snap=snap />
+        <LivePanel snap=snap />
         <StrategiesPanel snap=snap />
         <LabPanel snap=snap />
         <Locations snap=snap />
@@ -316,8 +317,10 @@ fn Banners(snap: Snap) -> impl IntoView {
             if let Some(k) = &s.kill_switch {
                 v.push(view! { <div class="banner bad">{format!("KILL SWITCH ENGAGED: {k} — no new orders")}</div> }.into_any());
             }
-            if !s.live_trading_enabled {
-                v.push(view! { <div class="banner info">"Paper trading — live order placement is disabled in this build."</div> }.into_any());
+            match &s.live {
+                None => v.push(view! { <div class="banner info">"Paper trading — no strategy trades real money (the live twin G_live is off)."</div> }.into_any()),
+                Some(l) if l.ready => v.push(view! { <div class="banner live">{format!("LIVE — {} places real orders on Polymarket: at most {} open, stops after a {} loss. Its fills and results are real money.", l.strategy, fmt::usd(l.max_open_usd), l.max_total_loss_usd.map_or_else(|| "–".to_owned(), fmt::usd))}</div> }.into_any()),
+                Some(l) => v.push(view! { <div class="banner bad">{format!("LIVE twin {} is on but places no order: {}", l.strategy, l.blockers.join("; "))}</div> }.into_any()),
             }
             if !s.demo && !s.model.loaded() {
                 let (class, text) = match s.model.state.as_str() {
@@ -328,6 +331,48 @@ fn Banners(snap: Snap) -> impl IntoView {
                 v.push(view! { <div class=class>{text}</div> }.into_any());
             }
             Some(v)
+        })
+    }
+}
+
+/// Strategy G's live twin: the venue's checks and the live book.
+#[component]
+fn LivePanel(snap: Snap) -> impl IntoView {
+    let live = Memo::new(move |_| snap.with(|s| s.as_ref().and_then(|s| s.live.clone())));
+    move || {
+        live.get().map(|l| {
+            let row = |k: &'static str, v: String| view! { <tr><td>{k}</td><td class="num">{v}</td></tr> };
+            let blockers = l
+                .blockers
+                .iter()
+                .map(|b| view! { <li class="bad small">{fmt::sentence(b)}</li> })
+                .collect::<Vec<_>>();
+            view! {
+                <section class="panel">
+                    <div class="panel-title">
+                        <span>{format!("LIVE — {} (REAL MONEY)", l.strategy)}</span>
+                        <span class={if l.ready { "pill good" } else { "pill bad" }}>{if l.ready { "TRADING" } else { "NOT TRADING" }}</span>
+                    </div>
+                    <ul class="plain">{blockers}</ul>
+                    <div class="grid-2">
+                        <table><tbody>
+                            {row("Collateral at the venue", l.balance_usd.map_or_else(|| "–".to_owned(), fmt::usd))}
+                            {row("Reserved by resting bids", fmt::usd(l.reserved_usd))}
+                            {row("Resting bids", l.resting_orders.to_string())}
+                            {row("Open positions", format!("{} ({})", l.open_positions, fmt::usd(l.capital_usd)))}
+                            {row("Worst case / limit", format!("{} / {}", fmt::usd(l.worst_case_usd), fmt::usd(l.max_open_usd)))}
+                        </tbody></table>
+                        <table><tbody>
+                            {row("Realized today (UTC)", fmt::usd_signed(l.today_realized_usd))}
+                            {row("Realized since live", fmt::usd_signed(l.realized_since_live_usd))}
+                            {row("Stops at a loss of", l.max_total_loss_usd.map_or_else(|| "–".to_owned(), fmt::usd))}
+                            {row("Location", l.location.clone().unwrap_or_else(|| "not checked yet".to_owned()))}
+                            {row("Heartbeat", l.heartbeat_age_s.map_or_else(|| "none taken yet".to_owned(), |s| format!("{s} s ago")))}
+                        </tbody></table>
+                    </div>
+                    <div class="muted small">{format!("signer {} · funder {} · protocol {}{}", l.signer, l.funder, l.protocol.map_or_else(|| "–".to_owned(), |p| p.to_string()), if l.unresolved_orders > 0 { format!(" · {} order(s) of unknown fate", l.unresolved_orders) } else { String::new() })}</div>
+                </section>
+            }
         })
     }
 }

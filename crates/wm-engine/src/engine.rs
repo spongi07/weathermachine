@@ -2,8 +2,8 @@
 
 use crate::restore::{RestoreState, RestoreSummary};
 use crate::snapshot::{
-    EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LocationSnapshot,
-    NeighbourSnapshot, ViewSnapshot,
+    EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LiveBookSnapshot,
+    LocationSnapshot, NeighbourSnapshot, ViewSnapshot,
 };
 use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
@@ -133,10 +133,28 @@ pub struct EngineConfig {
     /// market data cannot flood the decision log. 0 disables suppression.
     #[serde(default = "default_rejection_dedup_secs")]
     pub rejection_dedup_secs: i64,
+    /// The live book: strategy G's twin on real money (`None`: no live book).
+    #[serde(default)]
+    pub live: Option<LiveBookConfig>,
 }
 
 pub const fn default_rejection_dedup_secs() -> i64 {
     60
+}
+
+/// The live book: G's rule placing real orders beside paper G, with its own
+/// limits. Its intents pass the risk check in live mode, and only while the
+/// live venue says it takes orders ([`Engine::set_live_gate`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveBookConfig {
+    /// The live twin's rule: G's, with its own notional and whole-cent sizes.
+    pub tail_seller: TailSellerConfig,
+    /// The live book's limits.
+    pub risk: RiskConfig,
+    /// The live twin opens nothing more once the live book's realized loss
+    /// since it went live (earlier runs' settled days included) reaches this.
+    #[serde(with = "wm_core::units::decimal_serde::usd")]
+    pub max_total_loss: Usd,
 }
 
 /// Engine hint for a station's collector (never a request by itself).
@@ -230,6 +248,27 @@ impl PaperBook {
 /// The main book (strategies A–K and the unwind engine).
 const MAIN: usize = 0;
 
+/// What the engine knows of the live venue.
+#[derive(Debug, Clone)]
+struct LiveState {
+    /// Why the venue takes no order now (empty: it does).
+    blockers: Vec<String>,
+    /// This server may open positions through the venue's API.
+    location_ok: bool,
+    /// Realized P&L of the live book's markets settled before this run.
+    realized_before: Usd,
+}
+
+impl Default for LiveState {
+    fn default() -> Self {
+        Self {
+            blockers: vec!["the live venue has not reported yet".to_owned()],
+            location_ok: false,
+            realized_before: Usd::ZERO,
+        }
+    }
+}
+
 /// A lab strategy's own limits: the main risk settings (data freshness,
 /// prices, books, weather gates) with the lab's money limits.
 pub fn lab_risk_config(main: &RiskConfig, lab: &LabRiskConfig, family: u8) -> RiskConfig {
@@ -281,8 +320,12 @@ pub struct Engine {
     orders: OrderManager,
     /// The main book first, then one per lab strategy.
     paper: Vec<PaperBook>,
-    /// The book of each lab strategy (others trade the main book).
+    /// The book of each lab strategy and of the live twin (others trade
+    /// the main book).
     book_of: HashMap<StrategyId, usize>,
+    /// The live book's index (`None`: no live book).
+    live_book: Option<usize>,
+    live: LiveState,
     lab: LabState,
     health: BTreeMap<(ProviderId, Option<StationId>), ProviderHealthSnapshot>,
     corrections: HashMap<StationId, DateTime<Utc>>,
@@ -353,6 +396,14 @@ impl Engine {
             paper.push(PaperBook::new(risk, &cfg.run_id));
             strategies.push(Box::new(s));
         }
+        let mut live_book = None;
+        if let Some(l) = &cfg.live {
+            let id = StrategyId::from_static(wm_strategy::tail_seller::LIVE_ID);
+            book_of.insert(id.clone(), paper.len());
+            live_book = Some(paper.len());
+            paper.push(PaperBook::new(l.risk.clone(), &cfg.run_id));
+            strategies.push(Box::new(TailSeller::with_id(id, l.tail_seller.clone())));
+        }
         let unwind = UnwindEngine::new(cfg.unwind.clone());
         Self {
             temps,
@@ -367,6 +418,8 @@ impl Engine {
             orders: OrderManager::new(),
             paper,
             book_of,
+            live_book,
+            live: LiveState::default(),
             lab: LabState::default(),
             health: BTreeMap::new(),
             corrections: HashMap::new(),
@@ -412,6 +465,15 @@ impl Engine {
             return b;
         }
         let id = strategy.as_str();
+        if id == wm_strategy::tail_seller::LIVE_ID {
+            // live switched off since: its positions still settle apart
+            let b = self.paper.len();
+            self.paper
+                .push(PaperBook::new(self.cfg.risk.clone(), &self.cfg.run_id));
+            self.book_of.insert(strategy.clone(), b);
+            self.live_book = Some(b);
+            return b;
+        }
         match wm_strategy::lab::family_of(id).filter(|_| wm_strategy::lab::is_lab_id(id)) {
             Some(family) => {
                 let risk = lab_risk_config(&self.cfg.risk, &self.cfg.lab.risk, family);
@@ -470,6 +532,11 @@ impl Engine {
         &self.markets
     }
 
+    /// The latest book of a token.
+    pub fn book(&self, token: &TokenId) -> Option<&OrderBook> {
+        self.books.get(token)
+    }
+
     pub fn stats(&self) -> &EngineStats {
         &self.stats
     }
@@ -479,9 +546,20 @@ impl Engine {
         self.paper[MAIN].realized_pnl_total
     }
 
-    /// Realized P&L of every lab book together.
+    /// Realized P&L of every lab book together (not the live book's).
     pub fn lab_realized_pnl_total(&self) -> Usd {
-        self.paper[1..].iter().map(|b| b.realized_pnl_total).sum()
+        self.paper
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != MAIN && self.live_book != Some(i))
+            .map(|(_, b)| b.realized_pnl_total)
+            .sum()
+    }
+
+    /// This run's realized P&L of the live book (zero without one).
+    pub fn live_realized_pnl(&self) -> Usd {
+        self.live_book
+            .map_or(Usd::ZERO, |b| self.paper[b].realized_pnl_total)
     }
 
     pub fn set_storage_ok(&mut self, ok: bool) {
@@ -490,6 +568,50 @@ impl Engine {
 
     pub fn kill_switch(&self) -> Option<&str> {
         self.kill_switch.as_deref()
+    }
+
+    /// What the live venue says: why it takes no order now (empty: it
+    /// does), and whether this server may open positions through the API.
+    pub fn set_live_gate(&mut self, blockers: Vec<String>, location_ok: bool) {
+        self.live.blockers = blockers;
+        self.live.location_ok = location_ok;
+    }
+
+    /// The live book's realized P&L of the markets settled before this run
+    /// (from the database), for its total-loss stop.
+    pub fn set_live_realized_before(&mut self, pnl: Usd) {
+        self.live.realized_before = pnl;
+    }
+
+    /// Whether `strategy` trades the live book (its orders go to the venue).
+    pub fn is_live_strategy(&self, strategy: &StrategyId) -> bool {
+        self.live_book.is_some() && self.book_of.get(strategy).copied() == self.live_book
+    }
+
+    /// The live book's positions.
+    pub fn live_positions(&self) -> Option<&PositionBook> {
+        self.live_book.map(|b| &self.paper[b].positions)
+    }
+
+    /// The live book's realized P&L since it went live.
+    pub fn live_realized_total(&self) -> Option<Usd> {
+        self.live_book
+            .map(|b| self.live.realized_before + self.paper[b].realized_pnl_total)
+    }
+
+    /// Why the live twin opens nothing now: the venue's blockers, or its
+    /// total-loss stop (`None`: it may).
+    pub fn live_block_reason(&self) -> Option<String> {
+        let total = self.live_realized_total()?;
+        if let Some(cfg) = &self.cfg.live
+            && total <= -cfg.max_total_loss
+        {
+            return Some(format!(
+                "stopped: the live book lost {} since it went live (limit {})",
+                -total, cfg.max_total_loss
+            ));
+        }
+        (!self.live.blockers.is_empty()).then(|| self.live.blockers.join("; "))
     }
 
     fn location_index_for_station(&self, station: &StationId) -> Option<usize> {
@@ -1143,7 +1265,7 @@ impl Engine {
         // update (F on 7 October 2026: thousands of refusals in 45 minutes).
         let mut kept = Vec::with_capacity(proposals.len());
         for p in proposals {
-            match self.spread_refusal(&p) {
+            match self.spread_refusal(&p).or_else(|| self.live_refusal(&p)) {
                 None => kept.push(p),
                 Some(why) => {
                     if let Some(e) = evaluations
@@ -1265,12 +1387,25 @@ impl Engine {
                 "spread {sp} > {limit} ({})",
                 if b == MAIN {
                     "the risk limit"
+                } else if self.live_book == Some(b) {
+                    "the live book's limit"
                 } else {
                     "the lab book's limit"
                 }
             )),
             Some(_) => None,
         }
+    }
+
+    /// Why the live venue would not take this opening order now, as the
+    /// risk check would refuse it: the proposal waits in its evaluation
+    /// instead of being refused on every book update.
+    fn live_refusal(&self, p: &Proposal) -> Option<String> {
+        if p.kind != IntentKind::Open || !self.is_live_strategy(&p.strategy) {
+            return None;
+        }
+        self.live_block_reason()
+            .map(|why| format!("live venue: {why}"))
     }
 
     fn alloc_decision(&mut self) -> DecisionId {
@@ -1324,6 +1459,9 @@ impl Engine {
         let open = self.book_orders(b);
         let book = self.books.get(&intent.token);
         let top = book.map(|b| serde_json::json!({ "bid": b.best_bid().map(|l| l.price.to_string()), "ask": b.best_ask().map(|l| l.price.to_string()), "age_ms": b.age_ms(self.now) }));
+        // The live book is checked in live mode, with the venue's word on
+        // this server's location as the compliance gate.
+        let live = self.live_book == Some(b);
         let PaperBook {
             positions,
             position_strategy,
@@ -1332,9 +1470,13 @@ impl Engine {
         } = &mut self.paper[b];
         let inputs = RiskInputs {
             now: self.now,
-            mode: self.cfg.mode,
+            mode: if live { RunMode::Live } else { self.cfg.mode },
             kill_switch: self.kill_switch.as_deref(),
-            compliance_ok: self.compliance_ok,
+            compliance_ok: if live {
+                self.live.location_ok
+            } else {
+                self.compliance_ok
+            },
             storage_ok: self.storage_ok,
             execution_ok: self.execution_ok,
             weather: Some(&weather),
@@ -1664,6 +1806,7 @@ impl Engine {
         let mut lab_books: Vec<LabBookSnapshot> = self
             .book_of
             .iter()
+            .filter(|&(_, &b)| self.live_book != Some(b))
             .map(|(strategy, &b)| {
                 let book = &self.paper[b];
                 let open = self.book_orders(b);
@@ -1683,6 +1826,38 @@ impl Engine {
             })
             .collect();
         lab_books.sort_by_key(|b| wm_strategy::lab::family_of(b.strategy.as_str()));
+        let live = self.live_book.map(|b| {
+            let book = &self.paper[b];
+            let open = self.book_orders(b);
+            LiveBookSnapshot {
+                strategy: StrategyId::from_static(wm_strategy::tail_seller::LIVE_ID),
+                positions: book.positions.iter().filter(shown).cloned().collect(),
+                exposure: book.risk.exposure(&PortfolioView {
+                    positions: &book.positions,
+                    open_orders: &open,
+                    markets: &self.markets,
+                    position_strategy: &book.position_strategy,
+                }),
+                risk: book.risk.config().clone(),
+                daily_new_exposure: book.risk.daily_new_exposure(self.now),
+                daily_realized_pnl: book.risk.daily_realized_pnl(self.now),
+                realized_pnl_total: book.realized_pnl_total,
+                realized_since_live: self.live.realized_before + book.realized_pnl_total,
+                max_total_loss: self.cfg.live.as_ref().map(|l| l.max_total_loss),
+                blocked: self.live_block_reason(),
+            }
+        });
+        // Each book's latest apart: the main book's, the live book's, the lab's.
+        let part = |strategy: &StrategyId| {
+            let b = self.book_index(strategy);
+            if b == MAIN {
+                0
+            } else if self.live_book == Some(b) {
+                1
+            } else {
+                2
+            }
+        };
         EngineSnapshot {
             now: self.now,
             mode: self.cfg.mode,
@@ -1700,18 +1875,18 @@ impl Engine {
                 .iter()
                 .map(|(t, s)| (t.clone(), s.clone()))
                 .collect(),
-            // The main book's latest orders and the lab's apart, so the
-            // lab's quotes never push A–K's out of the blotter.
+            // The main book's latest orders, the live book's and the lab's
+            // apart, so the lab's quotes never push A–K's out of the blotter.
             orders: {
-                let (main, lab): (Vec<_>, Vec<_>) = self
-                    .orders
-                    .recent(usize::MAX)
-                    .into_iter()
-                    .partition(|o| self.book_index(&o.strategy) == MAIN);
-                main.into_iter()
-                    .take(100)
-                    .chain(lab.into_iter().take(100))
-                    .cloned()
+                let recent = self.orders.recent(usize::MAX);
+                (0..3)
+                    .flat_map(|k| {
+                        recent
+                            .iter()
+                            .filter(move |o| part(&o.strategy) == k)
+                            .take(100)
+                    })
+                    .map(|o| (*o).clone())
                     .collect()
             },
             exposure,
@@ -1719,21 +1894,20 @@ impl Engine {
             daily_new_exposure: main.risk.daily_new_exposure(self.now),
             daily_realized_pnl: main.risk.daily_realized_pnl(self.now),
             realized_pnl_total: main.realized_pnl_total,
-            // As the orders: the main book's (and the evaluations) and the
-            // lab's latest 100 apart.
-            decisions: {
-                let (main, lab): (Vec<_>, Vec<_>) = self
-                    .decisions
-                    .iter()
-                    .rev()
-                    .partition(|d| self.book_index(&d.strategy) == MAIN);
-                main.into_iter()
-                    .take(100)
-                    .chain(lab.into_iter().take(100))
-                    .cloned()
-                    .collect()
-            },
+            // As the orders: the main book's (and the evaluations), the live
+            // book's and the lab's latest 100 apart.
+            decisions: (0..3)
+                .flat_map(|k| {
+                    self.decisions
+                        .iter()
+                        .rev()
+                        .filter(move |d| part(&d.strategy) == k)
+                        .take(100)
+                })
+                .cloned()
+                .collect(),
             lab_books,
+            live,
         }
     }
 

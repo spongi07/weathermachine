@@ -119,7 +119,8 @@ pub async fn load(
         else {
             continue;
         };
-        if wm_strategy::lab::is_lab_id(&strategy) {
+        // a lab strategy's and the live twin's count toward their own books
+        if wm_strategy::lab::is_lab_id(&strategy) || strategy == wm_strategy::tail_seller::LIVE_ID {
             *state
                 .lab_new_exposure_today
                 .entry(StrategyId::from_static_string(strategy))
@@ -129,6 +130,64 @@ pub async fn load(
         }
     }
     Ok((state, warnings))
+}
+
+/// The live twin's realized P&L of the markets settled before today's UTC
+/// midnight: the days [`load`] does not restore (the engine settles the
+/// rest again), each at its METAR high as the paper report settles it.
+pub async fn live_settled_before(
+    store: &PgStore,
+    cfg: &AppConfig,
+    now: DateTime<Utc>,
+    grace: Duration,
+) -> Result<Usd> {
+    let today_utc = now.date_naive().and_time(NaiveTime::MIN).and_utc();
+    let rows = store
+        .strategy_fills(wm_strategy::tail_seller::LIVE_ID)
+        .await
+        .context("loading the live twin's fills")?;
+    let mut total = 0.0;
+    for l in &cfg.locations {
+        let ids = setup::location_ids(l)?;
+        let tz = ids.timezone;
+        let settled: Vec<&RestoreFillRow> = rows
+            .iter()
+            .filter(|r| r.location_id == ids.location.as_str())
+            .filter(|r| settles_before(r.local_date, tz, grace, today_utc))
+            .collect();
+        let (Some(from), Some(to)) = (
+            settled.iter().map(|r| r.local_date).min(),
+            settled.iter().map(|r| r.local_date).max(),
+        ) else {
+            continue;
+        };
+        let outcomes = store
+            .report_outcomes(ids.location.as_str(), from, to)
+            .await
+            .context("loading the live twin's markets")?;
+        let (start, _) = wm_core::time::local_day_bounds(from, tz);
+        let (_, end) = wm_core::time::local_day_bounds(to, tz);
+        let observations = store
+            .report_observations(ids.station.as_str(), start, end)
+            .await
+            .context("loading the live twin's days")?;
+        let fills: Vec<wm_storage::ReportFill> = settled
+            .iter()
+            .map(|r| wm_storage::ReportFill {
+                client_order_id: r.client_order_id.clone(),
+                token_id: r.token_id.clone(),
+                side: r.side.clone(),
+                price_micros: r.price_micros,
+                shares_micros: r.shares_micros,
+                fee_micros: r.fee_micros,
+                liquidity: r.liquidity.clone(),
+                ts: r.ts,
+            })
+            .collect();
+        let today = wm_core::time::local_date(now, tz);
+        total += crate::paper_report::settled_total(&fills, &outcomes, &observations, tz, today);
+    }
+    Ok(Usd::from_micros((total * 1e6).round() as i64))
 }
 
 /// Whether a market of local day `date` settled before today's UTC midnight

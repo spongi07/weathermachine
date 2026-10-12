@@ -102,6 +102,7 @@ fn config(families: &[u8]) -> EngineConfig {
         evaluate_on_book_updates: true,
         decision_log_capacity: 500,
         rejection_dedup_secs: 60,
+        live: None,
     }
 }
 

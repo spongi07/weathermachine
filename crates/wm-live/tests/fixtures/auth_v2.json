@@ -1,0 +1,55 @@
+{
+ "l1": {
+  "key": "0xabababababababababababababababababababababababababababababababab",
+  "address": "0xe239cdc5fbe977a8a141B72194D3CF8c41bC5BC6",
+  "chainId": 137,
+  "timestamp": 1786090000,
+  "nonce": 0,
+  "signature": "0x10ffd96216da812cc84f9c3a638aaf826c423486053e4d939d37aea47d5486411b9c4b9e60776834e8fdc4e898f507e3afa692f3ae7b445b1861e07ba612e2d71b"
+ },
+ "hmac": {
+  "secret": "dGVzdC1zZWNyZXQtYnl0ZXMtMDEyMzQ1Njc4OWFiY2Q=",
+  "timestamp": "1786090001",
+  "method": "POST",
+  "path": "/order",
+  "body_json": "{\"order\": {\"salt\": 42, \"maker\": \"0xabc\"}, \"owner\": \"k\", \"orderType\": \"FAK\"}",
+  "signature": "91tPaJvKVh2ZCoGfZriur7VZBCRikTrz50jzRaqYuO8="
+ },
+ "amounts": [
+  {
+   "side": 0,
+   "size": 200,
+   "price": 0.99,
+   "maker": 198000000,
+   "taker": 200000000
+  },
+  {
+   "side": 0,
+   "size": 150,
+   "price": 0.99,
+   "maker": 148500000,
+   "taker": 150000000
+  },
+  {
+   "side": 0,
+   "size": 116.15,
+   "price": 0.98,
+   "maker": 113827000,
+   "taker": 116150000
+  },
+  {
+   "side": 1,
+   "size": 100,
+   "price": 0.01,
+   "maker": 100000000,
+   "taker": 1000000
+  },
+  {
+   "side": 0,
+   "size": 333.33,
+   "price": 0.97,
+   "maker": 323330100,
+   "taker": 333330000
+  }
+ ]
+}

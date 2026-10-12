@@ -6,7 +6,8 @@
 #   Environment    : at least WM_DB_PASSWORD, WM_CONTACT, WM_ADMIN_TOKEN
 # Full guide: docs/deployment/portainer.md · variables: stack.env.example
 #
-# Paper trading only: live order placement does not exist in this build.
+# Paper trading, plus strategy G's live twin when WM_LIVE_G=true and the
+# wallet is set (docs/deployment/live.md); everything else stays on paper.
 
 name: weather-machine
 
@@ -84,6 +85,12 @@ services:
       WM_KNMI_API_KEY: ${WM_KNMI_API_KEY:-}
       # Days of order-book updates kept in the replay journal (bounds disk use).
       WM_JOURNAL_RETENTION_DAYS: ${WM_JOURNAL_RETENTION_DAYS:-7}
+      # Strategy G's live twin: REAL orders on Polymarket (off by default).
+      # Guide: docs/deployment/live.md. The key is read once, never logged.
+      WM_LIVE_G: ${WM_LIVE_G:-false}
+      WM_POLY_PRIVATE_KEY: ${WM_POLY_PRIVATE_KEY:-}
+      WM_POLY_FUNDER: ${WM_POLY_FUNDER:-}
+      WM_POLY_SIG_TYPE: ${WM_POLY_SIG_TYPE:-1}
       WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn,hyper=warn,reqwest=warn,tungstenite=warn}
     ports:

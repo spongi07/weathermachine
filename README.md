@@ -8,9 +8,12 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
 
 ![Weather Machine dashboard (demo mode, synthetic data)](docs/dashboard-demo.png)
 
-> **Status.** Research platform and paper trading. Live order placement
-> does not exist in this build (Phase 14 gate). Nothing here is financial
-> advice, and synthetic/demo results are not evidence of edge.
+> **Status.** Research platform and paper trading. Strategy G's live twin
+> (`G_live`, [docs/deployment/live.md](docs/deployment/live.md)) has its
+> whole live path built and tested against a mock venue, but the risk engine
+> still refuses every live-mode intent (Phase 14 gate): this build places no
+> real order. Nothing here is financial advice, and synthetic/demo results
+> are not evidence of edge.
 
 ## What it does
 

@@ -423,6 +423,23 @@ pub fn round_shares_to_lot(shares: Shares, lot: Shares, rounding: Rounding) -> S
     Shares((lots * i128::from(lot.micros())) as i64)
 }
 
+/// The largest whole number of shares at or under `shares` whose cost at
+/// `price` is whole cents (zero when there is none): the size a live buy
+/// may have. At a price in whole cents every whole share qualifies; at a
+/// tenth of a cent the step is up to ten shares (0.977: multiples of ten).
+pub fn whole_cent_shares(shares: Shares, price: Price) -> Shares {
+    let p = i64::from(price.micros());
+    let mut n = shares.micros().div_euclid(MICROS_PER_UNIT);
+    while n > 0 {
+        // n shares × p micro-dollars a share: whole cents are multiples of 10,000
+        if (n * p) % 10_000 == 0 {
+            return Shares::from_whole(n);
+        }
+        n -= 1;
+    }
+    Shares::ZERO
+}
+
 /// A probability in `[0, 1]` (NaN and out-of-range values clamp, fail
 /// closed). Models work in `f64`; decisions compare it with exact prices.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -525,6 +542,33 @@ mod tests {
         assert_eq!(
             shares_for_notional(usd, Price::ZERO, Rounding::Down),
             Shares::ZERO
+        );
+    }
+
+    #[test]
+    fn live_buys_are_sized_to_whole_cents() {
+        let p = Price::saturating_from_micros;
+        let s = Shares::from_whole;
+        assert_eq!(
+            whole_cent_shares(s(10), p(920_000)),
+            s(10),
+            "a whole-cent price: any size"
+        );
+        assert_eq!(
+            whole_cent_shares(s(19), p(977_000)),
+            s(10),
+            "0.977: multiples of ten"
+        );
+        assert_eq!(
+            whole_cent_shares(s(11), p(975_000)),
+            s(10),
+            "0.975: even sizes"
+        );
+        assert_eq!(whole_cent_shares(s(9), p(977_000)), Shares::ZERO);
+        assert_eq!(
+            whole_cent_shares(Shares::from_micros(10_500_000), p(920_000)),
+            s(10),
+            "whole shares only"
         );
     }
 
