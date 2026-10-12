@@ -3710,6 +3710,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",

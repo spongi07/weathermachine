@@ -39,6 +39,8 @@ pub struct DtoInputs<'a> {
     pub peak_times: Option<&'a wm_strategy::PeakTimes>,
     /// The live venue's status (`None`: the live twin is off or did not start).
     pub live: Option<&'a wm_live::LiveStatus>,
+    /// The push messages' state (`None`: no line, as in the demo).
+    pub notifications: Option<&'a crate::notify::NotifyState>,
 }
 
 fn evaluation_dto(e: &wm_strategy::BucketEvaluation) -> EvaluationDto {
@@ -682,6 +684,15 @@ pub fn build(
             },
         },
     ];
+    // Notifications never block a trade: their row passes and says their
+    // state (a problem is an alert too).
+    if let Some(n) = inp.notifications {
+        checks.push(CheckDto {
+            name: "Notifications".into(),
+            ok: true,
+            detail: n.detail.clone(),
+        });
+    }
     for l in &locations {
         let age = l
             .last_observation_age_s

@@ -670,6 +670,26 @@ impl PgStore {
         Ok(())
     }
 
+    /// The keys of the push messages queued since `from` (`system_events`
+    /// of kind `notify`, the key in `details`), so a restart that settles a
+    /// market again does not send its message again.
+    pub async fn notified_since(&self, from: DateTime<Utc>) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT details->>'key' AS key FROM system_events
+             WHERE kind = 'notify' AND at >= $1",
+        )
+        .bind(from)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut keys = Vec::with_capacity(rows.len());
+        for r in rows {
+            if let Some(k) = r.try_get::<Option<String>, _>("key")? {
+                keys.push(k);
+            }
+        }
+        Ok(keys)
+    }
+
     pub async fn record_backtest(
         &self,
         run: &RunId,

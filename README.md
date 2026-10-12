@@ -142,7 +142,7 @@ For Portainer (Git stack, demo stack, variables, backups, upgrades), see
 | `weather-machine markets discover [--date]` | Fetch and parse today's markets and rules, and any liquidity-reward pools (read-only) |
 | `weather-machine rules approve --sha256 … --reviewer …` | Human approval of a rules text |
 | `weather-machine ev-table` | Break-even probabilities (fees included) |
-| `weather-machine migrate` · `check-config` · `healthcheck` | Operations |
+| `weather-machine migrate` · `check-config` · `healthcheck` · `notify-test` | Operations |
 
 ## Configuration
 
@@ -164,6 +164,9 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_KNMI_API_KEY` | Free KNMI Data Platform key ([developer portal](https://developer.dataplatform.knmi.nl/)) for the ten-minute readings; sent only in the `Authorization` header. Without it strategy K and the lab's KNMI rules do nothing |
 | `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
 | `WM_JOURNAL_RETENTION_DAYS` | Days of order-book updates kept in the replay journal (default 7; 0 = keep) |
+| `WM_LIVE_G`, `WM_POLY_PRIVATE_KEY`, `WM_POLY_FUNDER`, `WM_POLY_SIG_TYPE` | Strategy G's live twin and its wallet (real money; [docs/deployment/live.md](docs/deployment/live.md)) |
+| `WM_PUSHOVER_TOKEN`, `WM_PUSHOVER_USER` | Pushover keys: a message for every settled market of the live twin and every live order that bought (`weather-machine notify-test` checks them) |
+| `WM_PUSHOVER_STRATEGIES` | Whose results are pushed: `live` (default), `all`, or strategy ids or letters (`GL,G`) |
 | `WM_BACKUP_JOURNAL` | Stack only: include the replay journal in nightly backups (default `false`) |
 | `WM_MODE`, `WM_HTTP_BIND`, `WM_UI_DIR`, `WM_LOG_FORMAT`, `WM_CONFIG` | Overrides |
 

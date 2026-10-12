@@ -561,6 +561,7 @@ pub async fn run(
                 peak_slot: &peak_slot_cfg,
                 peak_times: peak_times.as_ref(),
                 live: None,
+                notifications: None,
             };
             publisher.publish(dto::build(&snap, &inputs, Utc::now()));
         }
@@ -679,6 +680,7 @@ mod tests {
             peak_slot: &peak_slot,
             peak_times: None,
             live: None,
+            notifications: None,
         };
         let dash = dto::build(&s.engine().snapshot(), &inputs, Utc::now());
         assert!(!dash.positions.is_empty(), "the demo trades");

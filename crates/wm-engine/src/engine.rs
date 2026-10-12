@@ -19,7 +19,7 @@ use wm_core::ids::{
     DecisionId, EventSlug, LocationId, ProviderId, RunId, StationId, StrategyId, TokenId,
 };
 use wm_core::market::{DailyTemperatureMarket, OrderBook, TakerTrade, TradePrint};
-use wm_core::portfolio::{Position, PositionBook};
+use wm_core::portfolio::{Position, PositionBook, SettledPosition};
 use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::trading::{DecisionRecord, IntentKind, OrderStatus, RunMode, TradeIntent};
@@ -247,6 +247,15 @@ impl PaperBook {
 
 /// The main book (strategies A–K and the unwind engine).
 const MAIN: usize = 0;
+
+/// A position a market's settlement closed, with the strategy that held it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledHolding {
+    pub strategy: StrategyId,
+    /// Held by the live book (real money).
+    pub live: bool,
+    pub position: SettledPosition,
+}
 
 /// What the engine knows of the live venue.
 #[derive(Debug, Clone)]
@@ -1577,10 +1586,30 @@ impl Engine {
     /// Every book settles; the main book's P&L is returned (each lab
     /// book's counts toward its own limits and totals).
     pub fn settle(&mut self, slug: &EventSlug, final_value: i32) -> Usd {
+        self.settle_holdings(slug, final_value).0
+    }
+
+    /// Settle a finished market in every book: the main book's P&L, and
+    /// each position the settlement closed with the strategy that held it
+    /// (book by book, in token order).
+    pub fn settle_holdings(
+        &mut self,
+        slug: &EventSlug,
+        final_value: i32,
+    ) -> (Usd, Vec<SettledHolding>) {
         let now = self.now;
         let mut main = Usd::ZERO;
+        let mut holdings = Vec::new();
+        // a book of its own holds one strategy (a lab strategy, the live twin)
+        let owner: HashMap<usize, &StrategyId> = self
+            .book_of
+            .iter()
+            .filter(|&(_, &b)| b != MAIN)
+            .map(|(s, &b)| (b, s))
+            .collect();
         for (i, book) in self.paper.iter_mut().enumerate() {
-            let pnl = book.positions.settle_event(slug, final_value);
+            let closed = book.positions.settle_event_positions(slug, final_value);
+            let pnl: Usd = closed.iter().map(SettledPosition::pnl).sum();
             if !pnl.is_zero() {
                 book.risk.record_realized_pnl(pnl, now);
                 book.realized_pnl_total += pnl;
@@ -1588,12 +1617,25 @@ impl Engine {
             if i == MAIN {
                 main = pnl;
             }
+            for position in closed {
+                let strategy = book
+                    .position_strategy
+                    .get(&position.instrument.token)
+                    .or_else(|| owner.get(&i).copied())
+                    .cloned()
+                    .unwrap_or_else(|| StrategyId::from_static("unknown"));
+                holdings.push(SettledHolding {
+                    strategy,
+                    live: self.live_book == Some(i),
+                    position,
+                });
+            }
         }
         if let Some(m) = self.markets.get_mut(slug) {
             m.closed = true;
         }
         self.lab.takers.remove(slug);
-        main
+        (main, holdings)
     }
 
     /// Drop what the kernel no longer needs: markets settled more than

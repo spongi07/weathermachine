@@ -405,6 +405,39 @@ async fn station_lease_is_exclusive_across_connections() {
     db.drop_db().await;
 }
 
+#[tokio::test]
+async fn notified_keys_come_back_from_their_time_on() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let before = Utc::now() - Duration::seconds(5);
+    s.record_system_event(
+        "info",
+        "notify",
+        "G_live won +$0.60",
+        &serde_json::json!({ "key": "settled|m|G_live" }),
+    )
+    .await
+    .unwrap();
+    // another kind, and a notify row without a key, are not keys
+    s.record_system_event("info", "restore", "x", &serde_json::json!({ "key": "no" }))
+        .await
+        .unwrap();
+    s.record_system_event("info", "notify", "x", &serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.notified_since(before).await.unwrap(),
+        vec!["settled|m|G_live".to_owned()]
+    );
+    assert!(
+        s.notified_since(Utc::now() + Duration::hours(1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.drop_db().await;
+}
+
 fn book_event(seq: u64, at: DateTime<Utc>, token: &str) -> EventEnvelope {
     let lv = |p: &str, s: &str| wm_core::market::BookLevel {
         price: Price::parse(p).unwrap(),

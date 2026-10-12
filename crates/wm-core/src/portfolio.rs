@@ -39,6 +39,27 @@ impl Position {
     }
 }
 
+/// A position its market's settlement closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledPosition {
+    pub instrument: InstrumentRef,
+    pub shares: Shares,
+    /// What the shares cost, fees included.
+    pub cost: Usd,
+    /// What they paid out: $1 a share on the winning side, nothing on the other.
+    pub payout: Usd,
+}
+
+impl SettledPosition {
+    pub fn pnl(&self) -> Usd {
+        self.payout - self.cost
+    }
+
+    pub fn won(&self) -> bool {
+        self.payout.micros() > 0
+    }
+}
+
 /// Errors from applying fills.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PortfolioError {
@@ -137,7 +158,20 @@ impl PositionBook {
     /// Settle all positions of an event given the winning whole-degree value.
     /// Returns realized PnL of the settlement.
     pub fn settle_event(&mut self, slug: &EventSlug, final_value: i32) -> Usd {
-        let mut pnl = Usd::ZERO;
+        self.settle_event_positions(slug, final_value)
+            .iter()
+            .map(SettledPosition::pnl)
+            .sum()
+    }
+
+    /// Settle all positions of an event given the winning whole-degree value,
+    /// and return each one it closed (in token order).
+    pub fn settle_event_positions(
+        &mut self,
+        slug: &EventSlug,
+        final_value: i32,
+    ) -> Vec<SettledPosition> {
+        let mut closed = Vec::new();
         for p in self
             .positions
             .values_mut()
@@ -156,13 +190,17 @@ impl PositionBook {
             } else {
                 Usd::ZERO
             };
-            let realized = payout - p.cost_basis;
-            p.realized_pnl += realized;
-            pnl += realized;
+            p.realized_pnl += payout - p.cost_basis;
+            closed.push(SettledPosition {
+                instrument: p.instrument.clone(),
+                shares: p.shares,
+                cost: p.cost_basis,
+                payout,
+            });
             p.shares = Shares::ZERO;
             p.cost_basis = Usd::ZERO;
         }
-        pnl
+        closed
     }
 }
 
@@ -225,6 +263,35 @@ mod tests {
             .unwrap();
         let pnl = book.settle_event(&yes18.event_slug, 19);
         assert_eq!(pnl, Usd::parse("-9.5").unwrap());
+    }
+
+    #[test]
+    fn a_settlement_names_each_position_it_closed() {
+        let no18 = instrument(OutcomeSide::No, 18);
+        let no19 = instrument(OutcomeSide::No, 19);
+        let mut book = PositionBook::new();
+        book.apply_fill(&fill(&no18, Side::Buy, "0.94", 10, "0"), &no18)
+            .unwrap();
+        book.apply_fill(&fill(&no19, Side::Buy, "0.95", 4, "0"), &no19)
+            .unwrap();
+        let closed = book.settle_event_positions(&no18.event_slug, 19);
+        assert_eq!(closed.len(), 2);
+        let won = closed.iter().find(|p| p.instrument == no18).unwrap();
+        assert!(won.won());
+        assert_eq!(
+            (won.shares, won.cost, won.payout, won.pnl()),
+            (
+                Shares::from_whole(10),
+                Usd::parse("9.4").unwrap(),
+                Usd::from_whole(10),
+                Usd::parse("0.6").unwrap()
+            )
+        );
+        let lost = closed.iter().find(|p| p.instrument == no19).unwrap();
+        assert!(!lost.won());
+        assert_eq!(lost.pnl(), Usd::parse("-3.8").unwrap());
+        assert!(book.settle_event_positions(&no18.event_slug, 19).is_empty());
+        assert_eq!(book.total_realized_pnl(), Usd::parse("-3.2").unwrap());
     }
 
     #[test]

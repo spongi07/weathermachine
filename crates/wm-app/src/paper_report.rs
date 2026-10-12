@@ -1555,7 +1555,7 @@ pub(crate) fn settled_pnl(s: &wm_backtest::Settlement) -> String {
 
 /// A price as the book quotes it: two decimals, three on a sub-cent tick
 /// (0.001 is not "0.00", nor 0.997 "1.00").
-fn price_text(p: f64) -> String {
+pub(crate) fn price_text(p: f64) -> String {
     let cents = p * 100.0;
     if (cents - cents.round()).abs() < 1e-6 {
         format!("{p:.2}")
@@ -2108,6 +2108,7 @@ mod tests {
             pnl: Usd::parse(pnl).unwrap(),
             lab_pnl: Usd::parse(lab).unwrap(),
             live_pnl: Usd::ZERO,
+            positions: Vec::new(),
             at: Utc::now(),
         };
         assert_eq!(

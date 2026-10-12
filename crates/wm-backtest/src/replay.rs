@@ -15,7 +15,7 @@ use wm_core::ids::{ClientOrderId, EventSlug, StationId, StrategyId};
 use wm_core::market::Side;
 use wm_core::trading::DecisionRecord;
 use wm_core::units::{Rounding, Usd, notional};
-use wm_engine::{Engine, EngineConfig, RestoreState, RestoreSummary, StationHint};
+use wm_engine::{Engine, EngineConfig, RestoreState, RestoreSummary, SettledHolding, StationHint};
 use wm_execution::{SimConfig, SimulatedExchange};
 use wm_risk::ApprovedIntent;
 use wm_strategy::ProbabilityModel;
@@ -206,6 +206,9 @@ pub struct Settlement {
     /// paid out by the venue when the winning shares are redeemed).
     #[serde(default)]
     pub live_pnl: Usd,
+    /// Every position the settlement closed, with the strategy that held it.
+    #[serde(default)]
+    pub positions: Vec<SettledHolding>,
     pub at: DateTime<Utc>,
 }
 
@@ -491,7 +494,7 @@ impl SimulationSession {
             };
             let lab_before = self.engine.lab_realized_pnl_total();
             let live_before = self.engine.live_realized_pnl();
-            let pnl = self.engine.settle(&slug, final_value);
+            let (pnl, positions) = self.engine.settle_holdings(&slug, final_value);
             out.settlements.push(Settlement {
                 event_slug: slug,
                 local_date: date,
@@ -499,6 +502,7 @@ impl SimulationSession {
                 pnl,
                 lab_pnl: self.engine.lab_realized_pnl_total() - lab_before,
                 live_pnl: self.engine.live_realized_pnl() - live_before,
+                positions,
                 at: now,
             });
         }

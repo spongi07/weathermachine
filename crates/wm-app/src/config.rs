@@ -21,6 +21,10 @@
 //! | `WM_FORECAST_MODEL` | Open-Meteo model id, e.g. `gfs_global`             |
 //! | `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key (commercial host)  |
 //! | `WM_KNMI_API_KEY`   | KNMI Data Platform key (strategy K's readings)     |
+//! | `WM_LIVE_G`         | `true` arms strategy G's live twin (real money)    |
+//! | `WM_POLY_PRIVATE_KEY` / `WM_POLY_FUNDER` / `WM_POLY_SIG_TYPE` | its wallet |
+//! | `WM_PUSHOVER_TOKEN` / `WM_PUSHOVER_USER` | Pushover keys (notifications)  |
+//! | `WM_PUSHOVER_STRATEGIES` | `live` \| `all` \| strategy ids or letters      |
 //! | `WM_LOG_FORMAT`     | `json` \| `pretty`                                   |
 
 use anyhow::{Context, Result, bail};
@@ -864,6 +868,11 @@ pub struct EnvSettings {
     /// Its signer key, `WM_POLY_PRIVATE_KEY`, is read once by the live
     /// venue and kept nowhere else.
     pub poly_funder: Option<String>,
+    /// Pushover's application token and user key (never logged or stored),
+    /// and whose results are pushed (see [`crate::notify`]).
+    pub pushover_token: Option<String>,
+    pub pushover_user: Option<String>,
+    pub pushover_strategies: Option<String>,
 }
 
 /// Secrets (database URL with its password, tokens, keys) are never printed.
@@ -878,6 +887,10 @@ impl std::fmt::Debug for EnvSettings {
             .field("open_meteo_api_key", &set(&self.open_meteo_api_key))
             .field("knmi_api_key", &set(&self.knmi_api_key))
             .field("poly_funder", &self.poly_funder)
+            .field("pushover_token", &set(&self.pushover_token))
+            .field("pushover_user", &set(&self.pushover_user))
+            // (a key pasted into the wrong field is not printed either)
+            .field("pushover_strategies", &set(&self.pushover_strategies))
             .finish()
     }
 }
@@ -1024,6 +1037,9 @@ impl AppConfig {
             open_meteo_api_key: env_nonempty("WM_OPEN_METEO_API_KEY"),
             knmi_api_key: env_nonempty("WM_KNMI_API_KEY"),
             poly_funder: env_nonempty("WM_POLY_FUNDER"),
+            pushover_token: env_nonempty("WM_PUSHOVER_TOKEN"),
+            pushover_user: env_nonempty("WM_PUSHOVER_USER"),
+            pushover_strategies: env_nonempty("WM_PUSHOVER_STRATEGIES"),
         };
         let cfg = Self {
             file,
@@ -1033,6 +1049,22 @@ impl AppConfig {
         };
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// The Pushover account messages go to (`Ok(None)`: notifications off),
+    /// or why the settings cannot be used. Never a refusal to start: the
+    /// service runs without notifications and says why.
+    pub fn pushover(&self) -> std::result::Result<Option<crate::notify::Pushover>, String> {
+        let known: Vec<(String, String)> = crate::strategies::every_strategy(self)
+            .into_iter()
+            .map(|s| (s.id, s.letter))
+            .collect();
+        crate::notify::Pushover::from_env(
+            self.env.pushover_token.as_deref(),
+            self.env.pushover_user.as_deref(),
+            self.env.pushover_strategies.as_deref(),
+            &known,
+        )
     }
 
     /// Structural validation (fail closed at startup).
@@ -2305,9 +2337,20 @@ mod tests {
             open_meteo_api_key: Some("key-secret".into()),
             knmi_api_key: Some("knmi-secret".into()),
             poly_funder: Some("0x81f4f47aa3bBcF441cDe0B7C6e2A38a706b6d77e".into()),
+            pushover_token: Some("push-token-secret".into()),
+            pushover_user: Some("push-user-secret".into()),
+            pushover_strategies: Some("pasted-key-secret".into()),
         };
         let text = format!("{env:?}");
-        for secret in ["hunter2", "tok-secret", "key-secret", "knmi-secret"] {
+        for secret in [
+            "hunter2",
+            "tok-secret",
+            "key-secret",
+            "knmi-secret",
+            "push-token-secret",
+            "push-user-secret",
+            "pasted-key-secret",
+        ] {
             assert!(!text.contains(secret), "{text}");
         }
         assert!(text.contains("ops@example.org"));

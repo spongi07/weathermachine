@@ -56,6 +56,14 @@ Provider behaviours required by the brief:
   lab's too), every settlement (the main book's P&L, then the lab books'
   together) and every engine alert is logged as well as shown, and the
   startup line names the build (`build=0.1.0+<commit>`).
+* **Push messages (Pushover, optional):** with `WM_PUSHOVER_TOKEN` and
+  `WM_PUSHOVER_USER`, a message for every settled market of the strategies
+  `WM_PUSHOVER_STRATEGIES` names (`live` by default: G_live) and for every
+  live order that ended having bought shares; `weather-machine notify-test`
+  sends one now. A bounded queue keeps the engine loop from waiting; a
+  message Pushover refuses switches them off until a restart (an alert and
+  the gates' *Notifications* row say so); the keys go only to `api.pushover.net`, over
+  https, in the request body, never logged ([deployment/live.md](../deployment/live.md) §4).
 * **Dashboard:** live SSE snapshot (500 ms) and the zero-JS `/lite` page.
   They show provider health and budgets, collector schedule, the knowledge
   delay of each report, gates with reasons, the decision log, positions and

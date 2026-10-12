@@ -91,6 +91,13 @@ services:
       WM_POLY_PRIVATE_KEY: ${WM_POLY_PRIVATE_KEY:-}
       WM_POLY_FUNDER: ${WM_POLY_FUNDER:-}
       WM_POLY_SIG_TYPE: ${WM_POLY_SIG_TYPE:-1}
+      # A Pushover message for every settled market of the live twin, and for
+      # every live order that bought shares: the application's API token and
+      # your user key (both secret). WM_PUSHOVER_STRATEGIES: live (the
+      # default) | all | strategy ids or letters, e.g. GL,G.
+      WM_PUSHOVER_TOKEN: ${WM_PUSHOVER_TOKEN:-}
+      WM_PUSHOVER_USER: ${WM_PUSHOVER_USER:-}
+      WM_PUSHOVER_STRATEGIES: ${WM_PUSHOVER_STRATEGIES:-}
       WM_LOG_FORMAT: ${WM_LOG_FORMAT:-json}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn,hyper=warn,reqwest=warn,tungstenite=warn}
     ports:

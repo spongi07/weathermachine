@@ -90,6 +90,41 @@ Switch dailyprofit's live trading off while G_live trades.
   `LIVE fill (real money)`), every pull, every change of a check.
 * `weather-machine report paper`: G_live's fills and its settled result on a
   line of its own, apart from the paper books.
+* Push messages on the phone (Pushover, as dailyprofit's), with
+  `WM_PUSHOVER_TOKEN` (the API token of an application created at
+  pushover.net) and `WM_PUSHOVER_USER` (the user key; dailyprofit's
+  `PUSHOVER_USER` is the same one) in the stack's environment. Check them
+  with `docker exec <container> /usr/local/bin/weather-machine notify-test`
+  (in Portainer: the container's *Console*, command
+  `/usr/local/bin/weather-machine notify-test`; the image has no shell): it
+  sends one message now and says what Pushover answered. Then:
+
+  ```
+  G_live bought 4 NO 18°C at 0.94
+  $3.76 on Amsterdam 12 Oct; its bid of 10 shares at 0.94 expired with the rest unfilled. It pays $4.00 if the high is not 18°C.
+  Open now $13.16 of $40.00. Venue balance $36.84.
+  ```
+
+  when a live bid ends having bought shares (one message per bid, however
+  many pieces it filled in), and
+
+  ```
+  G_live won +$0.24
+  Amsterdam 12 Oct settled at 14°C (the observed high; the venue resolves the market itself).
+  NO 18°C: 4 shares at 0.94 ($3.76), won: $4.00 back.
+  Since going live +$0.24; it stops at a loss of $20.00. Venue balance $36.84; a win is added once it is claimed there.
+  ```
+
+  when its market settles (once the local day is over and two hours more),
+  one message per strategy that held a position in it.
+  `WM_PUSHOVER_STRATEGIES=GL,G` adds paper G's result, the twin to compare
+  against; `all` sends every strategy's, the lab's included. A message is
+  never sent twice: a restart that settles a market again finds its key in
+  `system_events` (`kind = 'notify'`). The dashboard's pre-trade gates show
+  a *Notifications* row (it never blocks a trade): on, for whom, how many
+  sent; or off and why (unset, a setting that cannot be used, or a message
+  Pushover refused: then they stay off until a restart, and an alert says
+  so). A wrong setting never stops the service.
 * The stop rule of the operator's plan: two losses in the first thirty live
   fills, or live G filled clearly less often than paper G, means stop and
   review (`WM_LIVE_G=false`, restart).

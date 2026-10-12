@@ -128,6 +128,9 @@ pub enum Command {
     },
     /// Validate configuration and environment, then exit.
     CheckConfig,
+    /// Send one Pushover message now (WM_PUSHOVER_TOKEN, WM_PUSHOVER_USER) and say
+    /// what Pushover answered.
+    NotifyTest,
     /// Container health probe (exit 0 = healthy).
     Healthcheck {
         #[arg(long)]
@@ -310,6 +313,16 @@ pub async fn execute(cli: Cli) -> Result<()> {
                     "not configured (trading blocked)"
                 }
             );
+            match cfg.pushover() {
+                Ok(Some(p)) => println!(
+                    "notifications: Pushover (token and user key ***), for {}",
+                    p.who
+                ),
+                Ok(None) => println!(
+                    "notifications: off (WM_PUSHOVER_TOKEN and WM_PUSHOVER_USER are not set)"
+                ),
+                Err(e) => println!("notifications: OFF — {e}"),
+            }
             let auto = if cfg.file.model.auto_train.enabled {
                 "auto-train on"
             } else {
@@ -356,6 +369,22 @@ pub async fn execute(cli: Cli) -> Result<()> {
                 }
             }
             Ok(())
+        }
+        Command::NotifyTest => {
+            let cfg = AppConfig::load(cli.config.as_deref())?;
+            match cfg.pushover() {
+                Ok(Some(p)) => match crate::notify::test(&p, Utc::now()).await {
+                    Ok(said) => {
+                        println!("{said}");
+                        Ok(())
+                    }
+                    Err(e) => bail!("{e}"),
+                },
+                Ok(None) => {
+                    bail!("notifications are off: set WM_PUSHOVER_TOKEN and WM_PUSHOVER_USER")
+                }
+                Err(e) => bail!("notifications are off: {e}"),
+            }
         }
         Command::Model {
             command: ModelCommand::Train { out, from_year },

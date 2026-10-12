@@ -17,6 +17,7 @@
 use crate::config::AppConfig;
 use crate::dto::{self, DtoInputs};
 use crate::http::Publisher;
+use crate::notify;
 use crate::setup::{self, ModelLoad, Providers};
 use crate::training::{self, Progress, TrainPlan};
 
@@ -299,6 +300,28 @@ fn gate_snapshot(gate: &ProviderGate, now: DateTime<Utc>) -> ProviderHealthSnaps
     s.daily_budget = gate.policy().daily_budget;
     s.circuit = st.circuit;
     s
+}
+
+/// The live twin's state for its push messages.
+fn live_context(
+    session: &SimulationSession,
+    cfg: &AppConfig,
+    link: Option<&live::LiveLink>,
+) -> notify::LiveContext {
+    let e = session.engine();
+    notify::LiveContext {
+        since_live: e.live_realized_total(),
+        stop: cfg
+            .file
+            .live
+            .enabled
+            .then_some(cfg.file.live.max_total_loss_usd),
+        balance: link.and_then(|l| l.status().balance),
+        open: e.live_positions().map_or(wm_core::units::Usd::ZERO, |p| {
+            p.open_positions().map(|p| p.cost_basis).sum()
+        }),
+        max_open: cfg.file.live.enabled.then_some(cfg.file.live.max_open_usd),
+    }
 }
 
 /// How long after a market's local day it is settled (paper/live).
@@ -755,6 +778,62 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             }
         }
     }
+
+    // -- Notifications (Pushover) ----------------------------------------------------
+    // Settled markets and live orders that bought, to the operator's phone.
+    // A setting that cannot be used is a warning, never a refusal to start.
+    let mut outbox: Option<notify::Outbox> = None;
+    // (a setting that cannot be used is alerted at once, below)
+    let mut notify_alerted = false;
+    let notify_off: Option<notify::NotifyState> = match cfg.pushover() {
+        Ok(Some(p)) => {
+            tracing::info!(
+                "notifications: a Pushover message follows every settled market of {} and every live order that bought shares",
+                p.who
+            );
+            let (notifier, rx) = notify::Notifier::new(p.who.clone());
+            tasks.push(tokio::spawn(notify::run_pushover(
+                p,
+                Arc::clone(&notifier.stats),
+                rx,
+            )));
+            // what earlier runs sent: a restart that settles a market again
+            // does not send its message again
+            let sent = match &store {
+                Some(s) => match s.notified_since(clock.now() - Duration::days(3)).await {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        tracing::warn!(
+                            "notifications: earlier runs' messages could not be read ({e:#}); a restart may repeat today's"
+                        );
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
+            let places = cfg
+                .locations
+                .iter()
+                .map(|l| (l.location.id.clone(), l.location.name.clone()))
+                .collect();
+            outbox = Some(notify::Outbox::new(notifier, places, sent));
+            None
+        }
+        Ok(None) => Some(notify::NotifyState {
+            ok: true,
+            detail: "off: WM_PUSHOVER_TOKEN and WM_PUSHOVER_USER are not set".into(),
+        }),
+        Err(why) => {
+            let msg = format!("notifications are off: {why}");
+            tracing::warn!("{msg}");
+            with_side(&side, |st| st.alert("warning", msg.clone()));
+            notify_alerted = true;
+            Some(notify::NotifyState {
+                ok: false,
+                detail: msg,
+            })
+        }
+    };
 
     // -- Probability model: first training, forecast evaluation, periodic retraining ----
     // New models are swapped into the running engine; trading never stops.
@@ -1262,6 +1341,27 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 with_side(&side, |st| st.alert(level, text));
             });
         }
+        if let Some(ob) = outbox.as_mut()
+            && (!out.settlements.is_empty()
+                || out
+                    .processed
+                    .iter()
+                    .any(|e| matches!(e.event, WeatherMachineEvent::OrderUpdate(_))))
+        {
+            let live = live_context(&session, &cfg, live_link.as_ref());
+            for (key, note) in ob.notes(session.engine(), &out, &live) {
+                if let Some(s) = store.clone() {
+                    let title = note.title.clone();
+                    tokio::spawn(async move {
+                        let details = serde_json::json!({ "key": key });
+                        let _ = s
+                            .record_system_event("info", "notify", &title, &details)
+                            .await;
+                    });
+                }
+                ob.notifier.push(note);
+            }
+        }
         loop_state.absorb(&session, out, &persist_tx, &storage_ok, &hint_txs, &side);
         loop_state.flush(clock.now(), &persist_tx, &storage_ok, &side);
         if publish {
@@ -1291,6 +1391,18 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let live_status = live_link.as_ref().map(live::LiveLink::status);
+            let notify_state = outbox
+                .as_ref()
+                .map(|o| o.notifier.stats.state(o.notifier.who()))
+                .or_else(|| notify_off.clone());
+            // Pushover refused a message: said once, among the alerts
+            if let Some(st) = notify_state.as_ref().filter(|st| !st.ok)
+                && !notify_alerted
+            {
+                notify_alerted = true;
+                let text = format!("notifications are {}", st.detail);
+                with_side(&side, |side| side.alert("warning", text));
+            }
             let inputs = DtoInputs {
                 demo: false,
                 instance: &cfg.file.app.instance,
@@ -1307,6 +1419,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 peak_slot: &peak_slot_cfg,
                 peak_times: peak_times.as_ref(),
                 live: live_status.as_ref(),
+                notifications: notify_state.as_ref(),
             };
             publisher.publish(dto::build(&snap, &inputs, now));
         }
@@ -1334,6 +1447,8 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         }
     }
     drop(persist_tx);
+    // the sender sends what is queued, then ends with its queue
+    drop(outbox);
     for t in tasks {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), t).await;
     }
