@@ -1460,8 +1460,10 @@ impl Engine {
         let book = self.books.get(&intent.token);
         let top = book.map(|b| serde_json::json!({ "bid": b.best_bid().map(|l| l.price.to_string()), "ask": b.best_ask().map(|l| l.price.to_string()), "age_ms": b.age_ms(self.now) }));
         // The live book is checked in live mode, with the venue's word on
-        // this server's location as the compliance gate.
+        // this server's location as the compliance gate and its readiness
+        // (and the live book's loss stop) as the mode gate.
         let live = self.live_book == Some(b);
+        let live_blocked = if live { self.live_block_reason() } else { None };
         let PaperBook {
             positions,
             position_strategy,
@@ -1477,6 +1479,7 @@ impl Engine {
             } else {
                 self.compliance_ok
             },
+            live_blocked: live_blocked.as_deref(),
             storage_ok: self.storage_ok,
             execution_ok: self.execution_ok,
             weather: Some(&weather),

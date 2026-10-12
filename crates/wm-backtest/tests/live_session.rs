@@ -2,22 +2,24 @@
 //! Strategy G's live twin in the shared session loop: paper G and G_live
 //! evaluate the same rule on books of their own; G_live's proposals wait in
 //! its evaluation while the live venue is not ready or its loss stop holds,
-//! no live order ever reaches the simulated exchange, and a restored G_live
-//! fill lands in the live book.
+//! the compliance gate refuses a location the API may not trade from; an
+//! approved live order goes out of the session (never to the simulated
+//! exchange), the venue's updates build the live book, and a restored
+//! G_live fill lands in the live book.
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use std::sync::Arc;
 use wm_backtest::SimulationSession;
 use wm_core::event::{
     EventEnvelope, EventSource, MarketSnapshotEvent, ObservationEvent, OrderBookEvent,
-    ProviderHealthEvent, WeatherMachineEvent,
+    OrderUpdateEvent, ProviderHealthEvent, WeatherMachineEvent,
 };
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{ClientOrderId, LocationId, ProviderId, RunId, StationId, StrategyId};
 use wm_core::market::{DailyTemperatureMarket, OutcomeSide, Side};
 use wm_core::portfolio::InstrumentRef;
 use wm_core::synthetic::synthetic_book;
-use wm_core::trading::{Fill, Liquidity, RunMode};
+use wm_core::trading::{Fill, Liquidity, OrderStatus, OrderUpdate, RunMode, TimeInForce};
 use wm_core::units::{Price, Shares, TempC, Usd};
 use wm_core::weather::{
     DedupClass, Observation, ObservationKey, QualityFlags, ReportType, TempPrecision,
@@ -239,13 +241,13 @@ fn session(live: Option<LiveBookConfig>) -> (SimulationSession, DailyTemperature
     (s, m)
 }
 
-fn live_lines(s: &SimulationSession) -> Vec<String> {
+fn live_lines(s: &SimulationSession, bucket: &str) -> Vec<String> {
     s.engine()
         .snapshot()
         .locations
         .iter()
         .flat_map(|l| l.evaluations.iter())
-        .filter(|e| e.strategy.as_str() == LIVE && e.bucket_label.starts_with("18"))
+        .filter(|e| e.strategy.as_str() == LIVE && e.bucket_label.starts_with(bucket))
         .flat_map(|e| e.blockers.clone())
         .collect()
 }
@@ -263,7 +265,7 @@ fn the_live_twin_waits_while_the_venue_is_not_ready_and_never_reaches_the_simula
     // paper G rests its bid at 0.94 for $30; the twin waits for the venue
     assert_eq!(approved, vec![(PAPER_G.to_owned(), Shares::from_whole(31))]);
     assert!(out.live_orders.is_empty());
-    let blockers = live_lines(&s);
+    let blockers = live_lines(&s, "18");
     assert!(
         blockers
             .iter()
@@ -275,52 +277,166 @@ fn the_live_twin_waits_while_the_venue_is_not_ready_and_never_reaches_the_simula
         "a proposal that waits is no refusal in the log"
     );
 
-    // The venue reports ready: the proposal reaches the risk check in live
-    // mode, where this build's live gate still refuses it.
-    s.engine_mut().set_live_gate(Vec::new(), true);
-    s.push(no18_book(&m, utc("2026-07-01T08:32:00Z")));
-    let out = s.run_until(utc("2026-07-01T08:32:30Z"));
+    // A venue that is ready but places this server where the API may not
+    // trade: the risk check's compliance gate refuses.
+    s.engine_mut().set_live_gate(Vec::new(), false);
+    s.push(no18_book(&m, utc("2026-07-01T08:31:30Z")));
+    let out = s.run_until(utc("2026-07-01T08:31:45Z"));
     let refused: Vec<_> = out
         .decisions
         .iter()
         .filter(|d| d.strategy.as_str() == LIVE)
         .collect();
-    assert!(!refused.is_empty(), "{:?}", out.decisions);
-    assert!(refused.iter().all(|d| !d.approved));
+    assert!(!refused.is_empty() && refused.iter().all(|d| !d.approved));
     assert!(
-        refused[0].reasons.iter().any(|r| r.contains("Mode")),
+        refused[0].reasons.iter().any(|r| r.contains("Compliance")),
         "{:?}",
         refused[0].reasons
     );
-    assert!(out.live_orders.is_empty() && out.approved.is_empty());
-    assert!(
-        !s.engine()
-            .orders()
-            .recent(100)
-            .iter()
-            .any(|o| o.strategy.as_str() == LIVE),
-        "no live order exists"
+    assert!(out.live_orders.is_empty());
+
+    // Ready and allowed: G_live's bid is approved and handed out as a live
+    // order, sized to whole cents at $10, never to the simulated exchange.
+    s.engine_mut().set_live_gate(Vec::new(), true);
+    s.push(no18_book(&m, utc("2026-07-01T08:32:00Z")));
+    let out = s.run_until(utc("2026-07-01T08:32:30Z"));
+    assert_eq!(out.live_orders.len(), 1, "{:?}", out.decisions);
+    let a = &out.live_orders[0];
+    let i = a.intent();
+    assert_eq!(i.strategy.as_str(), LIVE);
+    assert_eq!(i.outcome_side, OutcomeSide::No);
+    assert_eq!(i.limit_price, Price::parse("0.94").unwrap());
+    assert_eq!(i.shares, Shares::from_whole(10), "$10 at 0.94, whole cents");
+    assert_eq!(
+        i.tif,
+        TimeInForce::Gtd {
+            expires_at: utc("2026-07-01T08:45:00Z")
+        },
+        "ten minutes before the 08:55 report"
+    );
+    let id = a.client_order_id().clone();
+    let rec = s.engine().orders().get(&id).unwrap();
+    assert_eq!(
+        rec.status,
+        OrderStatus::PendingSubmit,
+        "the venue decides from here"
+    );
+    // the simulator never saw it: time passes, no fill and no update of it
+    s.push(no18_book(&m, utc("2026-07-01T08:44:00Z")));
+    let out = s.run_until(utc("2026-07-01T08:50:00Z"));
+    assert!(out.trades.iter().all(|t| t.strategy.as_str() != LIVE));
+    assert_eq!(
+        s.engine().orders().get(&id).unwrap().status,
+        OrderStatus::PendingSubmit
     );
 
-    // The loss stop: $20 lost since going live stops the twin.
+    // The venue's updates, as the live executor sends them: resting, four
+    // shares bought as a maker, then the rest expired.
+    let no18 = m.outcome_for_value(18).unwrap().no_token.clone();
+    let update = |status, filled: i64, fill: Option<i64>, at: &str| {
+        env(
+            utc(at),
+            WeatherMachineEvent::OrderUpdate(OrderUpdateEvent {
+                update: OrderUpdate {
+                    client_order_id: id.clone(),
+                    venue_order_id: Some("0xabc".into()),
+                    status,
+                    filled: Shares::from_whole(filled),
+                    avg_price: (filled > 0).then(|| Price::parse("0.94").unwrap()),
+                    fee_paid: Usd::ZERO,
+                    reason: None,
+                    ts: utc(at),
+                },
+                fill: fill.map(|n| Fill {
+                    client_order_id: id.clone(),
+                    token: no18.clone(),
+                    side: Side::Buy,
+                    price: Price::parse("0.94").unwrap(),
+                    shares: Shares::from_whole(n),
+                    fee: Usd::ZERO,
+                    liquidity: Liquidity::Maker,
+                    ts: utc(at),
+                }),
+            }),
+        )
+    };
+    s.push(update(OrderStatus::Live, 0, None, "2026-07-01T08:50:01Z"));
+    s.push(update(
+        OrderStatus::PartiallyFilled,
+        4,
+        Some(4),
+        "2026-07-01T08:50:02Z",
+    ));
+    s.push(update(
+        OrderStatus::Expired,
+        4,
+        None,
+        "2026-07-01T08:50:03Z",
+    ));
+    let out = s.run_until(utc("2026-07-01T08:50:05Z"));
+    assert_eq!(out.trades.len(), 1);
+    assert_eq!(out.trades[0].strategy.as_str(), LIVE);
+    let e = s.engine();
+    assert_eq!(
+        e.live_positions().unwrap().get(&no18).unwrap().shares,
+        Shares::from_whole(4)
+    );
+    assert!(e.positions().get(&no18).is_none(), "not the main book's");
+    let snap = e.snapshot();
+    let live = snap.live.as_ref().unwrap();
+    assert_eq!(
+        live.daily_new_exposure,
+        Usd::from_micros(3_760_000),
+        "the unfilled six shares gave their cost back"
+    );
+    assert!(
+        !snap.lab_books.iter().any(|b| b.strategy.as_str() == LIVE),
+        "the live book is not a lab book"
+    );
+
+    // The loss stop: $20 lost since going live stops the twin (19 °C would
+    // otherwise get a bid).
     s.engine_mut()
         .set_live_realized_before(Usd::from_whole(-20));
-    s.push(no18_book(&m, utc("2026-07-01T08:33:00Z")));
-    s.run_until(utc("2026-07-01T08:33:30Z"));
-    let blockers = live_lines(&s);
+    s.push(report(utc("2026-07-01T08:55:00Z"), 14));
+    let o19 = m.outcome_for_value(19).unwrap();
+    s.push(env(
+        utc("2026-07-01T09:00:00Z"),
+        WeatherMachineEvent::OrderBookUpdate(OrderBookEvent {
+            book: synthetic_book(
+                &o19.no_token,
+                Some("0.93"),
+                Some("0.97"),
+                500,
+                utc("2026-07-01T09:00:00Z"),
+            ),
+        }),
+    ));
+    let out = s.run_until(utc("2026-07-01T09:00:30Z"));
+    assert!(out.live_orders.is_empty());
+    let blockers = live_lines(&s, "19");
     assert!(
         blockers
             .iter()
             .any(|b| b.contains("stopped: the live book lost $20.00 since it went live")),
         "{blockers:?}"
     );
-    let snap = s.engine().snapshot();
-    let live = snap.live.as_ref().unwrap();
-    assert_eq!(live.realized_since_live, Usd::from_whole(-20));
-    assert!(live.blocked.as_deref().unwrap().starts_with("stopped"));
     assert!(
-        !snap.lab_books.iter().any(|b| b.strategy.as_str() == LIVE),
-        "the live book is not a lab book"
+        s.engine()
+            .snapshot()
+            .live
+            .unwrap()
+            .blocked
+            .unwrap()
+            .starts_with("stopped")
+    );
+
+    // Settled at 14 °C: the NO of 18 °C wins, 4 × (1 − 0.94) = $0.24.
+    s.engine_mut().settle(&m.event_slug, 14);
+    assert_eq!(s.engine().live_realized_pnl(), Usd::from_micros(240_000));
+    assert_eq!(
+        s.engine().live_realized_total(),
+        Some(Usd::from_micros(-19_760_000))
     );
 }
 

@@ -24,7 +24,7 @@ it after the fact.
              │ → Strategy A / B / C + UnwindEngine → proposals → RiskEngine → ApprovedIntent (typed gate) │
              └──────────────────────────────────────────┬────────────────────────────────────────────────┘
                                                         ▼
-                            SimulatedExchange (backtest · demo · paper)   |   DisabledLiveVenue (live, Phase 14)
+                            SimulatedExchange (backtest · demo · paper)   |   wm-live executor (G_live only)
                                                         ▼
                       decision audit log · orders · fills · positions → PostgreSQL · dashboard (SSE) · metrics
 ```

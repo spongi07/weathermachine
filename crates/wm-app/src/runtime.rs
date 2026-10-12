@@ -626,7 +626,8 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     match cfg.file.app.mode {
         RunMode::Paper => {}
         RunMode::Live => bail!(
-            "live trading is not available in this build (Phase 14 gate); use mode = \"paper\""
+            "mode \"live\" is not a run mode: the run is paper, and strategy G's live twin \
+             trades real money when [live] is enabled (WM_LIVE_G=true); use mode = \"paper\""
         ),
         RunMode::Backtest => {
             bail!("mode \"backtest\" is a batch job: use `weather-machine backtest`")

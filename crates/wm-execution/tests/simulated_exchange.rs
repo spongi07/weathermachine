@@ -86,6 +86,7 @@ fn approve(
         mode: RunMode::Paper,
         kill_switch: None,
         compliance_ok: false,
+        live_blocked: None,
         storage_ok: true,
         execution_ok: true,
         weather: Some(&ws),

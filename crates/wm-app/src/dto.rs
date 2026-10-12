@@ -672,8 +672,14 @@ pub fn build(
         },
         CheckDto {
             name: "Live trading".into(),
-            ok: true,
-            detail: "disabled in this build (Phase 14 gate)".into(),
+            ok: snap.live.as_ref().is_none_or(|l| l.blocked.is_none()),
+            detail: match &snap.live {
+                None => "off: paper only".into(),
+                Some(l) => match &l.blocked {
+                    None => format!("{} trades real money", l.strategy),
+                    Some(why) => format!("{} armed, not trading: {why}", l.strategy),
+                },
+            },
         },
     ];
     for l in &locations {

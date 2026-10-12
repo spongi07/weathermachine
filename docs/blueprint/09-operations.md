@@ -160,8 +160,8 @@ container (restart policy) instead of limping on.
   simulated venue lived in that process. The restore is logged as an alert
   and a `system_events` row (`kind = 'restore'`); a fill the book refuses is
   named there. If the database cannot be read, the run starts flat and says
-  so in a critical alert. Live position reconciliation against the venue
-  remains a Phase 14 prerequisite (§42).
+  so in a critical alert. G_live's book is restored the same way, and its
+  positions are checked against the venue's at start (§42).
 
 ## 41. Paper trading
 
@@ -185,32 +185,36 @@ until the new one is swapped in (MODEL ↻ on the dashboard).
 
 ## 42. Live trading
 
-**One strategy, behind a gate.** The run is always paper (`mode = live` is
+**One strategy, small limits.** The run is always paper (`mode = live` is
 refused at start). Strategy G's live twin, `G_live` ([deployment/live.md](../deployment/live.md)),
-trades a live book of its own: its intents pass the risk check in live mode,
-and the live venue (`crates/wm-live`: EIP-712 signing of CLOB orders for
-protocol 2 or 3, L1/L2 auth, post-only GTD bids, reconciliation through the
-orders' records, the heartbeat switch, the geoblock and position checks)
-places them. **The risk engine still refuses every live-mode intent**
-(`CheckId::Mode`, the Phase 14 gate), so this build places no real order:
-lifting that refusal for the live book is a separate, reviewed change.
+trades a live book of its own with real money: its intents pass the risk
+check in live mode, and the live venue (`crates/wm-live`: EIP-712 signing of
+CLOB orders for protocol 2 or 3, L1/L2 auth, post-only GTD bids,
+reconciliation through the orders' records, the heartbeat switch, the
+geoblock and position checks) places them. The risk engine's mode check
+approves a live intent only while the live venue reports itself ready and
+the live book's total-loss stop has not tripped (`RiskInputs.live_blocked`);
+its compliance check only while the venue's geoblock check places this
+server where the API may open positions (`compliance_ok`). An approved live
+intent leaves the session for the live venue and never reaches the
+simulator; the venue's order updates come back as events and build the
+live book. Limits: $10 a bid, $40 open, $20 a day, $20 in total
+(`[live]`).
 
-Prerequisites for Phase 14 (all must hold):
+Before live trading widens beyond G_live and these limits:
 1. Positive out-of-sample EV with stable parameters across walk-forward
    folds, from **TrueOrderBook** backtests on our own recorded books, and
-   ≥ N weeks of paper trading consistent with them.
-2. A jurisdiction and compliance review. Polymarket restricts or limits
-   users in many countries; reported 2026 status for the Netherlands is
-   **close-only** (ASSUMPTION; verify with Polymarket's terms).
-   `compliance_ok` must be satisfied explicitly.
-3. A venue adapter implementing `ExecutionVenue`: EIP-712 signing of CLOB v2
-   orders, pUSD collateral, `feeRateBps`, idempotent client order ids
-   (already deterministic), order/fill/position reconciliation on start, and
-   keys in a secret store (never in config or logs).
+   ≥ N weeks of paper trading consistent with them (G went live on its
+   replay and nine paper days, at limits small enough to be the test).
+2. A jurisdiction and compliance review. The venue's geoblock answer gates
+   every live intent; from the Netherlands it allows the API (the
+   website's flag is set; lists as dailyprofit keeps them). Verify with
+   Polymarket's terms.
+3. The live venue for more than one strategy's post-only bids: taker
+   orders, sells, fees, on-chain redemption (claimed by hand today).
 4. Human-approved resolution specs (`require_approved_resolution_spec =
    true`), an armed kill switch, and alerting.
-5. Small, staged limits: start below $10/$100 until live slippage matches the
-   simulator.
+5. Staged limits: raise them only once live fills match paper G's.
 
 ## 43. Multi-location expansion
 

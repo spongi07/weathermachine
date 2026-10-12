@@ -122,6 +122,8 @@ impl World {
             mode,
             kill_switch: kill,
             compliance_ok: false,
+            // as the engine's live gate starts: closed until the venue reports
+            live_blocked: Some("the live venue has not reported yet"),
             storage_ok: true,
             execution_ok: true,
             weather: w,
@@ -160,6 +162,49 @@ fn approves_a_clean_intent() {
         assert!(a.client_order_id().as_str().starts_with("wm-"));
         assert_eq!(a.post_trade_global_exposure(), Usd::parse("9.5").unwrap());
     }
+}
+
+/// Live mode (the live book only) passes the mode gate only while the live
+/// venue reports itself ready, and the compliance gate only when the venue
+/// places this server where the API may trade.
+#[test]
+fn a_live_intent_needs_a_ready_venue_and_an_allowed_location() {
+    let w = World::new();
+    let ws = weather(ProviderHealthState::Healthy, 5);
+    let live = |blocked: Option<&str>, location_ok: bool, decision: u64| {
+        let i = intent(&w.market, 18, OutcomeSide::Yes, "0.95", 10, decision);
+        let book = book_for(&i.token, "0.94", "0.95");
+        let mut inp = w.inputs(Some(&book), Some(&ws), RunMode::Live, None);
+        inp.live_blocked = blocked;
+        inp.compliance_ok = location_ok;
+        let d = engine().evaluate(i, &inp);
+        (checks(&d), d)
+    };
+    let (c, _) = live(Some("heartbeat not taken"), true, 1);
+    assert_eq!(c, vec![CheckId::Mode], "the venue is not ready");
+    let (c, d) = live(Some("heartbeat not taken"), true, 2);
+    if let RiskDecision::Rejected { reasons, .. } = &d {
+        assert!(
+            reasons[0]
+                .detail
+                .contains("live venue not ready: heartbeat not taken")
+        );
+    }
+    assert_eq!(c, vec![CheckId::Mode]);
+    let (c, _) = live(None, false, 3);
+    assert_eq!(
+        c,
+        vec![CheckId::Compliance],
+        "a location the API may not trade from"
+    );
+    let (c, d) = live(None, true, 4);
+    assert!(c.is_empty() && d.is_approved(), "ready and allowed: {c:?}");
+    // outside live mode the venue's word changes nothing
+    let i = intent(&w.market, 18, OutcomeSide::Yes, "0.95", 10, 5);
+    let book = book_for(&i.token, "0.94", "0.95");
+    let paper = w.inputs(Some(&book), Some(&ws), RunMode::Paper, None);
+    assert!(paper.live_blocked.is_some());
+    assert!(engine().evaluate(i, &paper).is_approved());
 }
 
 #[test]

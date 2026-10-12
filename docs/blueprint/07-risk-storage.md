@@ -7,7 +7,7 @@ produce an `ApprovedIntent`, and only such an intent can reach a venue
 (type-level guarantee: `VenueOrder: From<&ApprovedIntent>`).
 
 **INPUTS.** `TradeIntent` plus `RiskInputs { now, mode, kill_switch,
-compliance_ok, storage_ok, execution_ok, weather: WeatherStatus, market, book,
+compliance_ok, live_blocked, storage_ok, execution_ok, weather: WeatherStatus, market, book,
 portfolio }`. **OUTPUTS.** `RiskDecision::Approved(ApprovedIntent)` or
 `Rejected { reasons: Vec<RiskRejection> }`. *All* failing checks are
 reported, never just the first. Client order ids are deterministic
@@ -16,8 +16,8 @@ reported, never just the first. Client order ids are deterministic
 | Check (`CheckId`) | Rule (defaults) | Brief requirement |
 |---|---|---|
 | KillSwitch | engaged ⇒ reject | kill switch |
-| Mode | live ⇒ reject (Phase 14 gate) | — |
-| Compliance | live needs a jurisdiction gate | — |
+| Mode | live (the live book only) ⇒ reject while the live venue is not ready or the loss stop holds | — |
+| Compliance | live needs the venue's geoblock check to allow the API from here | — |
 | ResearchOnly | research strategies only in backtest | — |
 | Storage | paper/live need working audit storage | FAIL CLOSED |
 | Execution | venue unhealthy ⇒ reject | execution health |

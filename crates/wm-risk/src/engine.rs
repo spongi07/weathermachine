@@ -303,9 +303,15 @@ pub struct PortfolioView<'a> {
 /// Everything the risk engine needs for one decision.
 pub struct RiskInputs<'a> {
     pub now: DateTime<Utc>,
+    /// `Live` only for the live book (strategy G's live twin); a run itself
+    /// is always paper or backtest.
     pub mode: RunMode,
     pub kill_switch: Option<&'a str>,
+    /// Live: the venue places this server where the API may open positions.
     pub compliance_ok: bool,
+    /// Live: why the live venue takes no order now (`None`: it reported
+    /// itself ready). Ignored outside live mode.
+    pub live_blocked: Option<&'a str>,
     pub storage_ok: bool,
     pub execution_ok: bool,
     pub weather: Option<&'a WeatherStatus>,
@@ -491,11 +497,13 @@ impl RiskEngine {
                 format!("kill switch engaged: {reason}"),
             );
         }
-        if inp.mode == RunMode::Live {
-            fail(
-                CheckId::Mode,
-                "live trading is not enabled in this build (Phase 14 gate)".into(),
-            );
+        // Live mode is the live book's alone (the run itself is paper): an
+        // intent passes only while the live venue reports itself ready, and
+        // the compliance gate below holds too.
+        if inp.mode == RunMode::Live
+            && let Some(why) = inp.live_blocked
+        {
+            fail(CheckId::Mode, format!("live venue not ready: {why}"));
         }
         if intent.research_only && inp.mode != RunMode::Backtest {
             fail(

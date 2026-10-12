@@ -5,15 +5,17 @@ post-only NO bids on Polymarket with real money, beside paper G, which goes on
 at its own size as the twin to compare against. Every other strategy stays on
 paper.
 
-> **Status of this build.** The whole live path is built and tested against a
-> mock venue: the signer (bit-exact with the reference client's golden
-> vectors), the API credentials, the post-only orders, their follow-up and
-> cancels, the readiness checks, the live book, its limits and its loss stop.
-> **The risk engine still refuses every live-mode intent** (`CheckId::Mode`,
-> the Phase 14 gate). With `WM_LIVE_G=true` the venue connects and runs its
-> checks, the dashboard's LIVE panel shows them, and G_live's proposals end
-> in that refusal: no real order goes out until the gate is lifted for the
-> live book in a reviewed change.
+> **Status of this build.** With `WM_LIVE_G=true`, **G_live places real
+> orders.** The whole live path is tested against a mock venue: the signer
+> (bit-exact with the reference client's golden vectors), the API
+> credentials, the post-only orders, their follow-up and cancels, the
+> readiness checks, the live book, its limits and its loss stop. The risk
+> engine approves a live-mode intent of the live book only while the live
+> venue reports itself ready (every check in §2) and the loss stop has not
+> tripped; its compliance check refuses a location the API may not trade
+> from. No test has seen the real venue's answers to post-only orders, its
+> heartbeats or the neg-risk signing domain: the first orders are that test,
+> so watch them (§4).
 
 ## 1. What it does
 
@@ -54,8 +56,10 @@ hold; the dashboard's LIVE panel lists the ones that do not:
    never placed);
 9. the collateral read, and enough of it beside what the resting bids reserve.
 
-When any of them stops holding, the resting bids are pulled. The kill switch
-pulls them too.
+Until they all hold, G_live's proposals wait in its evaluation with the
+reason (the strategy page shows it), and the risk engine's mode check
+refuses any live intent that gets that far. When any of them stops holding,
+the resting bids are pulled. The kill switch pulls them too.
 
 ## 3. Switching it on
 
@@ -67,6 +71,7 @@ In the Portainer stack's environment (never in git):
 | `WM_POLY_PRIVATE_KEY` | the signer's private key (`0x…`). Read once at start, kept only in the signer, never logged |
 | `WM_POLY_FUNDER` | the wallet that holds the money (for an e-mail or Magic login: the proxy wallet, as dailyprofit's `POLY_FUNDER`) |
 | `WM_POLY_SIG_TYPE` | `1` for a proxy wallet (as dailyprofit's `POLY_SIG_TYPE`), `0` for an EOA, `2` for a Gnosis safe |
+| `WM_ADMIN_TOKEN` | any long random string: it arms the dashboard's kill switch, which pulls the live bids too |
 
 Then, on the dashboard: the LIVE panel shows the location the venue sees, the
 protocol, the collateral, the heartbeat and every check that does not pass.
