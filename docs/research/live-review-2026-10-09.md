@@ -44,7 +44,8 @@ from then.
 
 **Eliminated:** I (8 October, confirmed by this week), L1 (9 October), and
 the seven lab families switched off on 8 October. **Kept:** F, G, K, U and
-seventeen lab families, paper only.
+seventeen lab families, paper only (seven since 12 October:
+[live review of 12 October](live-review-2026-10-12.md)).
 
 ## 3. What the week shows
 

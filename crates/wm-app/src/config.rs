@@ -1674,9 +1674,12 @@ mod tests {
             wm_weather::knmi::DEFAULT_BASE_URL
         );
         // The strategy lab runs every family's main rule but the seven
-        // switched off on 8 October 2026 and L1 (9 October), paper only, with
-        // the documented defaults, and reads the documented inputs.
-        let off = [1u8, 9, 12, 17, 19, 21, 22, 23];
+        // switched off on 8 October 2026, L1 (9 October) and the ten of
+        // 12 October, paper only, with the documented defaults, and reads the
+        // documented inputs.
+        let off = [
+            1u8, 2, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23,
+        ];
         assert_eq!(
             st.lab,
             wm_strategy::LabConfig {

@@ -664,10 +664,17 @@ slippage_allowance = "0.01"
 # 1–5¢ band the far tails never offer. L1 since 9 October 2026
 # (docs/research/live-review-2026-10-09.md): its shield brought the
 # next-degree maker to about zero, the replay's later days lost $25.01 over
-# 41 trades and its first live week $7.00 over three. Their replay code stays.
+# 41 trades and its first live week $7.00 over three. Since 12 October 2026
+# (docs/research/live-review-2026-10-12.md): L10, L11 and L14, which lost
+# live (−$8.88, −$22.13, −$23.88), and L2, L5, L6, L8, L13, L15 and L16,
+# which made no trade in nine days and too few in the replay to show an
+# edge. Their replay code stays: `research market` still replays all 25.
 [strategies.lab]
 enabled = true
-disabled = ["L1", "L9", "L12", "L17", "L19", "L21", "L22", "L23"]
+disabled = [
+    "L1", "L2", "L5", "L6", "L8", "L9", "L10", "L11", "L12",
+    "L13", "L14", "L15", "L16", "L17", "L19", "L21", "L22", "L23",
+]
 variants = []                     # e.g. ["L2"]: the margin of 0.6 °C instead of 0.3 °C
 notional = "20.00"                # cost of one trade at its price (L3: F's 100 shares)
 slippage_allowance = "0.005"      # in the expected profit of a taker buy

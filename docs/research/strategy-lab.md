@@ -383,8 +383,13 @@ L23) and L22, whose 1–5¢ band the far tails never offer
 ([strategy review §3.5](strategy-review.md#35-lab-notes)); since 9 October
 L1 too: its shield brought the next-degree maker to about zero, the
 replay's later days lost $25.01 over 41 trades and its first live week
-$7.00 over three ([live review](live-review-2026-10-09.md)). Their replay
-code stays.
+$7.00 over three ([live review](live-review-2026-10-09.md)); since 12
+October ten more: L10, L11 and L14, which lost live (−$8.88, −$22.13,
+−$23.88), and L2, L5, L6, L8, L13, L15 and L16, which made no trade in nine
+days and too few in the replay to show an edge
+([live review of 12 October](live-review-2026-10-12.md)). Seven run: L3,
+L4, L7, L18, L20, L24 and L25. Their replay code stays: `research market`
+replays all 25.
 
 **Own books.** Each lab strategy trades a paper book of its own: its
 positions (and the order that opened each), its live orders, its risk

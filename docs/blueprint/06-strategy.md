@@ -837,7 +837,10 @@ fixes the price) and L3's sale of its YES at the bid. `[strategies.lab]`:
 quotes' timing; `[strategies.lab.risk]`: each book's limits. Since 8 October
 2026 the shipped configuration switches off L9, L12, L17, L19, L21, L22 and
 L23 ([strategy review §3.5](../research/strategy-review.md#35-lab-notes)),
-since 9 October L1 too ([live review](../research/live-review-2026-10-09.md)).
+since 9 October L1 too ([live review](../research/live-review-2026-10-09.md)),
+since 12 October L2, L5, L6, L8, L10, L11, L13, L14, L15 and L16
+([live review of 12 October](../research/live-review-2026-10-12.md)): seven
+families run, L3, L4, L7, L18, L20, L24 and L25.
 
 **INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
 readings of the last 36 hours, the neighbours' readings with their
