@@ -1333,11 +1333,18 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         let ok = storage_ok.load(Ordering::Acquire) && !loop_state.backlogged;
         session.engine_mut().set_storage_ok(ok);
         metrics::gauge!("wm_storage_ok").set(if ok { 1.0 } else { 0.0 });
+        if let Some(link) = live_link.as_mut() {
+            link.refresh(&mut session, clock.now());
+        }
         let mut out = session.run_until(clock.now());
         if let Some(link) = live_link.as_mut() {
+            let now = clock.now();
+            link.observe(&session, &out, now, |level, text| {
+                with_side(&side, |st| st.alert(level, text));
+            });
             let orders = std::mem::take(&mut out.live_orders);
-            link.forward(&mut session, orders, last_knowledge);
-            link.sync(&mut session, |level, text| {
+            link.forward(&mut session, orders, last_knowledge, now);
+            link.sync(&mut session, now, |level, text| {
                 with_side(&side, |st| st.alert(level, text));
             });
         }
@@ -2138,11 +2145,14 @@ impl EngineLoopState {
                 tracing::warn!("{a}");
             }
         }
+        // The lab's fills show on its own pages, and a live fill in the live
+        // venue's own alert (with its order at the venue): both are logged.
         let fills: Vec<(bool, String)> = out
             .trades
             .iter()
             .map(|t| {
-                let kind = if session.engine().is_live_strategy(&t.strategy) {
+                let live = session.engine().is_live_strategy(&t.strategy);
+                let kind = if live {
                     "LIVE fill (real money)"
                 } else {
                     "paper fill"
@@ -2152,7 +2162,10 @@ impl EngineLoopState {
                     t.strategy, t.side, t.bucket_label, t.price, t.shares
                 );
                 tracing::info!(slug = %t.event_slug, "{text}");
-                (wm_strategy::lab::is_lab_id(t.strategy.as_str()), text)
+                (
+                    live || wm_strategy::lab::is_lab_id(t.strategy.as_str()),
+                    text,
+                )
             })
             .collect();
         let settled: Vec<String> = out
@@ -2180,9 +2193,10 @@ impl EngineLoopState {
                     a.clone(),
                 );
             }
-            // The lab's fills show on its own pages, not among the alerts.
-            for (_, text) in fills.into_iter().filter(|(lab, _)| !lab) {
-                st.alert("info", text);
+            for (elsewhere, text) in fills {
+                if !elsewhere {
+                    st.alert("info", text);
+                }
             }
             for text in settled {
                 st.alert("info", text);

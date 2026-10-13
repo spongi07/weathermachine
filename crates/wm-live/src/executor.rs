@@ -77,6 +77,8 @@ pub struct Settings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveOrder {
     pub client_order_id: ClientOrderId,
+    /// What it buys, for the alerts (e.g. `NO 18°C on 13 Oct`).
+    pub label: String,
     pub token: TokenId,
     pub side: Side,
     pub price: Price,
@@ -712,7 +714,7 @@ impl Exec {
         let free = self.balance.unwrap_or(Usd::ZERO) - self.reserved();
         if cost > free {
             let why = format!(
-                "collateral ${} with ${} reserved by resting orders: under the order's ${cost}",
+                "collateral {} with {} reserved by resting orders: under the order's {cost}",
                 self.balance.unwrap_or(Usd::ZERO),
                 self.reserved()
             );
@@ -767,9 +769,9 @@ impl Exec {
         let ans = self.clob.post_order(&a, &signed.body).await;
         let outcome = answer::classify_post(ans.status, &ans.body, ans.transport.clone());
         let label = format!(
-            "{} BUY {} × {} @ {} (${}) until {} UTC",
+            "{} BUY {} × {} @ {} ({}) until {} UTC",
             o.client_order_id,
-            o.token,
+            o.label,
             o.shares,
             o.price,
             signed.cost,
@@ -1066,7 +1068,7 @@ impl Exec {
                 "info",
                 format!(
                     "LIVE fill: {} {delta} shares of {} @ {} (order {id})",
-                    o.client_order_id, o.token, o.price
+                    o.client_order_id, o.label, o.price
                 ),
             )
             .await;

@@ -146,6 +146,7 @@ fn book(held: &[(&str, i64)]) -> BookView {
 fn order(id: &str) -> LiveOrder {
     LiveOrder {
         client_order_id: ClientOrderId::from_static_string(id.to_owned()),
+        label: "NO 18°C on 1 Jul".to_owned(),
         token: TokenId::from_static_string(TOKEN.to_owned()),
         side: Side::Buy,
         price: Price::saturating_from_micros(920_000),

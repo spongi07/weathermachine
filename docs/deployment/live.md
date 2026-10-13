@@ -54,12 +54,26 @@ hold; the dashboard's LIVE panel lists the ones that do not:
 8. no order of unknown fate (an answer that proves nothing waits for the
    order's record; one without a record ten seconds after it was sent was
    never placed);
-9. the collateral read, and enough of it beside what the resting bids reserve.
+9. the collateral read (every minute), and enough of it beside what the
+   resting bids reserve for the order at hand.
 
 Until they all hold, G_live's proposals wait in its evaluation with the
 reason (the strategy page shows it), and the risk engine's mode check
 refuses any live intent that gets that far. When any of them stops holding,
 the resting bids are pulled. The kill switch pulls them too.
+
+Two more holds keep new bids back without pulling the resting ones (the
+LIVE panel lists them too):
+
+* **Collateral short of one bid:** less than `[live].notional` free beside
+  what the resting bids hold. On 13 October, the first live day, $11.31 was
+  left at the venue after two fills: one $9.30 bid fitted, a second did not.
+* **A pause after a refused order:** a live order the venue refuses (or the
+  live venue's own checks do) pauses new bids for 5 minutes, doubling to an
+  hour while the refusals go on, back to 5 once the venue takes an order.
+  Without it the strategy would propose the refused bid again at the next
+  book update, many times a second; an alert names the pause and its
+  reason.
 
 ## 3. Switching it on
 
@@ -75,6 +89,16 @@ In the Portainer stack's environment (never in git):
 
 Then, on the dashboard: the LIVE panel shows the location the venue sees, the
 protocol, the collateral, the heartbeat and every check that does not pass.
+
+**How much to keep at the venue.** G_live holds at most `max_open_usd`
+($40) in positions and resting bids at a time. A position's money comes back
+only once its market is resolved and the winning shares are claimed on
+polymarket.com, usually the day after, so yesterday's positions still hold
+their cost while today's bids need theirs: about $80 lets it bid without
+ever being short, and $50–60 is enough when the winnings are claimed every
+morning (13 October: two fills, $18.50). Less is safe, only slower: a bid
+that does not fit waits (§2). More than $80 is of no use without higher
+limits.
 
 **One account, one live bot.** If dailyprofit trades live on the same
 account, its start-up check sees G_live's resting bids and holds itself

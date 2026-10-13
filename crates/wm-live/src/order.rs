@@ -46,9 +46,9 @@ pub enum BuildError {
     Size(Shares),
     #[error("price {price} is not on the tick {tick} inside (0, 1)")]
     Price { price: Price, tick: Price },
-    #[error("a buy of ${0} is not whole cents")]
+    #[error("a buy of {0} is not whole cents")]
     NotWholeCents(Usd),
-    #[error("a buy of ${cost} is over the cap of ${cap}")]
+    #[error("a buy of {cost} is over the cap of {cap}")]
     Cap { cost: Usd, cap: Usd },
     #[error("expiration {0}: a GTD order needs one at least three minutes ahead")]
     Expiration(i64),
