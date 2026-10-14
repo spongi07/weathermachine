@@ -319,6 +319,12 @@ pub fn describe(s: &RestoreSummary) -> String {
             usd(s.lab_new_exposure_today)
         ));
     }
+    if !s.live_new_exposure_today.is_zero() {
+        text.push_str(&format!(
+            "; the live twin's {} toward its own",
+            usd(s.live_new_exposure_today)
+        ));
+    }
     if !s.rejected.is_empty() {
         text.push_str(&format!(
             "; {} fill(s) refused: {}",
@@ -377,7 +383,12 @@ mod tests {
             text.contains("today's new exposure $95.00 counts toward the main book's daily limit"),
             "{text}"
         );
-        assert!(!text.contains("refused") && !text.contains("sales") && !text.contains("lab"));
+        assert!(
+            !text.contains("refused")
+                && !text.contains("sales")
+                && !text.contains("lab")
+                && !text.contains("live")
+        );
         s.realized_today = Usd::from_whole(-3);
         s.lab_new_exposure_today = Usd::from_micros(39_700_000);
         s.rejected
@@ -389,6 +400,14 @@ mod tests {
         );
         assert!(
             text.contains("; the lab books' $39.70 counts toward their own limits"),
+            "{text}"
+        );
+        // The live twin's apart (14 October 2026: "the lab books' $99.91"
+        // held its two bids, $19.13).
+        s.live_new_exposure_today = Usd::from_micros(19_130_000);
+        let text = describe(&s);
+        assert!(
+            text.contains("; the live twin's $19.13 toward its own"),
             "{text}"
         );
         assert!(text.contains("1 fill(s) refused: wm-x on m"), "{text}");

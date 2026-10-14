@@ -502,9 +502,17 @@ fn a_restored_live_fill_lands_in_the_live_book() {
                 },
                 strategy: StrategyId::from_static(LIVE),
             }],
+            lab_new_exposure_today: std::collections::BTreeMap::from([(
+                StrategyId::from_static(LIVE),
+                Usd::from_micros(9_400_000),
+            )]),
             ..RestoreState::default()
         };
-        s.restore(&state, utc("2026-07-01T08:05:00Z"));
+        let summary = s.restore(&state, utc("2026-07-01T08:05:00Z"));
+        // Its exposure of the day counts toward its own book, named apart
+        // from the lab books'.
+        assert_eq!(summary.live_new_exposure_today, Usd::from_micros(9_400_000));
+        assert!(summary.lab_new_exposure_today.is_zero());
         let e = s.engine();
         assert!(
             e.positions().get(&o.no_token).is_none(),

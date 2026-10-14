@@ -62,6 +62,9 @@ pub struct RestoreSummary {
     pub new_exposure_today: Usd,
     /// The lab books' together; each counts toward its own book's limit.
     pub lab_new_exposure_today: Usd,
+    /// The live twin's, toward its own book's limit.
+    #[serde(default)]
+    pub live_new_exposure_today: Usd,
     /// Fills the position book refused, e.g. a sell larger than the holding.
     pub rejected: Vec<String>,
 }

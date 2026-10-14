@@ -1739,7 +1739,11 @@ impl Engine {
         for (strategy, cost) in &state.lab_new_exposure_today {
             if let Some(&b) = self.book_of.get(strategy) {
                 self.paper[b].risk.restore_daily_new_exposure(*cost, now);
-                summary.lab_new_exposure_today += *cost;
+                if self.live_book == Some(b) {
+                    summary.live_new_exposure_today += *cost;
+                } else {
+                    summary.lab_new_exposure_today += *cost;
+                }
             }
         }
         for p in self.paper.iter().flat_map(|b| b.positions.open_positions()) {
