@@ -334,9 +334,14 @@ pub(crate) fn order_of(engine: &Engine, a: &ApprovedIntent) -> Result<LiveOrder,
 pub(crate) fn book_view(engine: &Engine) -> BookView {
     let mut v = BookView::default();
     for m in engine.markets().values().filter(|m| !m.closed) {
+        let day = m.local_date.format("%-d %b");
         for o in &m.outcomes {
-            v.tokens.insert(o.yes_token.to_string());
-            v.tokens.insert(o.no_token.to_string());
+            let bucket = o.bucket.label();
+            for (token, side) in [(&o.yes_token, "YES"), (&o.no_token, "NO")] {
+                v.tokens.insert(token.to_string());
+                v.labels
+                    .insert(token.to_string(), format!("{side} {bucket} on {day}"));
+            }
         }
     }
     if let Some(p) = engine.live_positions() {
@@ -420,6 +425,10 @@ mod tests {
         let v = book_view(s.engine());
         assert_eq!(v.tokens.len(), m.outcomes.len() * 2);
         assert!(v.tokens.contains(m.outcomes[0].no_token.as_str()));
+        assert_eq!(
+            v.labels[m.outcome_for_value(18).unwrap().no_token.as_str()],
+            "NO 18°C on 1 Jul"
+        );
         assert!(v.held.is_empty(), "the live book holds nothing");
     }
 

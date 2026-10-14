@@ -388,20 +388,33 @@ pub async fn positions(
     data_base: &str,
     funder: &str,
 ) -> Result<Vec<(String, Shares)>, String> {
-    let url = format!(
-        "{}/positions?user={funder}&sizeThreshold=0&limit=500",
-        data_base.trim_end_matches('/')
-    );
-    let r = http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.without_url().to_string())?;
-    if !r.status().is_success() {
-        return Err(format!("positions: http {}", r.status().as_u16()));
+    // the Data API pages by 500 at most, the most shares first: an account
+    // of many markets (other bots' too) takes several pages
+    const PAGE: usize = 500;
+    const MAX_PAGES: usize = 10;
+    let mut all = Vec::new();
+    for page in 0..MAX_PAGES {
+        let url = format!(
+            "{}/positions?user={funder}&sizeThreshold=0&limit={PAGE}&offset={}",
+            data_base.trim_end_matches('/'),
+            page * PAGE
+        );
+        let r = http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
+        if !r.status().is_success() {
+            return Err(format!("positions: http {}", r.status().as_u16()));
+        }
+        let v: serde_json::Value = r.json().await.map_err(|e| e.without_url().to_string())?;
+        let listed = v.as_array().map_or(0, Vec::len);
+        all.extend(parse_positions(&v)?);
+        if listed < PAGE {
+            break;
+        }
     }
-    let v: serde_json::Value = r.json().await.map_err(|e| e.without_url().to_string())?;
-    parse_positions(&v)
+    Ok(all)
 }
 
 pub fn parse_positions(v: &serde_json::Value) -> Result<Vec<(String, Shares)>, String> {

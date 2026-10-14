@@ -1,13 +1,14 @@
 //! The executor against a mock CLOB, Data API and geoblock endpoint: the
 //! readiness gates, an order placed and filled, a refusal, an earlier run's
-//! leftover cancelled, positions that differ, a location that may not trade.
+//! leftover cancelled, the venue's positions against the books, a location
+//! that may not trade.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::{Duration, Utc};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, watch};
-use wiremock::matchers::{method, path, path_regex};
+use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{ClientOrderId, TokenId};
@@ -140,6 +141,7 @@ fn book(held: &[(&str, i64)]) -> BookView {
             .iter()
             .map(|(t, n)| ((*t).to_owned(), Shares::from_whole(*n)))
             .collect::<HashMap<_, _>>(),
+        labels: HashMap::from([(TOKEN.to_owned(), "NO 18°C on 1 Jul".to_owned())]),
     }
 }
 
@@ -341,7 +343,7 @@ async fn an_earlier_runs_leftover_on_a_weather_market_is_cancelled() {
 }
 
 #[tokio::test]
-async fn positions_that_differ_from_the_books_keep_the_venue_closed() {
+async fn shares_the_venue_holds_beyond_the_books_keep_the_venue_closed() {
     let s = venue("NL").await;
     Mock::given(method("GET"))
         .and(path("/data/orders"))
@@ -358,13 +360,17 @@ async fn positions_that_differ_from_the_books_keep_the_venue_closed() {
         .await;
     let mut h = start(&s);
     h.commands.send(Command::Book(book(&[]))).await.unwrap();
-    let st = wait_status(&mut h, "a position mismatch", |st| {
-        st.blockers.iter().any(|b| b.contains("positions differ"))
+    let st = wait_status(&mut h, "a position the books do not hold", |st| {
+        st.blockers
+            .iter()
+            .any(|b| b.contains("holds shares the books do not"))
     })
     .await;
     assert!(!st.ready);
     assert!(
-        st.blockers.iter().any(|b| b.contains(TOKEN)),
+        st.blockers
+            .iter()
+            .any(|b| b.contains("NO 18°C on 1 Jul: venue 10, books 0")),
         "{:?}",
         st.blockers
     );
@@ -372,6 +378,82 @@ async fn positions_that_differ_from_the_books_keep_the_venue_closed() {
         !st.blockers.iter().any(|b| b.contains("a-btc-token")),
         "other markets are not ours"
     );
+    stop(h).await;
+}
+
+/// 13 October 2026, a restart at 22:58 UTC: the venue's list held none of
+/// the two live positions of the market that had ended at 22:00. Fewer
+/// shares at the venue add no exposure: said, not blocking.
+#[tokio::test]
+async fn a_venue_list_short_of_the_books_warns_without_blocking() {
+    let s = venue("NL").await;
+    no_orders_or_positions(&s).await;
+    let mut h = start(&s);
+    h.commands
+        .send(Command::Book(book(&[(TOKEN, 10)])))
+        .await
+        .unwrap();
+    let st = wait_status(&mut h, "ready", |st| st.ready).await;
+    assert!(st.blockers.is_empty(), "{:?}", st.blockers);
+    let mut warned = Vec::new();
+    while let Ok((level, text)) = h._alerts.try_recv() {
+        if level == "warning" && text.contains("fewer shares than the books") {
+            warned.push(text);
+        }
+    }
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0].contains("NO 18°C on 1 Jul: venue 0, books 10"),
+        "{}",
+        warned[0]
+    );
+    stop(h).await;
+}
+
+/// The Data API lists 500 positions a page, the most shares first: a live
+/// position of ten shares on an account of many markets is on a later page.
+#[tokio::test]
+async fn the_venue_positions_are_read_page_by_page() {
+    let s = venue("NL").await;
+    Mock::given(method("GET"))
+        .and(path("/data/orders"))
+        .respond_with(json(serde_json::json!([])))
+        .mount(&s)
+        .await;
+    let first: Vec<serde_json::Value> = (0..500)
+        .map(|i| serde_json::json!({ "asset": format!("other-{i}"), "size": 100.0 }))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/positions"))
+        .and(query_param("offset", "0"))
+        .respond_with(json(serde_json::Value::Array(first)))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/positions"))
+        .and(query_param("offset", "500"))
+        .respond_with(json(serde_json::json!([{ "asset": TOKEN, "size": 10.0 }])))
+        .mount(&s)
+        .await;
+    let mut h = start(&s);
+    h.commands
+        .send(Command::Book(book(&[(TOKEN, 10)])))
+        .await
+        .unwrap();
+    let st = wait_status(&mut h, "ready", |st| st.ready).await;
+    assert!(st.blockers.is_empty(), "{:?}", st.blockers);
+    let mut said = Vec::new();
+    while let Ok((_, text)) = h._alerts.try_recv() {
+        if text.contains("positions") || text.contains("shares") {
+            said.push(text);
+        }
+    }
+    assert!(
+        said.iter()
+            .any(|t| t.contains("live positions at the venue match the books")),
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|t| t.contains("fewer shares")), "{said:?}");
     stop(h).await;
 }
 

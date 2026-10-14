@@ -49,8 +49,14 @@ hold; the dashboard's LIVE panel lists the ones that do not:
    resting;
 6. the orders an earlier run left on the weather markets are cancelled (any
    other order of the account is left alone);
-7. the venue's positions in the open weather markets equal the live book's
-   (checked at start, and every two minutes while they differ);
+7. the venue holds no shares in the open weather markets beyond the live
+   book's: those would be exposure no book tracks, an order of another run
+   or one by hand (checked at start, and every two minutes while it holds
+   them). A venue list short of the books adds no exposure and does not
+   block; an alert names what is short. On 13 October, after a restart at
+   22:58 UTC, the list held neither live position, most likely because it
+   was read as one page of 500, the most shares first, on an account of
+   many markets; it is read page by page now;
 8. no order of unknown fate (an answer that proves nothing waits for the
    order's record; one without a record ten seconds after it was sent was
    never placed);

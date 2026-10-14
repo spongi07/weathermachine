@@ -6,8 +6,8 @@
 //! the account not in closed-only mode; this server's location allowed to
 //! trade on the API; the venue taking the heartbeats (its dead-man's switch,
 //! which cancels every open order of these credentials ten seconds after
-//! they stop); the leftovers of an earlier run cancelled; the venue's
-//! positions in the open weather markets equal to the books'; no order of
+//! they stop); the leftovers of an earlier run cancelled; no shares at the
+//! venue in the open weather markets beyond the books'; no order of
 //! unknown fate; the collateral read. Whenever it is not ready, the orders
 //! resting in the book are pulled: a bid nobody can watch is cancelled.
 //!
@@ -97,6 +97,17 @@ pub struct BookView {
     pub tokens: HashSet<String>,
     /// Shares the live book holds, per token.
     pub held: HashMap<String, Shares>,
+    /// What each token is, for the alerts (e.g. `NO 18°C on 13 Oct`).
+    pub labels: HashMap<String, String>,
+}
+
+impl BookView {
+    fn name(&self, token: &str) -> String {
+        self.labels
+            .get(token)
+            .cloned()
+            .unwrap_or_else(|| format!("token {token}"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +223,8 @@ struct Exec {
     leftovers_cleared: bool,
     next_leftovers: DateTime<Utc>,
     positions: Option<Result<(), String>>,
+    /// The venue's list short of the books, as last said.
+    positions_short: Option<String>,
     next_positions: DateTime<Utc>,
     orders: BTreeMap<String, Tracked>,
     was_ready: bool,
@@ -261,6 +274,7 @@ pub async fn run(
         leftovers_cleared: false,
         next_leftovers: now,
         positions: None,
+        positions_short: None,
         next_positions: now,
         orders: BTreeMap::new(),
         was_ready: false,
@@ -624,11 +638,15 @@ impl Exec {
         for o in ours {
             let ans = self.clob.cancel(&a, &o.order_id).await;
             let verdict = answer::cancel_answer(ans.status, &ans.body, &o.order_id);
+            let what = self
+                .book
+                .as_ref()
+                .map_or_else(|| format!("token {}", o.asset_id), |b| b.name(&o.asset_id));
             self.alert(
                 "warning",
                 format!(
-                    "an earlier run's order {} on token {} was still open: cancel {:?}",
-                    o.order_id, o.asset_id, verdict
+                    "an earlier run's order {} on {what} was still open: cancel {:?}",
+                    o.order_id, verdict
                 ),
             )
             .await;
@@ -636,6 +654,13 @@ impl Exec {
     }
 
     /// The venue's positions in the open weather markets against the books.
+    /// Shares the venue holds beyond the books are exposure no book tracks
+    /// (an order of another run, or one by hand): no new order until they
+    /// are gone. Fewer shares at the venue than the books add no exposure,
+    /// and the venue's list can leave positions out (13 October 2026, a
+    /// restart at 22:58 UTC: neither of the two live positions, of the
+    /// market that had ended at 22:00, was on the one page of 500 then read,
+    /// the most shares first), so that is said and does not block.
     async fn compare_positions(&mut self) {
         let Some(book) = self.book.clone() else {
             return;
@@ -650,7 +675,8 @@ impl Exec {
             }
         };
         let tolerance = Shares::from_micros(10_000);
-        let mut diffs = Vec::new();
+        let mut more = Vec::new();
+        let mut less = Vec::new();
         let mut seen = HashSet::new();
         for (token, shares) in &venue {
             if !book.tokens.contains(token) {
@@ -658,28 +684,48 @@ impl Exec {
             }
             seen.insert(token.clone());
             let held = book.held.get(token).copied().unwrap_or(Shares::ZERO);
-            if (*shares - held).abs() > tolerance {
-                diffs.push(format!("token {token}: venue {shares}, books {held}"));
+            let line = format!("{}: venue {shares}, books {held}", book.name(token));
+            if *shares > held + tolerance {
+                more.push(line);
+            } else if held > *shares + tolerance {
+                less.push(line);
             }
         }
         for (token, held) in &book.held {
             if !seen.contains(token) && book.tokens.contains(token) && *held > tolerance {
-                diffs.push(format!("token {token}: venue 0, books {held}"));
+                less.push(format!("{}: venue 0, books {held}", book.name(token)));
             }
         }
-        let verdict = if diffs.is_empty() {
+        let short = (!less.is_empty()).then(|| less.join("; "));
+        if short != self.positions_short {
+            if let Some(s) = &short {
+                self.alert(
+                    "warning",
+                    format!(
+                        "the venue lists fewer shares than the books (its list can leave positions out; not blocking): {s}"
+                    ),
+                )
+                .await;
+            }
+            self.positions_short = short;
+        }
+        let verdict = if more.is_empty() {
             Ok(())
         } else {
             Err(format!(
-                "the venue's positions differ from the books (checked again every 2 minutes; settles with the market): {}",
-                diffs.join("; ")
+                "the venue holds shares the books do not (an order of another run, or one by hand; checked again every 2 minutes): {}",
+                more.join("; ")
             ))
         };
         if verdict != self.positions.clone().unwrap_or(Ok(())) || self.positions.is_none() {
             match &verdict {
                 Ok(()) => {
-                    self.alert("info", "live positions at the venue match the books")
-                        .await
+                    let text = if self.positions_short.is_none() {
+                        "live positions at the venue match the books"
+                    } else {
+                        "the venue holds no shares beyond the books"
+                    };
+                    self.alert("info", text).await
                 }
                 Err(e) => self.alert("critical", e.clone()).await,
             }
