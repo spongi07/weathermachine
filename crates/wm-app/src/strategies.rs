@@ -115,7 +115,7 @@ pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
                 "Strategy G's live twin: G's rule on a live book of its own, its post-only NO bids placed on Polymarket with real money (sized to whole cents), beside paper G. It places an order only while the live venue's checks pass (credentials, location, heartbeats, the venue's positions against the books, collateral) and stops after its total-loss limit. Held to settlement; a win is paid out when its shares are redeemed.",
                 &cfg.file.live,
             );
-            e.letter = "GL".to_owned();
+            e.letter = wm_strategy::tail_seller::LIVE_TAG.to_owned();
             e
         },
         entry(

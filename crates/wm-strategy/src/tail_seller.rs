@@ -53,6 +53,9 @@ pub const ID: &str = "G_tail_seller";
 /// Engine id of G's live twin: the same rule on the live book, its orders
 /// placed on the venue (`[live]`), sized to whole cents.
 pub const LIVE_ID: &str = "G_live";
+/// The live twin's letter: on its evaluation lines (`GL 19°C NO · …`) and
+/// its strategy page, apart from G's.
+pub const LIVE_TAG: &str = "GL";
 
 /// Configuration of strategy G. Every threshold is a research parameter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

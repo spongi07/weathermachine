@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use wm_core::event::ForecastEvent;
@@ -1211,6 +1211,10 @@ fn strategy_days(
     }
     let mut by_tag: BTreeMap<String, Acc> = BTreeMap::new();
     for d in evaluations {
+        // Until 14 October 2026 the live twin's lines read `G`, as G's do,
+        // after G's in the same record (G has one line per bucket): a
+        // second G line on a bucket and side is the twin's.
+        let mut g_seen = HashSet::new();
         let lines = d
             .outputs
             .get("evaluations")
@@ -1218,7 +1222,13 @@ fn strategy_days(
             .into_iter()
             .flatten()
             .filter_map(|v| v.as_str())
-            .filter_map(parse_line);
+            .filter_map(parse_line)
+            .map(|mut l| {
+                if l.tag == "G" && !g_seen.insert((l.bucket.clone(), l.side.clone())) {
+                    wm_strategy::tail_seller::LIVE_TAG.clone_into(&mut l.tag);
+                }
+                l
+            });
         for l in lines {
             let acc = by_tag.entry(l.tag.clone()).or_default();
             acc.lines += 1;
@@ -2536,6 +2546,47 @@ mod tests {
         assert_eq!(k.closest.len(), 1, "one line per bucket and side");
         assert_eq!(k.closest[0].at, "14:27", "two blockers beat four");
         assert!(call_text(&k.closest[0]).contains("ask 0.18 · p 0.940 · EV +0.7426"));
+    }
+
+    /// 13 and 14 October 2026: the live twin's lines read `G`, after G's in
+    /// the same record. A second G line on a bucket is the twin's; lines
+    /// written since read `GL`.
+    #[test]
+    fn the_live_twins_lines_count_for_gl_also_from_before_their_tag() {
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 10, 14)
+            .unwrap()
+            .and_hms_opt(8, 27, 0)
+            .unwrap()
+            .and_utc();
+        let rec = |lines: &[&str]| ReportDecision {
+            at,
+            strategy: "evaluation".into(),
+            event_slug: None,
+            summary: String::new(),
+            inputs: serde_json::Value::Null,
+            outputs: serde_json::json!({ "evaluations": lines }),
+            approved: false,
+            reasons: Vec::new(),
+        };
+        let g19 = "G 19°C NO · ask 0.93 · bid 0.924 (maker) · p 0.990 · EV +0.0660 — SIGNAL";
+        let g20 = "G 20°C NO · ask 0.99 · bid 0.989 (maker) · p 0.999 · EV +0.0100 — YES offered at 0.011 outside [0.01, 0.08]";
+        let gl19 = "GL 19°C NO · ask 0.93 · bid 0.924 (maker) · p 0.990 · EV +0.0660 — SIGNAL";
+        let recs = [
+            rec(&[g19, g20, "H 19°C YES · no ask — no ask", g19, g20]),
+            rec(&[g19, gl19]),
+        ];
+        let refs: Vec<&ReportDecision> = recs.iter().collect();
+        let days = strategy_days(
+            &refs,
+            &HashMap::new(),
+            Some(18),
+            0.0,
+            chrono_tz::Europe::Amsterdam,
+        );
+        let of = |tag: &str| days.iter().find(|d| d.strategy == tag).unwrap();
+        assert_eq!((of("G").lines, of("G").signals.len()), (3, 2));
+        assert_eq!((of("GL").lines, of("GL").signals.len()), (3, 2));
+        assert_eq!(of("H").lines, 1);
     }
 
     #[test]

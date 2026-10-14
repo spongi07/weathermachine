@@ -2017,8 +2017,12 @@ impl Engine {
     }
 }
 
-/// Strategy tag for audit lines: the id up to its first `_` ("A", "B", "D").
+/// Strategy tag for audit lines: the id up to its first `_` ("A", "B", "D");
+/// G's live twin is `GL`, or its lines would read as G's.
 fn strategy_tag(s: &StrategyId) -> &str {
+    if s.as_str() == wm_strategy::tail_seller::LIVE_ID {
+        return wm_strategy::tail_seller::LIVE_TAG;
+    }
     s.as_str().split('_').next().unwrap_or(s.as_str())
 }
 
@@ -2234,6 +2238,19 @@ mod tests {
         assert_eq!(
             evaluation_line(&eval(None)),
             "G 20°C NO · ask 0.26 · p 0.248 · EV +0.0078 — YES offered at 0.76 outside [0.01, 0.08]"
+        );
+    }
+
+    /// G's live twin runs G's rule: its lines must not read as G's, or its
+    /// strategy page shows none and G's shows each line twice.
+    #[test]
+    fn the_live_twins_lines_read_gl() {
+        let mut e = eval(None);
+        e.strategy = StrategyId::from_static(wm_strategy::tail_seller::LIVE_ID);
+        assert!(
+            evaluation_line(&e).starts_with("GL 20°C NO · ask 0.26"),
+            "{}",
+            evaluation_line(&e)
         );
     }
 }
