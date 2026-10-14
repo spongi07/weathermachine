@@ -381,7 +381,7 @@ async fn shares_the_venue_holds_beyond_the_books_keep_the_venue_closed() {
     stop(h).await;
 }
 
-/// 13 October 2026, a restart at 22:58 UTC: the venue's list held none of
+/// 13 October 2026, a restart at 23:38 UTC: the venue's list held none of
 /// the two live positions of the market that had ended at 22:00. Fewer
 /// shares at the venue add no exposure: said, not blocking.
 #[tokio::test]

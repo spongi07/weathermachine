@@ -54,7 +54,7 @@ hold; the dashboard's LIVE panel lists the ones that do not:
    or one by hand (checked at start, and every two minutes while it holds
    them). A venue list short of the books adds no exposure and does not
    block; an alert names what is short. On 13 October, after a restart at
-   22:58 UTC, the list held neither live position, most likely because it
+   23:38 UTC, the list held neither live position, most likely because it
    was read as one page of 500, the most shares first, on an account of
    many markets; it is read page by page now;
 8. no order of unknown fate (an answer that proves nothing waits for the

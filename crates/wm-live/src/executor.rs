@@ -658,7 +658,7 @@ impl Exec {
     /// (an order of another run, or one by hand): no new order until they
     /// are gone. Fewer shares at the venue than the books add no exposure,
     /// and the venue's list can leave positions out (13 October 2026, a
-    /// restart at 22:58 UTC: neither of the two live positions, of the
+    /// restart at 23:38 UTC: neither of the two live positions, of the
     /// market that had ended at 22:00, was on the one page of 500 then read,
     /// the most shares first), so that is said and does not block.
     async fn compare_positions(&mut self) {
