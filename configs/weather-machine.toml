@@ -320,8 +320,8 @@ throttle_memory_secs = 1800
 # ---------------------------------------------------------------------------
 [risk]
 position_size_usd = "10.00"          # any strategy without its own caps
-# F ≤ $110 + G $120 + K $50 = $280 of capital at most (H's $30, I's $30
-# and J's $80 more if they are switched back on). The worst-case loss counts
+# G $120 + K $50 = $170 of capital at most (F's $110, H's $30, I's $30 and
+# J's $80 more if they are switched back on). The worst-case loss counts
 # the worst outcome of each market, where legs of different buckets hedge
 # each other, so it stays below that.
 global_max_exposure_usd = "400.00"
@@ -476,8 +476,13 @@ slippage_allowance = "0.005"      # for the EV shown (not a gate)
 # over 80 (per trade about +$0.14, 95 % CI −$5.93 … +$5.14). That is within
 # noise and was picked after seeing the data: a hypothesis to confirm on
 # later days, not an edge. The replay keeps reporting the median slot.
+# Off since 14 October 2026 (docs/research/live-review-2026-10-14.md): the
+# replay and the paper record together won 83 of 89 trades (93.3 %), about
+# the 93.8 % a price of 0.93 needs, for −$19.97 — no edge, while one loss
+# (−$78.50 on 14 October) costs about 13 wins. Its code and replay stay;
+# `enabled = true` brings it back.
 [strategies.peak_slot]
-enabled = true
+enabled = false
 slot_from_quantile = 0.75         # from the time 75 % of days first report their high
 slot_to_quantile = 0.95           # … to the time 95 % of days have it
 min_price = "0.90"                # the best ask must be above this
@@ -512,8 +517,9 @@ max_data_age_minutes = 40
 # engine leaves them alone (exempt_strategies below).
 # ---------------------------------------------------------------------------
 
-# G — tail seller: rest a NO bid (an offer of the YES) on cheap buckets two
-# or more degrees above the day's high. Longshots are overpriced: YES at
+# G — tail seller: rest a NO bid (an offer of the YES) on cheap buckets
+# `min_distance` or more degrees above the day's high (three since 2 October
+# 2026, below). Longshots are overpriced: YES at
 # 0.00–0.02 won 0.1 % at a mean price of 0.4 %, and the makers facing the
 # takers who bought them earned +0.34¢ a share (95 % CI +0.26 … +0.41),
 # +1.04¢ on buckets two above the high (−0.06 … +2.27).
@@ -618,6 +624,10 @@ max_book_age_ms = 15000
 # 0.989) and after all 137 readings further above it. A cap of 0.85 made K
 # buy earlier at higher prices (mean 0.66 instead of 0.57: 5 trades, +$73.98
 # against 4, +$81.10), so the cap stays at 0.75; the replay shows the other.
+# It walks the NO asks while each price stays in [min_price, max_price] with
+# min_edge, buying what the notional buys there or everything offered up to
+# where it stops (14 October 2026: before, it needed the whole notional at
+# the best ask, which a thin book before a report rarely offers).
 [strategies.knmi_nowcast]
 enabled = true
 mean_margin_tenths = 3            # ten-minute mean ≥ high + 0.5 + 0.3 °C
@@ -668,11 +678,15 @@ slippage_allowance = "0.01"
 # (docs/research/live-review-2026-10-12.md): L10, L11 and L14, which lost
 # live (−$8.88, −$22.13, −$23.88), and L2, L5, L6, L8, L13, L15 and L16,
 # which made no trade in nine days and too few in the replay to show an
-# edge. Their replay code stays: `research market` still replays all 25.
+# edge. L3 since 14 October 2026 (docs/research/live-review-2026-10-14.md):
+# it enters as F does (switched off the same day), and its escape did not
+# fire on F's loss that day (KNMI 17.6 °C before the report, the escape
+# needing 17.8 °C). Their replay code stays: `research market` still
+# replays all 25.
 [strategies.lab]
 enabled = true
 disabled = [
-    "L1", "L2", "L5", "L6", "L8", "L9", "L10", "L11", "L12",
+    "L1", "L2", "L3", "L5", "L6", "L8", "L9", "L10", "L11", "L12",
     "L13", "L14", "L15", "L16", "L17", "L19", "L21", "L22", "L23",
 ]
 variants = []                     # e.g. ["L2"]: the margin of 0.6 °C instead of 0.3 °C
@@ -695,8 +709,12 @@ max_daily_loss_usd = "100.00"
 max_spread = "0.10"               # several rules trade minutes before a report
 max_orders_per_minute = 10
 
+# Off since 14 October 2026: every strategy that runs holds to settlement
+# (G and K are exempt below; the lab and G's live twin trade books of their
+# own, which the unwind engine never touches), so it had nothing to manage.
+# Switch it on with any of A–E.
 [strategies.unwind]
-enabled = true
+enabled = false
 exit_below_probability = 0.5
 # Strategies that hold to settlement by design: their positions start below
 # the exit probability (a cheap YES, the NO of a middle bucket, a quote's

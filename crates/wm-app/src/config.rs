@@ -1805,7 +1805,8 @@ mod tests {
             cfg.file.risk.position_size_usd,
             wm_core::units::Usd::from_whole(10)
         );
-        // F, G and K at once (H–J off): $400 of worst case.
+        // G and K at once (F and H–J off): $400 of worst case, room for F
+        // if it is switched back on.
         let usd = wm_core::units::Usd::from_whole;
         let risk = &cfg.file.risk;
         assert_eq!(risk.global_max_exposure_usd, usd(400));
@@ -1876,8 +1877,10 @@ mod tests {
                 ..wm_strategy::KnmiNowcastConfig::default()
             }
         );
-        // The unwind engine leaves F alone too: it holds to settlement, as
-        // its replay does.
+        // The unwind engine is off since 14 October 2026: everything that
+        // runs holds to settlement. It would leave F alone too, as F's replay
+        // holds every trade.
+        assert!(!st.unwind.enabled);
         assert_eq!(
             st.unwind.exempt_strategies,
             std::iter::once("F_peak_slot".to_owned())
@@ -1890,11 +1893,11 @@ mod tests {
             wm_weather::knmi::DEFAULT_BASE_URL
         );
         // The strategy lab runs every family's main rule but the seven
-        // switched off on 8 October 2026, L1 (9 October) and the ten of
-        // 12 October, paper only, with the documented defaults, and reads the
-        // documented inputs.
+        // switched off on 8 October 2026, L1 (9 October), the ten of
+        // 12 October and L3 (14 October), paper only, with the documented
+        // defaults, and reads the documented inputs.
         let off = [
-            1u8, 2, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23,
+            1u8, 2, 3, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23,
         ];
         assert_eq!(
             st.lab,
@@ -1908,18 +1911,21 @@ mod tests {
             assert!(!st.lab.variant(f), "L{f}");
         }
         assert_eq!(cfg.file.lab, LabSection::default());
-        // The operator moved F's slot to 75 % → 95 % after the replay; the
-        // rest of the section states the documented defaults.
+        // F is off since 14 October 2026. The operator had moved its slot to
+        // 75 % → 95 % after the replay; the rest of the section states the
+        // documented defaults.
         let f = cfg.peak_slot();
+        assert!(!f.enabled);
         assert_eq!((f.slot_from_quantile, f.slot_to_quantile), (0.75, 0.95));
         assert_eq!(
             wm_strategy::PeakSlotConfig {
+                enabled: true,
                 slot_from_quantile: 0.5,
                 slot_to_quantile: 0.9,
                 ..f
             },
             wm_strategy::PeakSlotConfig::default(),
-            "apart from the slot, the shipped [strategies.peak_slot] and the documented defaults must agree"
+            "apart from the switch and the slot, the shipped [strategies.peak_slot] and the documented defaults must agree"
         );
         assert_eq!(cfg.file.app.mode, RunMode::Paper);
         assert!(cfg.file.providers.awc.policy.min_interval >= std::time::Duration::from_secs(30));
@@ -2087,9 +2093,12 @@ mod tests {
         let mut cfg =
             AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
         let f = cfg.peak_slot();
-        assert!(f.enabled);
+        assert!(!f.enabled, "off since 14 October 2026");
         assert_eq!(f.shares, wm_core::units::Shares::from_whole(100));
         assert_eq!(f.fallback_slots.summer, (15 * 60, 18 * 60));
+        // Switched on again, its settings are checked as before.
+        cfg.file.strategies.peak_slot.enabled = true;
+        assert!(cfg.peak_slot().enabled);
         let ok = cfg.file.strategies.peak_slot.clone();
         let bad: [fn(&mut PeakSlotConfigToml); 7] = [
             |f| f.slot_from_quantile = -0.1,
@@ -2235,8 +2244,11 @@ mod tests {
             |c| c.file.strategies.lab.notional = wm_core::units::Usd::ZERO,
             // Below the $20 notional, every trade would be rejected.
             |c| c.file.strategies.lab.risk.position_size_usd = usd(10),
-            // L3 buys F's 100 shares at up to 0.95: $95.
-            |c| c.file.strategies.lab.risk.f_escape_position_usd = usd(50),
+            // L3, switched on again, buys F's 100 shares at up to 0.95: $95.
+            |c| {
+                c.file.strategies.lab.disabled.retain(|f| f != "L3");
+                c.file.strategies.lab.risk.f_escape_position_usd = usd(50);
+            },
             |c| c.file.strategies.lab.risk.max_exposure_usd = usd(20),
             |c| c.file.strategies.lab.risk.max_daily_loss_usd = wm_core::units::Usd::ZERO,
             |c| c.file.strategies.lab.risk.max_spread = Price::ONE,
@@ -2261,9 +2273,10 @@ mod tests {
         c.file.strategies.lab.variants = vec!["L2".into(), "L99".into()];
         let err = format!("{:#}", c.validate().unwrap_err());
         assert!(err.contains("L99") && err.contains("L1 … L25"), "{err}");
-        // With L3 switched off, the lab's stake need not cover F's shares.
+        // With L3 switched off, as shipped since 14 October 2026, the lab's
+        // stake need not cover F's shares.
         let mut c = ok.clone();
-        c.file.strategies.lab.disabled = vec!["L3".into()];
+        assert!(!c.file.strategies.lab.runs(3));
         c.file.strategies.lab.risk.f_escape_position_usd = usd(50);
         c.validate().unwrap();
     }

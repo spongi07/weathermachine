@@ -27,8 +27,11 @@
 //! maximum reached the edge as well, when `require_max_at_edge` — K buys the
 //! NO of the bucket holding the high (it dies the moment any report beats
 //! it) when the NO ask lies in [`min_price`, `max_price`] and the EV at
-//! `p_new_high` is at least `min_edge`. Fixed cost, fill-and-kill, held to
-//! settlement. A bucket that also holds high + 1 is skipped.
+//! `p_new_high` is at least `min_edge`. Fill-and-kill, held to settlement:
+//! it walks the NO asks while each price stays in that band with that edge
+//! and buys what `notional` buys there, or everything offered up to where
+//! the walk stops — right before a report the best ask is often thin. A
+//! bucket that also holds high + 1 is skipped.
 //!
 //! **Risk.** The METAR is a single minute's value; the temperature can dip
 //! back in the five to fifteen minutes between the readings. The NO then
@@ -76,7 +79,8 @@ pub struct KnmiNowcastConfig {
     /// … and at most this long before the routine report it anticipates
     /// (the first one after the interval).
     pub max_lead_minutes: i64,
-    /// The NO of the high's bucket: its ask in [min_price, max_price].
+    /// The NO of the high's bucket: its ask, and every share bought, in
+    /// [min_price, max_price].
     #[serde(with = "decimal_serde::price")]
     pub min_price: Price,
     #[serde(with = "decimal_serde::price")]
@@ -86,9 +90,11 @@ pub struct KnmiNowcastConfig {
     /// table (the default 0.80 is a cautious placeholder; the shipped
     /// configuration uses the measured 0.94).
     pub p_new_high: f64,
-    /// EV per share at the ask, after the taker fee and slippage.
+    /// EV per share at the ask, and at every price bought, after the taker
+    /// fee and slippage.
     pub min_edge: f64,
-    /// Cost of one trade at the ask.
+    /// Most one trade costs: its limit (the worst price it walks to) times
+    /// its shares.
     #[serde(with = "decimal_serde::usd")]
     pub notional: Usd,
     /// METAR data age limit.
@@ -151,6 +157,35 @@ impl KnmiNowcast {
 
 fn c(tenths: i32) -> String {
     format!("{:.1} °C", f64::from(tenths) / 10.0)
+}
+
+/// A fill-and-kill buy for `notional`, walking the asks (best first) while
+/// `accept` takes each price: the limit and whole shares that buy the most —
+/// all the notional buys at that limit, or everything offered up to it when
+/// that is less. Limit × shares never exceeds the notional, and the book
+/// offers every share up to the limit. `None` when `accept` refuses the best
+/// ask.
+fn sweep_for_notional(
+    book: &OrderBook,
+    notional: Usd,
+    accept: impl Fn(Price) -> bool,
+) -> Option<(Price, Shares)> {
+    let whole = |s: Shares| round_shares_to_lot(s, Shares::from_whole(1), Rounding::Down);
+    let mut offered = Shares::ZERO;
+    let mut best: Option<(Price, Shares)> = None;
+    for l in book.asks.iter().take_while(|l| accept(l.price)) {
+        offered += l.size;
+        let want = whole(shares_for_notional(notional, l.price, Rounding::Down));
+        let take = whole(offered).min(want);
+        if best.is_none_or(|(_, s)| take > s) {
+            best = Some((l.price, take));
+        }
+        // Deeper levels buy fewer shares for the same notional.
+        if offered >= want {
+            break;
+        }
+    }
+    best
 }
 
 impl Strategy for KnmiNowcast {
@@ -249,10 +284,15 @@ impl Strategy for KnmiNowcast {
             }
         }
         let fees = ctx.market.fees;
-        let shares = ask.and_then(|a| {
-            let raw = shares_for_notional(cfg.notional, a, Rounding::Down);
-            let s = round_shares_to_lot(raw, Shares::from_whole(1), Rounding::Down);
-            (s >= outcome.min_order_size && s.micros() > 0).then_some(s)
+        let ev_at =
+            |price: Price| ev_per_share(cfg.p_new_high, price, &fees, cfg.slippage_allowance);
+        // What the notional buys walking the NO asks while each price stays
+        // in the band with the edge: right before a report the best ask is
+        // often thin (the replay, at traded prices, never saw the depth).
+        let sweep = book.and_then(|b| {
+            sweep_for_notional(b, cfg.notional, |price| {
+                price >= cfg.min_price && price <= cfg.max_price && ev_at(price) >= cfg.min_edge
+            })
         });
         match (book, ask) {
             (None, _) => blockers.push("no NO book".into()),
@@ -267,18 +307,28 @@ impl Strategy for KnmiNowcast {
                         cfg.min_price, cfg.max_price
                     ));
                 }
-                match shares {
-                    None => blockers.push("size below market minimum".into()),
-                    Some(sh) => {
-                        let (depth, _) = b.ask_depth_up_to(a);
-                        if depth < sh {
-                            blockers.push(format!("only {depth} NO offered at {a} (need {sh})"));
-                        }
-                    }
+                // A best ask outside the band or short of the edge is named
+                // here or below; inside them the walk takes at least its level.
+                if let Some((limit, sh)) = sweep
+                    && (sh < outcome.min_order_size || sh.micros() == 0)
+                {
+                    let affordable = round_shares_to_lot(
+                        shares_for_notional(cfg.notional, limit, Rounding::Down),
+                        Shares::from_whole(1),
+                        Rounding::Down,
+                    );
+                    blockers.push(if affordable < outcome.min_order_size {
+                        "size below market minimum".to_owned()
+                    } else {
+                        format!(
+                            "only {sh} NO offered up to {limit} (market minimum {})",
+                            outcome.min_order_size
+                        )
+                    });
                 }
             }
         }
-        let ev = ask.map(|a| ev_per_share(cfg.p_new_high, a, &fees, cfg.slippage_allowance));
+        let ev = ask.map(ev_at);
         if let Some(e) = ev
             && e < cfg.min_edge
         {
@@ -308,7 +358,13 @@ impl Strategy for KnmiNowcast {
             market_p: None,
             maker_bid: None,
         });
-        if signal && let (Some(a), Some(sh), Some(b)) = (ask, shares, be) {
+        if signal && let (Some(a), Some((limit, sh))) = (ask, sweep) {
+            let b = break_even_probability(limit, &fees, cfg.slippage_allowance);
+            let price = if limit > a {
+                format!("from {a} up to {limit}")
+            } else {
+                format!("at {a}")
+            };
             out.proposals.push(Proposal {
                 strategy: self.id.clone(),
                 bucket_label: outcome.label.clone(),
@@ -319,17 +375,17 @@ impl Strategy for KnmiNowcast {
                 side: Side::Buy,
                 kind: IntentKind::Open,
                 weather_dependent: true,
-                limit_price: a,
+                limit_price: limit,
                 shares: sh,
                 tif: TimeInForce::Fak,
                 p_win: cfg.p_new_high,
-                ev_per_share: ev.unwrap_or(0.0),
+                ev_per_share: ev_at(limit),
                 break_even: b,
                 research_only: false,
                 rationale: vec![
                     format!("{reading}: the next METAR should report {}", high + 1),
                     format!(
-                        "NO {} at {a}: p {:.2} (assumed) vs break-even {b:.3}",
+                        "NO {} {price}: p {:.2} (assumed) vs break-even {b:.3}",
                         outcome.label, cfg.p_new_high
                     ),
                     "faster data: KNMI's ten-minute reading comes before the METAR".into(),

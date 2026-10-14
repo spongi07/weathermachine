@@ -21,20 +21,20 @@ const SEASONS: [Season; 4] = [
     Season::Autumn,
 ];
 
-/// Engine id of the unwind engine (always listed: its exits are orders too).
+/// Engine id of the unwind engine.
 pub const UNWIND_ID: &str = "U_unwind";
 
 /// The strategies the dashboard shows: those switched on, in the order the
-/// engine evaluates them, plus the unwind engine, then the strategy lab's
+/// engine evaluates them, the unwind engine last, then the strategy lab's
 /// paper strategies. A strategy switched off in the configuration is not
 /// shown: A–E were taken out of the live bot on 1 October 2026 after two
-/// days without a trade (E already earlier). Their code stays, because
-/// `research market` replays A, B and E as baselines, and switching one on
-/// again brings it back here.
+/// days without a trade (E already earlier), F and the unwind engine on
+/// 14 October 2026. Their code stays, because `research market` replays A,
+/// B, E and F, and switching one on again brings it back here.
 pub fn catalog(cfg: &AppConfig) -> Vec<StrategyDto> {
     every_strategy(cfg)
         .into_iter()
-        .filter(|s| s.enabled || s.id == UNWIND_ID)
+        .filter(|s| s.enabled)
         .collect()
 }
 
@@ -104,7 +104,10 @@ pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
             wm_strategy::tail_seller::ID,
             "Tail seller",
             st.tail_seller.enabled,
-            "Sells the far tails: rests a NO bid, one tick inside the spread, on every bucket two or more degrees above the day's high whose YES is offered cheaply — an offer of that longshot to the takers who buy it — when the model rates the bucket no higher than that price. Orders expire ten minutes before each report; a filled order is held to settlement.",
+            &format!(
+                "Sells the far tails: rests a NO bid, one tick inside the spread, on every bucket at least {} degrees above the day's high whose YES is offered cheaply — an offer of that longshot to the takers who buy it. Orders expire ten minutes before each report; a filled order is held to settlement.",
+                st.tail_seller.min_distance
+            ),
             &st.tail_seller,
         ),
         {
@@ -425,30 +428,39 @@ mod tests {
     fn the_strategies_switched_on_are_listed_with_their_settings() {
         let cfg = shipped();
         let c = catalog(&cfg);
+        let every = every_strategy(&cfg);
+        // F and the unwind engine are off since 14 October 2026: G and K run.
         let ids: Vec<&str> = c.iter().filter(|s| !s.lab).map(|s| s.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["F_peak_slot", "G_tail_seller", "K_knmi_nowcast", "U_unwind"]
-        );
+        assert_eq!(ids, ["G_tail_seller", "K_knmi_nowcast"]);
         let letters: String = c
             .iter()
             .filter(|s| !s.lab)
             .map(|s| s.letter.as_str())
             .collect();
-        assert_eq!(letters, "FGKU");
-        // The unwind engine names the strategies it leaves alone.
-        let u = c.iter().find(|s| s.id == UNWIND_ID).unwrap();
+        assert_eq!(letters, "GK");
+        // The unwind engine, off, still names the strategies it leaves alone.
+        let u = every.iter().find(|s| s.id == UNWIND_ID).unwrap();
+        assert!(!u.enabled);
         assert!(
             u.summary
                 .contains("hold to settlement (F, G, H, I, J, K) and the lab's"),
             "{}",
             u.summary
         );
+        // Switched on again, it is listed after K.
+        let mut with_u = cfg.clone();
+        with_u.file.strategies.unwind.enabled = true;
+        let listed: Vec<String> = catalog(&with_u)
+            .into_iter()
+            .filter(|s| !s.lab)
+            .map(|s| s.letter)
+            .collect();
+        assert_eq!(listed, ["G", "K", "U"]);
         // The lab's paper strategies follow, lowest number first, every one
-        // running its main rule; the families switched off on 8, 9 and 12
-        // October 2026 are not shown.
+        // running its main rule; the families switched off on 8, 9, 12 and
+        // 14 October 2026 are not shown.
         let off = [
-            1, 2, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23,
+            1, 2, 3, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23,
         ];
         let lab: Vec<&StrategyDto> = c.iter().filter(|s| s.lab).collect();
         assert_eq!(
@@ -467,7 +479,7 @@ mod tests {
                 .map(|n| format!("L{n}"))
                 .collect::<Vec<_>>()
         );
-        assert!(c.iter().skip(4).all(|s| s.lab), "after the unwind engine");
+        assert!(c.iter().skip(2).all(|s| s.lab), "after K");
         let setting = |s: &StrategyDto, k: &str| {
             s.settings
                 .iter()
@@ -480,12 +492,12 @@ mod tests {
         );
         let family = |letter: &str| *lab.iter().find(|s| s.letter == letter).unwrap();
         assert_eq!(setting(family("L4"), "notional").as_deref(), Some("20.00"));
+        // L3, off, keeps F's sizing on its page.
+        let l3 = every.iter().find(|s| s.lab && s.letter == "L3").unwrap();
+        assert!(!l3.enabled);
+        assert_eq!(setting(l3, "notional").as_deref(), Some("F's 100 shares"));
         assert_eq!(
-            setting(family("L3"), "notional").as_deref(),
-            Some("F's 100 shares")
-        );
-        assert_eq!(
-            setting(family("L3"), "book.position_size_usd").as_deref(),
+            setting(l3, "book.position_size_usd").as_deref(),
             Some("100.00")
         );
         assert!(lab.iter().all(|s| s.summary.contains("Paper only")));
@@ -534,6 +546,15 @@ mod tests {
         again.file.strategies.buy_yes.enabled = true;
         assert_eq!(catalog(&again)[0].id, "A_buy_yes_final_high");
         let g = c.iter().find(|s| s.letter == "G").unwrap();
+        // Its summary states the configured distance; the model's veto is
+        // off (a ratio of 1e6 never binds), so it names none.
+        assert!(
+            g.summary
+                .contains("at least 3 degrees above the day's high")
+                && !g.summary.contains("model"),
+            "{}",
+            g.summary
+        );
         let get_g = |k: &str| {
             g.settings
                 .iter()
@@ -542,8 +563,9 @@ mod tests {
         };
         assert_eq!(get_g("max_yes_price"), Some("0.08"));
         assert_eq!(get_g("notional"), Some("30.00"));
-        let f = c.iter().find(|s| s.id == PEAK_SLOT_ID).unwrap();
-        assert!(f.enabled);
+        assert!(!c.iter().any(|s| s.id == PEAK_SLOT_ID));
+        let f = every.iter().find(|s| s.id == PEAK_SLOT_ID).unwrap();
+        assert!(!f.enabled);
         let get = |k: &str| {
             f.settings
                 .iter()

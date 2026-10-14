@@ -78,6 +78,9 @@ book A–E and H–J, and I since 8 October.
   degraded twice for a few minutes (on 12 October from 16:02 to 16:07, in
   F's slot) while TGFTP delivered.
 
+On 14 October F, L3 and the unwind engine were switched off as well
+([live review of 14 October](live-review-2026-10-14.md)).
+
 ## 4. Next review
 
 After about 20 settled days from 2 October, `research market --from

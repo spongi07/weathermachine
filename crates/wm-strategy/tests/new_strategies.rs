@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Europe::Amsterdam;
 use std::collections::{HashMap, HashSet};
 use wm_core::ids::{ClientOrderId, LocationId, ProviderId, StationId, StrategyId, TokenId};
-use wm_core::market::{DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
+use wm_core::market::{BookLevel, DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
 use wm_core::portfolio::{InstrumentRef, PositionBook};
 use wm_core::synthetic::{synthetic_book, synthetic_temperature_market};
 use wm_core::trading::{Fill, IntentKind, Liquidity, RunMode, TimeInForce};
@@ -611,6 +611,81 @@ fn k_trades_a_reading_that_arrives_after_its_report_minute() {
     let out = w.run(&mut KnmiNowcast::new(KnmiNowcastConfig::default()), &v);
     assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
     assert_eq!(out.proposals[0].bucket_label, "18°C");
+}
+
+/// Right before a report the best NO ask is often thin: K walks the asks
+/// while each price stays in its band with the edge, and buys what the
+/// notional buys there — or everything offered up to where it stops.
+#[test]
+fn k_walks_a_thin_book_up_to_its_cap() {
+    let v = views(&rising(), K_NOW, None);
+    let run = |asks: &[(&str, i64)], cfg: KnmiNowcastConfig| {
+        let mut w = k_world(
+            "0.10",
+            "0.42",
+            Some(reading("2026-07-01T11:40:00Z", 189, 191)),
+        );
+        let m = w.m.clone();
+        w.books.get_mut(&no(&m, 18)).unwrap().asks = asks
+            .iter()
+            .map(|(price, n)| BookLevel {
+                price: p(price),
+                size: Shares::from_whole(*n),
+            })
+            .collect();
+        w.run(&mut KnmiNowcast::new(cfg), &v)
+    };
+    let order = |out: &StrategyOutput| {
+        assert_eq!(out.proposals.len(), 1, "{:?}", out.evaluations);
+        (out.proposals[0].limit_price, out.proposals[0].shares)
+    };
+    // 10 at 0.42 and 30 at 0.45 are not $25; up to 0.50 it buys 50 shares.
+    let out = run(
+        &[("0.42", 10), ("0.45", 30), ("0.50", 200)],
+        KnmiNowcastConfig::default(),
+    );
+    assert_eq!(order(&out), (p("0.50"), Shares::from_whole(50)));
+    let pr = &out.proposals[0];
+    assert!(
+        pr.rationale[1].contains("NO 18°C from 0.42 up to 0.50"),
+        "{:?}",
+        pr.rationale
+    );
+    assert!(pr.ev_per_share < 0.80 - 0.50, "the EV at the limit");
+    // 160 offered at 0.15 buy more than the notional's 125 at 0.20.
+    let out = run(
+        &[("0.15", 160), ("0.20", 100)],
+        KnmiNowcastConfig::default(),
+    );
+    assert_eq!(order(&out), (p("0.15"), Shares::from_whole(160)));
+    // The cap ends the walk: everything offered up to 0.75 …
+    let sure = KnmiNowcastConfig {
+        p_new_high: 0.94,
+        ..KnmiNowcastConfig::default()
+    };
+    let out = run(&[("0.70", 10), ("0.74", 20), ("0.78", 300)], sure);
+    assert_eq!(order(&out), (p("0.74"), Shares::from_whole(30)));
+    // … and so does the edge: at p 0.80 a share at 0.74 earns under 0.05.
+    let out = run(&[("0.70", 10), ("0.74", 20)], KnmiNowcastConfig::default());
+    assert_eq!(order(&out), (p("0.70"), Shares::from_whole(10)));
+    // Fewer than the market's minimum up to where it stops: no order.
+    let out = run(&[("0.42", 3), ("0.80", 300)], KnmiNowcastConfig::default());
+    assert!(out.proposals.is_empty());
+    assert_eq!(
+        blockers_of(&out, "18°C", OutcomeSide::No),
+        vec!["only 3 NO offered up to 0.42 (market minimum 5)"]
+    );
+    // A notional too small for the minimum says so, whatever is offered.
+    let tiny = KnmiNowcastConfig {
+        notional: Usd::from_whole(2),
+        ..KnmiNowcastConfig::default()
+    };
+    let out = run(&[("0.42", 300)], tiny);
+    assert!(out.proposals.is_empty());
+    assert_eq!(
+        blockers_of(&out, "18°C", OutcomeSide::No),
+        vec!["size below market minimum"]
+    );
 }
 
 #[test]

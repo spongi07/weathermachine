@@ -387,9 +387,12 @@ $7.00 over three ([live review](live-review-2026-10-09.md)); since 12
 October ten more: L10, L11 and L14, which lost live (−$8.88, −$22.13,
 −$23.88), and L2, L5, L6, L8, L13, L15 and L16, which made no trade in nine
 days and too few in the replay to show an edge
-([live review of 12 October](live-review-2026-10-12.md)). Seven run: L3,
-L4, L7, L18, L20, L24 and L25. Their replay code stays: `research market`
-replays all 25.
+([live review of 12 October](live-review-2026-10-12.md)); since 14 October
+L3, which enters as F does: F was switched off that day, and L3's escape
+did not fire on F's loss of 14 October
+([live review of 14 October](live-review-2026-10-14.md)). Six run: L4, L7,
+L18, L20, L24 and L25. Their replay code stays: `research market` replays
+all 25.
 
 **Own books.** Each lab strategy trades a paper book of its own: its
 positions (and the order that opened each), its live orders, its risk

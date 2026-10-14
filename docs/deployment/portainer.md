@@ -314,8 +314,8 @@ one judged.
 ### Strategy pages and logs to paste
 
 The dashboard's **Strategies** panel has a card per strategy that is
-switched on (F, G, K and the unwind exits since 8 October 2026; a
-strategy with `enabled = false` is not shown). Each card shows what the strategy is doing now, for example
+switched on (G and K since 14 October 2026, when F and the unwind exits
+were switched off; a strategy with `enabled = false` is not shown). Each card shows what the strategy is doing now, for example
 "autumn slot 13:25–15:26: before the slot: it starts in 2 h 13 min", or the
 blocker on the high's bucket. It also shows this run's proposals and orders,
 with two buttons:

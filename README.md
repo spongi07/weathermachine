@@ -38,30 +38,33 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   trained automatically on first start, retrained every 30 days in the
   background and swapped in without a restart) → strategies → risk engine
   → simulated venue. Switched on in the shipped configuration (2 October
-  2026, after the first replay of G–K at traded prices, revised on 8 October
-  after the first live week; each one a hypothesis that `research market`
-  judges out of sample):
-  * **F** peak slot: 100 shares of YES on the high's bucket inside the
-    season's peak slot (the 75th to 95th percentile of the local time at
-    which the station's history first reported its day's high), once that
-    bucket is offered above 0.90, at most 0.95, on books up to 0.10 wide,
-    and held to settlement as in its replay;
+  2026, after the first replay of G–K at traded prices, revised on 8 and
+  14 October after the paper weeks; each one a hypothesis that
+  `research market` judges out of sample):
   * **G** tail seller: resting NO bids (the YES offered at 1–8¢) on buckets
     three or more degrees above the high, withdrawn before each report (in
-    the replay 125 of 127 won; 53 of 53 out of sample);
+    the replay 125 of 127 won; 53 of 53 out of sample; on paper 15 of 15 to
+    14 October). Its live twin trades it with real money when switched on
+    ([live guide](docs/deployment/live.md));
   * **K** KNMI nowcast: the NO of the high's bucket when KNMI's ten-minute
-    mean is already above the next degree, before the METAR is published
-    (in the replay every K trade won, also out of sample).
+    mean is already above the next degree, before the METAR is published,
+    for what $25 buys on the asks up to 0.75 (in the replay every K trade
+    won, also out of sample).
 
   Switched off, code kept as research baselines (`enabled = true` brings one
   back): A (YES of the final-high bucket), B (NO above it), C (split and
   unwind), D (outcomes the observations have already decided), E (YES of
-  the high's bucket once the book confirms it), H (the cheap YES of high + 1),
-  I (the NO of buckets priced 0.30–0.70 that the model rates lower) and J
-  (morning quotes on both sides) — H and J lost in the replay, also out of
-  sample; I lost $20.49 live over nine trades and was switched off on
-  8 October 2026. A and B pool the model with the market's price: the book
-  can veto a trade, never create one.
+  the high's bucket once the book confirms it), F (100 shares of that YES
+  inside the season's peak slot), H (the cheap YES of high + 1), I (the NO
+  of buckets priced 0.30–0.70 that the model rates lower), J (morning quotes
+  on both sides) and the unwind engine's exits — H and J lost in the replay,
+  also out of sample; I lost $20.49 live over nine trades and was switched
+  off on 8 October 2026; F won 83 of its 89 replayed and paper trades
+  together, about its break-even, for −$19.97, and was switched off on
+  14 October 2026 with the unwind engine, which then had nothing left to
+  manage ([live review](docs/research/live-review-2026-10-14.md)). A and B
+  pool the model with the market's price: the book can veto a trade, never
+  create one.
 * **Tries more than it trades.** `research market` also replays a
   [strategy lab](docs/research/strategy-lab.md) of 25 new strategies
   (L1–L25) at traded prices: KNMI's ten-minute readings as a maker's shield
@@ -71,12 +74,14 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   before. Each has a variant or a control and is judged out of sample.
   Since 2 October 2026 they also run live as **paper strategies**, each
   on a paper book of its own — its own positions, limits and P&L — so none
-  of them ever blocks F–K or another lab strategy (`[strategies.lab]`:
-  `disabled`, `variants`); seven since 12 October (L3, L4, L7, L18, L20,
-  L24, L25): the seven families the replay refuted or the books never let
-  trade were switched off on 8 October, L1 on 9 October, and on 12 October
-  the three that lost live and the seven that made no trade in nine days
-  ([live review](docs/research/live-review-2026-10-12.md)). The dashboard's
+  of them ever blocks A–K or another lab strategy (`[strategies.lab]`:
+  `disabled`, `variants`); six since 14 October (L4, L7, L18, L20, L24,
+  L25): the seven families the replay refuted or the books never let trade
+  were switched off on 8 October, L1 on 9 October, on 12 October the three
+  that lost live and the seven that made no trade in nine days
+  ([live review](docs/research/live-review-2026-10-12.md)), and on
+  14 October L3, which enters as F does
+  ([live review](docs/research/live-review-2026-10-14.md)). The dashboard's
   lab panel, each family's page and `report paper` show their record apart
   from the main book's.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
