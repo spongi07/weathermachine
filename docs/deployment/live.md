@@ -74,6 +74,8 @@ LIVE panel lists them too):
 * **Collateral short of one bid:** less than `[live].notional` free beside
   what the resting bids hold. On 13 October, the first live day, $11.31 was
   left at the venue after two fills: one $9.30 bid fitted, a second did not.
+  A balance under one bid, resting bids aside, is said by an alert (claim
+  the winnings, or deposit), and so is its end.
 * **A pause after a refused order:** a live order the venue refuses (or the
   live venue's own checks do) pauses new bids for 5 minutes, doubling to an
   hour while the refusals go on, back to 5 once the venue takes an order.

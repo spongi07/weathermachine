@@ -46,6 +46,9 @@ pub(crate) struct LiveLink {
     /// One bid's cost at most: with less collateral free beside the resting
     /// bids, no new bid is proposed.
     min_free: Usd,
+    /// The venue's balance was under one bid when last said (`None`: not
+    /// read yet).
+    balance_short: Option<bool>,
     /// After a refused live order: no new one until then, and why.
     paused: Option<(DateTime<Utc>, String)>,
     /// How long the next refusal pauses.
@@ -108,6 +111,7 @@ pub(crate) fn start(
             pulled: false,
             held: None,
             min_free: l.notional,
+            balance_short: None,
             paused: None,
             next_pause: Duration::minutes(FIRST_PAUSE_MIN),
             last_gate: None,
@@ -167,6 +171,30 @@ impl LiveLink {
         if self.last_gate.as_ref() != Some(&gate) {
             session.engine_mut().set_live_gate(gate.0.clone(), gate.1);
             self.last_gate = Some(gate);
+        }
+    }
+
+    /// The venue's balance falling under one bid, or covering one again: said
+    /// once each way. A resting bid's reservation is not this: it holds the
+    /// next bid back only until it ends. (On 14 October 2026 G_live made no
+    /// 10:00 bid, and nothing said why: most likely a balance under one bid
+    /// before a deposit arrived.)
+    fn balance_note(&mut self) -> Option<(&'static str, String)> {
+        let balance = self.status.borrow().balance?;
+        let short = balance < self.min_free;
+        match (self.balance_short.replace(short), short) {
+            (Some(true), false) => Some((
+                "info",
+                format!("the venue's balance {balance} covers a live bid again"),
+            )),
+            (None | Some(false), true) => Some((
+                "warning",
+                format!(
+                    "the venue's balance {balance} is under one bid's {}: no live bid until there is more (claim the winnings on polymarket.com, or deposit)",
+                    self.min_free
+                ),
+            )),
+            _ => None,
         }
     }
 
@@ -269,6 +297,9 @@ impl LiveLink {
     ) {
         self.refresh(session, now);
         while let Ok((level, text)) = self.alerts.try_recv() {
+            alert(level, text);
+        }
+        if let Some((level, text)) = self.balance_note() {
             alert(level, text);
         }
         match session.engine().kill_switch() {
@@ -444,11 +475,45 @@ mod tests {
             pulled: false,
             held: None,
             min_free: Usd::from_whole(10),
+            balance_short: None,
             paused: None,
             next_pause: Duration::minutes(FIRST_PAUSE_MIN),
             last_gate: None,
         };
         (l, cmd_rx, status_tx)
+    }
+
+    /// A balance under one bid is said once, and its end once; a reading
+    /// that covers a bid from the start says nothing.
+    #[test]
+    fn a_balance_under_one_bid_is_said_once_each_way() {
+        let at = |usd: &str| LiveStatus {
+            ready: true,
+            location_ok: true,
+            balance: Some(Usd::parse(usd).unwrap()),
+            ..LiveStatus::default()
+        };
+        let (mut l, _cmds, status_tx) = link(LiveStatus::default());
+        assert_eq!(l.balance_note(), None, "not read yet");
+        status_tx.send_replace(at("11.31"));
+        assert_eq!(l.balance_note(), None, "covers a bid from the start");
+        status_tx.send_replace(at("1.25"));
+        let (level, text) = l.balance_note().unwrap();
+        assert_eq!(level, "warning");
+        assert!(
+            text.starts_with("the venue's balance $1.25 is under one bid's $10.00"),
+            "{text}"
+        );
+        assert_eq!(l.balance_note(), None, "said once");
+        status_tx.send_replace(at("101.25"));
+        assert_eq!(
+            l.balance_note(),
+            Some((
+                "info",
+                "the venue's balance $101.25 covers a live bid again".to_owned()
+            ))
+        );
+        assert_eq!(l.balance_note(), None);
     }
 
     /// Day one of live G (13 October 2026): $11.31 at the venue after two
