@@ -385,9 +385,9 @@ pub(crate) fn tail_order(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
 
 /// L45 (`variant`: by ≥ 0.04). NO cheaper than the others' YES: 07:00–22:00,
 /// a bucket's NO at its limit, with the fee and slippage, ≥ 0.02 under what
-/// the other buckets' best YES bids add up to — the NO pays when any other
-/// bucket wins, and those buyers pay more for exactly that → its NO
-/// (0.50–0.99), the rule's p being that sum.
+/// the best YES bids of the other buckets that can still win add up to —
+/// the NO pays when any of them wins, and those buyers pay more for exactly
+/// that → its NO (0.50–0.99), the rule's p being that sum.
 pub(crate) fn complement_gap(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
     let min_edge = if variant { 0.04 } else { 0.02 };
     if let Some(why) = day.outside(7 * 60, 22 * 60) {
@@ -409,16 +409,20 @@ pub(crate) fn complement_gap(day: &Day<'_, '_>, variant: bool, out: &mut Strateg
             continue;
         };
         let Some(a) = no.best_ask() else { continue };
+        // Only the buckets that can still win: a dead bucket's leftover
+        // bids are no chance of the NO paying.
         let mut sum = 0.0;
         let mut ok = true;
-        for o in all.iter().filter(|o| o.condition_id != k.condition_id) {
+        for o in all
+            .iter()
+            .filter(|o| o.condition_id != k.condition_id && day.alive(o))
+        {
             match day.yes_book(o) {
                 Some(b) => sum += b.best_bid().map_or(0.0, |l| l.price.as_f64()),
-                None if day.alive(o) => {
+                None => {
                     ok = false;
                     missing = Some(o.label.clone());
                 }
-                None => {}
             }
         }
         if !ok {
@@ -509,8 +513,9 @@ pub(crate) fn self_contradiction(day: &Day<'_, '_>, variant: bool, out: &mut Str
     );
 }
 
-/// L54 (`variant`: ≥ 1.12). Overround squeeze: 06:00–22:00, the buckets'
-/// YES prices adding up to ≥ 1.08 — more than a certain outcome is worth;
+/// L54 (`variant`: ≥ 1.12). Overround squeeze: 06:00–22:00, the YES prices
+/// of the buckets that can still win adding up to ≥ 1.08 — more than a
+/// certain outcome is worth;
 /// the bucket that carries most of the excess (≥ 0.03, priced 0.20–0.70)
 /// → its NO at 0.30–0.80.
 pub(crate) fn overround(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
@@ -519,13 +524,11 @@ pub(crate) fn overround(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutp
         day.idle(why, out);
         return;
     }
-    let prices: Vec<(&MarketOutcome, f64)> = day
-        .ordered()
-        .into_iter()
-        .filter_map(|o| day.yes_price(o).map(|p| (o, p)))
-        .collect();
+    // The buckets that can still win: a dead bucket's leftover quotes are
+    // no overround.
+    let prices = day.alive_prices();
     let alive = day.ordered().into_iter().filter(|o| day.alive(o)).count();
-    let alive_priced = prices.iter().filter(|(o, _)| day.alive(o)).count();
+    let alive_priced = prices.len();
     if alive_priced < alive {
         day.idle(
             format!("{alive_priced} of {alive} live buckets have a fresh book"),

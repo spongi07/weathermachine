@@ -82,7 +82,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (44, true) => "As L44 on buys of ≥ 50 shares.",
         (45, false) => {
-            "Defensive. 07:00–22:00: a bucket's NO at its limit, fee and slippage ≥ 0.02 under the sum of the other buckets' best YES bids (it pays when any of them wins) → that NO at 0.50–0.99."
+            "Defensive. 07:00–22:00: a bucket's NO at its limit, fee and slippage ≥ 0.02 under the sum of the best YES bids of the other buckets that can still win (it pays when any of them wins) → that NO at 0.50–0.99."
         }
         (45, true) => "As L45 with a gap of ≥ 0.04.",
         (46, false) => {
@@ -118,7 +118,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (53, true) => "As L53 with the projection ≥ 1.2 °C off.",
         (54, false) => {
-            "Balanced. 06:00–22:00: the buckets' YES prices adding up to ≥ 1.08 → NO of the bucket (0.20–0.70) carrying most of the excess (≥ 0.03) at 0.30–0.80."
+            "Balanced. 06:00–22:00: the YES prices of the buckets that can still win adding up to ≥ 1.08 → NO of the bucket (0.20–0.70) carrying most of the excess (≥ 0.03) at 0.30–0.80."
         }
         (54, true) => "As L54 from a sum of ≥ 1.12.",
         (55, false) => {

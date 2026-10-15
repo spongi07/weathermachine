@@ -959,8 +959,11 @@ fn l45_buys_a_no_cheaper_than_the_other_buckets_yes() {
     let out = w.run(45, false);
     assert_buy(proposal(&out), &w.no(20), "0.55");
     assert_eq!(proposal(&w.run(45, true)).token, w.no(20));
-    let narrow = gap_world("0.01");
+    let mut narrow = gap_world("0.01");
     assert_eq!(proposal(&narrow.run(45, false)).token, w.no(20));
+    assert_blocked(&narrow.run(45, true), "edge");
+    // A dead bucket's leftover bid is no chance of the NO paying.
+    narrow.yes_book(19, "0.05", "0.07");
     assert_blocked(&narrow.run(45, true), "edge");
 }
 
@@ -1008,7 +1011,11 @@ fn l54_sells_the_bucket_that_carries_the_overround() {
     let w = overround_world("0.39");
     assert_buy(proposal(&w.run(54, false)), &w.no(20), "0.60");
     assert_blocked(&w.run(54, true), "< 1.12");
-    assert_blocked(&overround_world("0.31").run(54, false), "< 1.08");
+    let mut fair = overround_world("0.31");
+    assert_blocked(&fair.run(54, false), "< 1.08");
+    // A dead bucket's quotes are no overround.
+    fair.yes_book(17, "0.09", "0.11");
+    assert_blocked(&fair.run(54, false), "< 1.08");
 }
 
 fn round_world(q: &str, a: &str) -> World {

@@ -577,7 +577,7 @@ rules out.**
 | L42 | saturated air | 10:00–16:00, humidity ≥ 93 % all hour, up ≤ 0.3 °C, ≥ 0.6 °C under the edge | NO next degree 0.60–0.95 (p 0.93) | ≥ 97 % |
 | L43 | onshore day | 12:00–17:00, ≥ 80 % of the wind since 09:00 from the sea, ≥ 8 kt, ≥ 0.6 °C under the edge | NO next degree 0.65–0.96 (p 0.94) | ≥ 95 % |
 | L44 | unknown longshot buyer | a wallet with no record buys ≥ 20 YES at 0.02–0.10 of a bucket ≥ 2 °C above the high | NO bid a tick under their price, 30 min | ≥ 50 shares |
-| L45 | complement gap | 07:00–22:00, a bucket's NO at its limit, fee and slippage ≥ 0.02 under the other buckets' YES bids added up | that NO 0.50–0.99 (p = the sum) | ≥ 0.04 |
+| L45 | complement gap | 07:00–22:00, a bucket's NO at its limit, fee and slippage ≥ 0.02 under the YES bids of the other buckets that can still win, added up | that NO 0.50–0.99 (p = the sum) | ≥ 0.04 |
 | L46 | evening discount | 21:00–23:50, KNMI ≥ 3 °C under the edge and not rising, the high's bucket offered 0.95–0.985 | its YES (p 0.997) | from 22:00, ≤ 0.98 |
 | L47 | evening lottery | 17:00–23:00, ≥ 5 small YES buys (≤ 20 shares at 0.02–0.15) in 30 min on the next two degrees, KNMI ≥ 1 °C under the edge | NO bid on that bucket | ≥ 8 buys |
 | L48 | self-contradiction | 07:00–11:30, the ladder's own mean ≥ 2 °C above the high while the high's bucket is ≥ 0.05 | its NO 0.80–0.95 (p 0.95) | ≥ 3 °C |
@@ -592,7 +592,7 @@ rules out.**
 | L51 | momentum divergence | 10:00–15:00, the ladder's mean down ≥ 0.6 °C in 30 min while KNMI rose ≥ 0.5 °C (or the reverse) | YES a degree above the mean (or NO of the mean's bucket) | 0.9 / 0.8 |
 | L52 | run-up fade | ≤ 12 min before a report, the next degree up ≥ 0.05 in 10 min while KNMI ahead of the METAR is ≥ 0.4 °C under the edge | its NO 0.40–0.92 | ≥ 0.08 |
 | L53 | projected curve | 10:00–13:00, a sine from the night's lowest METAR through KNMI to the median peak time ≥ 0.8 °C off the ladder's mean | YES of the projection's bucket 0.10–0.45 | ≥ 1.2 °C |
-| L54 | overround squeeze | 06:00–22:00, the ladder adds up to ≥ 1.08 | NO of the bucket carrying most of the excess 0.30–0.80 | ≥ 1.12 |
+| L54 | overround squeeze | 06:00–22:00, the buckets that can still win add up to ≥ 1.08 | NO of the bucket carrying most of the excess 0.30–0.80 | ≥ 1.12 |
 | L55 | edge hover | near the median peak, KNMI's last three means within 0.2 °C of the edge while one side is ≤ 0.35 and the other ≥ 0.55 | YES of the cheap side 0.10–0.35 | 0.1 °C |
 | L56 | stations disagree | 10:00–16:00, Schiphol and the KNMI neighbours ≥ 3 °C apart, the favourite ≥ 0.55 | its NO 0.25–0.45 | ≥ 4 °C |
 | L57 | laggard bucket | 10:00–18:00, the next degree up ≥ 0.06 in 4–7 min while the high's bucket has not fallen, KNMI near the edge | NO of the high's bucket 0.10–0.75 | ≥ 0.10 |
