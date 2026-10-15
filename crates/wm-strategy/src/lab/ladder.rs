@@ -6,7 +6,7 @@
 //! as it stands (or a minute-by-minute history of it) and holds its signal
 //! for a minute before it trades, so none races a faster trader.
 
-use super::day::{Buy, Day, Quote, implied, phi};
+use super::day::{Buy, Day, Quote, implied};
 use crate::quoting::{quote_expiry, tick_of};
 use crate::strategy::StrategyOutput;
 use chrono::{DateTime, Duration, Utc};
@@ -577,10 +577,62 @@ pub(crate) fn overround(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutp
     );
 }
 
+/// The share a curve through the ladder gives the bucket of `v` °C, read
+/// off its single-degree neighbours `(value, share)` within 2 °C (shares ≥
+/// 0.02, at least three, one on each side): a least-squares fit of ln(share)
+/// = a + b·x + c·x² at x = their distance from `v`, read at x = 0. A day's
+/// maximum is close to normal, whose log is a parabola: the fit is exact
+/// for one, and the bucket judged stays out of it. `None` without enough
+/// neighbours or without a hump (c ≥ 0).
+pub fn curve_share(shares: &[(i32, f64)], v: i32) -> Option<f64> {
+    let pts: Vec<(f64, f64)> = shares
+        .iter()
+        .filter(|(k, q)| *k != v && (k - v).abs() <= 2 && *q >= 0.02)
+        .map(|(k, q)| (f64::from(k - v), q.ln()))
+        .collect();
+    if pts.len() < 3 || !pts.iter().any(|(x, _)| *x < 0.0) || !pts.iter().any(|(x, _)| *x > 0.0) {
+        return None;
+    }
+    let mut s = [0.0_f64; 5];
+    let mut t = [0.0_f64; 3];
+    for (x, y) in &pts {
+        let pw = [1.0, *x, x * x, x * x * x, x * x * x * x];
+        for (sk, p) in s.iter_mut().zip(pw) {
+            *sk += p;
+        }
+        for (tk, p) in t.iter_mut().zip(pw) {
+            *tk += p * y;
+        }
+    }
+    let m = [[s[0], s[1], s[2]], [s[1], s[2], s[3]], [s[2], s[3], s[4]]];
+    let d = det3(&m);
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    // Cramer's rule for a (column 0) and c (column 2).
+    let solve = |i: usize| {
+        let mut n = m;
+        for (row, ti) in n.iter_mut().zip(t) {
+            row[i] = ti;
+        }
+        det3(&n) / d
+    };
+    (solve(2) < 0.0).then(|| solve(0).exp())
+}
+
+fn det3(m: &[[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
 /// L58 (`variant`: ≥ 0.12 over). Round-number premium: 07:00–20:00, a
-/// bucket of a multiple of 5 °C (that can still win, ≥ 0.15 of the ladder)
-/// priced ≥ 0.08 above the share a normal fitted to the other buckets
-/// gives it — people like round numbers → its NO at 0.40–0.85.
+/// bucket of a multiple of 5 °C that can still win, ≥ 0.15 of the ladder
+/// and not its peak (a neighbour priced higher: a curve through the others
+/// cannot judge a peak, and a confident forecast makes a peak taller than
+/// any curve), priced ≥ 0.08 above the share a curve through its
+/// neighbours gives it ([`curve_share`]) — people like round numbers → its
+/// NO at 0.40–0.85.
 pub(crate) fn round_number(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
     let min_residual = if variant { 0.12 } else { 0.08 };
     if let Some(why) = day.outside(7 * 60, 20 * 60) {
@@ -589,54 +641,67 @@ pub(crate) fn round_number(day: &Day<'_, '_>, variant: bool, out: &mut StrategyO
     }
     let prices = day.alive_prices();
     let total: f64 = prices.iter().map(|(_, p)| p).sum();
+    if total <= 0.0 {
+        day.idle("no fresh book on a bucket that can still win".into(), out);
+        return;
+    }
+    let shares: Vec<(i32, f64)> = prices
+        .iter()
+        .filter_map(|(o, p)| match (o.bucket.lower, o.bucket.upper) {
+            (Some(lo), Some(hi)) if lo == hi => Some((lo, p / total)),
+            _ => None,
+        })
+        .collect();
     let mut best: Option<(&MarketOutcome, f64, f64)> = None;
     let mut seen = Vec::new();
-    for (o, p) in &prices {
-        let (Some(lo), Some(hi)) = (o.bucket.lower, o.bucket.upper) else {
+    for &(v, q) in shares.iter().filter(|(v, _)| v.rem_euclid(5) == 0) {
+        let Some(o) = day.outcome_of(v) else {
             continue;
         };
-        if lo != hi || lo.rem_euclid(5) != 0 || total <= 0.0 {
+        if q < 0.15 {
+            seen.push(format!("{} {q:.2} of the ladder < 0.15", o.label));
             continue;
         }
-        let q = p / total;
-        let others: Vec<(&MarketOutcome, f64)> = prices
-            .iter()
-            .filter(|(x, _)| x.condition_id != o.condition_id)
-            .copied()
-            .collect();
-        if others.len() < 2 {
+        let peak = [-1, 1]
+            .into_iter()
+            .filter_map(|step| day.neighbour(o, step))
+            .filter(|n| day.alive(n))
+            .filter_map(|n| day.yes_price(n))
+            .all(|pn| pn <= q * total);
+        if peak {
+            seen.push(format!(
+                "{} {q:.2} is the ladder's peak (no curve can judge it)",
+                o.label
+            ));
             continue;
         }
-        let Some((mu, sd)) = implied(&others) else {
+        let Some(fair) = curve_share(&shares, v) else {
+            seen.push(format!(
+                "{} {q:.2}: too few buckets ≥ 0.02 within 2 °C on both sides for a curve",
+                o.label
+            ));
             continue;
         };
-        let sd = sd.max(0.6);
-        let v = f64::from(lo);
-        let fair = phi((v + 0.5 - mu) / sd) - phi((v - 0.5 - mu) / sd);
-        let residual = q - fair;
-        seen.push(format!("{} {q:.2} vs {fair:.2}", o.label));
-        if q >= 0.15 && best.is_none_or(|b| residual > b.2) {
-            best = Some((o, q, residual));
+        if best.is_none_or(|b| q - fair > b.1 - b.2) {
+            best = Some((o, q, fair));
         }
     }
-    let Some((o, q, residual)) = best else {
+    let Some((o, q, fair)) = best else {
         day.idle(
             if seen.is_empty() {
                 "no round-number bucket (a multiple of 5 °C) that can still win".into()
             } else {
-                format!(
-                    "round-number buckets under 0.15 of the ladder: {}",
-                    seen.join(", ")
-                )
+                seen.join("; ")
             },
             out,
         );
         return;
     };
+    let residual = q - fair;
     let mut blockers = Vec::new();
     if residual + 1e-9 < min_residual {
         blockers.push(format!(
-            "{} holds {q:.2} of the ladder, {residual:+.2} over the normal of the others < {min_residual:.2}",
+            "{} holds {q:.2} of the ladder, {residual:+.2} over the {fair:.2} a curve through its neighbours gives it < {min_residual:.2}",
             o.label
         ));
     }
@@ -647,7 +712,7 @@ pub(crate) fn round_number(day: &Day<'_, '_>, variant: bool, out: &mut StrategyO
             band: (0.40, 0.85),
             p_win: None,
             rationale: vec![format!(
-                "{} holds {q:.2} of the ladder, {residual:+.2} over what a normal fitted to the other buckets gives it",
+                "{} holds {q:.2} of the ladder, {residual:+.2} over the {fair:.2} a curve through its neighbours gives it (a shoulder, not the peak)",
                 o.label
             )],
         },
@@ -656,25 +721,63 @@ pub(crate) fn round_number(day: &Day<'_, '_>, variant: bool, out: &mut StrategyO
     );
 }
 
+/// L59's round trip: the YES it holds, since when, and the YES bid when it
+/// first saw the position (the stop's reference).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Entry {
+    pub token: TokenId,
+    pub since: DateTime<Utc>,
+    pub bid: Option<f64>,
+}
+
+/// L59 takes its profit once a sale at the bid nets this much a share over
+/// the average cost (the entry's fee and slippage included), after the
+/// sale's own fee.
+const SCALP_TAKE: f64 = 0.02;
+/// L59 stops once the bid lies this far under the bid at entry: the bids
+/// that made the imbalance gave way.
+const SCALP_GIVE: f64 = 0.02;
+/// L59's widest spread at entry: a round trip pays it, two fees and a tick
+/// of slippage.
+const SCALP_SPREAD: f64 = 0.02;
+
 /// L59 (`variant`: bids ≥ 5 × the ask). The order book's imbalance, one
-/// round trip a day: 09:00–18:00 away from reports (10 minutes before, 3
-/// after), the favourite (0.20–0.80) with a spread ≤ 0.03 and ≥ 3 × as many
-/// shares bid as offered (≥ 100 bid) → its YES; sold at the bid once it is
-/// 0.03 above the average cost, 0.05 under it, after 45 minutes, or 10
-/// minutes before a report. Returns when the position was first seen.
+/// round trip a day: 09:00–18:00 away from reports (10 minutes before one,
+/// until 3 after it came in), the favourite (0.20–0.80) with a spread ≤
+/// 0.02 and ≥ 3 × as many shares bid as offered (≥ 100 bid) → its YES.
+/// Sold at the bid once that nets ≥ 0.02 a share over the average cost
+/// after the fee, once the bid falls 0.02 under the bid at entry (the bids
+/// gave way), after 45 minutes, or 10 minutes before a report. Returns the
+/// round trip while it holds the position.
 pub(crate) fn imbalance_scalp(
     day: &Day<'_, '_>,
     variant: bool,
-    entered: Option<(TokenId, DateTime<Utc>)>,
+    entered: Option<Entry>,
     out: &mut StrategyOutput,
-) -> Option<(TokenId, DateTime<Utc>)> {
+) -> Option<Entry> {
     let now = day.now();
     let slug = &day.ctx.market.event_slug;
     if let Some(pos) = day.ctx.positions.for_event(slug).next() {
         let token = pos.instrument.token.clone();
-        let since = entered
-            .filter(|(t, _)| *t == token)
-            .map_or(now, |(_, at)| at);
+        let bid = day
+            .ctx
+            .books
+            .get(&token)
+            .and_then(|b| b.best_bid())
+            .map(|l| l.price.as_f64());
+        // First seen now (just filled, or after a restart): the bid now is
+        // the stop's reference and the clock starts.
+        let entry = match entered.filter(|e| e.token == token) {
+            Some(e) => Entry {
+                bid: e.bid.or(bid),
+                ..e
+            },
+            None => Entry {
+                token: token.clone(),
+                since: now,
+                bid,
+            },
+        };
         let Some(o) = day
             .ctx
             .market
@@ -682,46 +785,51 @@ pub(crate) fn imbalance_scalp(
             .iter()
             .find(|o| o.yes_token == token)
         else {
-            return Some((token, since));
+            return Some(entry);
         };
         let avg = pos.avg_cost();
-        let bid = day
-            .ctx
-            .books
-            .get(&token)
-            .and_then(|b| b.best_bid())
-            .map(|l| l.price.as_f64());
-        let held = now - since;
+        let held = now - entry.since;
         let report_soon = day.minutes_to_report().is_some_and(|m| m <= 10);
+        let fees = day.ctx.market.fees;
         let why = match bid {
-            Some(b) if b >= avg + 0.03 - 1e-9 => Some(format!(
-                "bid {b:.3} ≥ the average cost {avg:.3} + 0.03: take the profit"
-            )),
-            Some(b) if b <= avg - 0.05 + 1e-9 => Some(format!(
-                "bid {b:.3} ≤ the average cost {avg:.3} − 0.05: stop"
-            )),
-            _ if held >= Duration::minutes(45) => {
-                Some(format!("held {} min ≥ 45", held.num_minutes()))
+            Some(b) => {
+                let net = b - Price::from_f64(b).map_or(0.0, |p| fees.taker_fee_per_share(p));
+                match entry.bid {
+                    _ if net >= avg + SCALP_TAKE - 1e-9 => Some(format!(
+                        "the bid {b:.3} nets {net:.3} after the fee, ≥ the average cost {avg:.3} + {SCALP_TAKE:.2}: take the profit"
+                    )),
+                    Some(r) if b <= r - SCALP_GIVE + 1e-9 => Some(format!(
+                        "the bid {b:.3} is {SCALP_GIVE:.2} or more under {r:.3} at entry: the bids gave way"
+                    )),
+                    _ => None,
+                }
             }
-            _ if report_soon => Some("10 minutes or less before a report".to_owned()),
-            _ => None,
-        };
+            None => None,
+        }
+        .or_else(|| {
+            (held >= Duration::minutes(45))
+                .then(|| format!("held {} min ≥ 45", held.num_minutes()))
+        })
+        .or_else(|| report_soon.then(|| "10 minutes or less before a report".to_owned()));
         match why {
             Some(w) => day.sell_yes(o, pos.shares, vec![w], Vec::new(), out),
             None => day.note(
                 o,
                 OutcomeSide::Yes,
                 vec![format!(
-                    "holding {} YES {} since {} UTC (average {avg:.3}, bid {})",
+                    "holding {} YES {} since {} UTC (average {avg:.3}, bid {}, stop under {})",
                     pos.shares,
                     o.label,
-                    since.format("%H:%M"),
-                    bid.map_or_else(|| "—".to_owned(), |b| format!("{b:.3}"))
+                    entry.since.format("%H:%M"),
+                    bid.map_or_else(|| "—".to_owned(), |b| format!("{b:.3}")),
+                    entry
+                        .bid
+                        .map_or_else(|| "—".to_owned(), |r| format!("{:.3}", r - SCALP_GIVE))
                 )],
                 out,
             ),
         }
-        return Some((token, since));
+        return Some(entry);
     }
     if day.traded_today() {
         day.idle("one round trip a day: done".into(), out);
@@ -743,8 +851,8 @@ pub(crate) fn imbalance_scalp(
         Some((b, a)) => {
             let spread = a.price.as_f64() - b.price.as_f64();
             let (bs, asz) = (b.size.as_f64(), a.size.as_f64());
-            if spread > 0.03 + 1e-9 {
-                blockers.push(format!("spread {spread:.3} > 0.03"));
+            if spread > SCALP_SPREAD + 1e-9 {
+                blockers.push(format!("spread {spread:.3} > {SCALP_SPREAD:.2}"));
             }
             if bs < 100.0 || bs + 1e-9 < mult * asz {
                 blockers.push(format!(
@@ -773,7 +881,8 @@ pub(crate) fn imbalance_scalp(
 }
 
 /// L60 (`variant`: a gap ≥ 0.15). Fill the gap in a thin ask ladder:
-/// 08:00–20:00, not in the 10 minutes before a report, on the favourite or
+/// 08:00–20:00, not in the 10 minutes before a report nor until 3 minutes
+/// after it came in (a quote the news can pick off), on the favourite or
 /// a neighbour (YES 0.10–0.60) whose best ask holds ≤ 50 shares with the
 /// next ask ≥ 0.10 above it → offer YES halfway into the gap (a NO bid)
 /// until 10 minutes before the next report: whoever sweeps the thin ask
@@ -781,7 +890,7 @@ pub(crate) fn imbalance_scalp(
 pub(crate) fn gap_filler(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
     let min_gap = if variant { 0.15 } else { 0.10 };
     let mut blockers: Vec<String> = day.outside(8 * 60, 20 * 60).into_iter().collect();
-    blockers.extend(day.near_report(10, 0));
+    blockers.extend(day.near_report(10, 3));
     let Some((fav, _)) = day.favourite() else {
         day.idle("no fresh book to name a favourite".into(), out);
         return;
@@ -850,10 +959,12 @@ pub(crate) fn gap_filler(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
 }
 
 /// L64 (`variant`: ≥ 75 % gone). Sellers withdraw: 09:00–18:00 away from
-/// reports (6 minutes before, 3 after), the next degree's YES asks down ≥
-/// 60 % in shares against 4–7 minutes before (≥ 100 then) while its price
-/// moved ≤ +0.03 — the sellers know something the price does not show yet
-/// → its YES at 0.05–0.40.
+/// reports (6 minutes before one, until 3 after it came in), the next
+/// degree's YES asks down ≥ 60 % in shares against 4–7 minutes before (≥
+/// 100 then) while its price moved no more than 0.03 either way — the
+/// sellers know something the price does not show yet (a price that moved
+/// is the book repricing, not sellers stepping back) → its YES at
+/// 0.05–0.40.
 pub(crate) fn ask_vacuum(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
     let Some(j) = day.next_outcome() else {
         return;
@@ -891,8 +1002,10 @@ pub(crate) fn ask_vacuum(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
                     100.0 * drop,
                     100.0 * min_drop
                 ));
-            } else if moved > 0.03 + 1e-9 {
-                blockers.push(format!("the price already moved {moved:+.3} > 0.03"));
+            } else if moved.abs() > 0.03 + 1e-9 {
+                blockers.push(format!(
+                    "the price moved {moved:+.3} (more than 0.03 either way): a repricing, not sellers stepping back"
+                ));
             } else {
                 rationale.push(format!(
                     "{}'s offered shares {:.0} → {depth:.0} (−{:.0} %) with the price {moved:+.3}",

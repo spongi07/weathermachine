@@ -851,9 +851,9 @@ icao = "EHGG"                     # Groningen, north-east
 latitude = 53.120
 longitude = 6.579
 [[lab.upstream]]
-icao = "EHTW"                     # Twente, east
-latitude = 52.274
-longitude = 6.889
+icao = "EDDG"                     # Münster-Osnabrück, east (Twente has no METAR most hours)
+latitude = 52.135
+longitude = 7.685
 [[lab.upstream]]
 icao = "EDDL"                     # Düsseldorf, south-east
 latitude = 51.289

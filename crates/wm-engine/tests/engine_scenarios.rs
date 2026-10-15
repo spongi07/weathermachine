@@ -1555,3 +1555,45 @@ fn restored_sales_count_toward_today_only() {
     assert_eq!(snap.realized_pnl_total, minus_half);
     assert_eq!(snap.daily_new_exposure, Usd::from_whole(5));
 }
+
+#[test]
+fn a_neighbour_s_reading_evaluates_the_location_around_it() {
+    // The lab's KNMI neighbours (L24, L56) are read seconds after the
+    // station: the location looks again when one comes in, not at the next
+    // book.
+    let reading = |station: &str, at: &str| {
+        env(
+            at,
+            WeatherMachineEvent::NowcastUpdate(wm_core::event::NowcastEvent {
+                observation: wm_core::weather::TenMinuteObservation {
+                    station: StationId::new(station).unwrap(),
+                    provider: ProviderId::new("knmi").unwrap(),
+                    interval_end: utc("2026-07-01T10:20:00Z"),
+                    mean: Some(TempC::from_tenths(190)),
+                    max: Some(TempC::from_tenths(192)),
+                    radiation: None,
+                    received_at: utc(at),
+                },
+            }),
+        )
+    };
+    let mut cfg = config(RunMode::Paper);
+    cfg.locations[0].neighbours = vec![wm_engine::NeighbourStation {
+        station: StationId::new("06215").unwrap(),
+        name: "Voorschoten".into(),
+        bearing_deg: 231.0,
+    }];
+    let mut engine = Engine::new(cfg, Arc::new(NoEdgeModel));
+    let m = market(vec![ObservationFilter::AllRows]);
+    engine.handle(&env(
+        "2026-07-01T10:00:00Z",
+        WeatherMachineEvent::MarketSnapshot(MarketSnapshotEvent { market: m }),
+    ));
+    let before = engine.stats().evaluations_total;
+    engine.handle(&reading("06215", "2026-07-01T10:24:05Z"));
+    assert_eq!(engine.stats().evaluations_total, before + 1);
+    // The same reading again, or a station no location reads: nothing.
+    engine.handle(&reading("06215", "2026-07-01T10:24:06Z"));
+    engine.handle(&reading("06999", "2026-07-01T10:24:07Z"));
+    assert_eq!(engine.stats().evaluations_total, before + 1);
+}

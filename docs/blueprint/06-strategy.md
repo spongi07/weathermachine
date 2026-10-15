@@ -878,9 +878,20 @@ buys carry a limit `taker_tolerance` (0.01) above the ask they saw
 (`Day::limit_for`), the expected profit, break-even and size counted at
 that limit. L39 buys two legs of equal shares (`Day::taker_shares`), both
 or neither; L59 sells its YES at the bid (`Day::sell_yes`) on its own
-clock (`LabStrategy::entered`, reset by a restart). A family that already
-traded today's market opens nothing more that day (`one_a_day`), except
-the makers and L39 (`MANY_A_DAY`).
+round trip (`LabStrategy::entered`, a `ladder::Entry`: when it first saw
+the position and the bid then, its stop's reference; a restart starts
+both again), its profit counted as what a sale at the bid nets after the
+fee. A family that already traded today's market opens nothing more that
+day (`one_a_day`), except the makers and L39 (`MANY_A_DAY`). The rules
+that say the day warms further (L26, L29, L31, L32, L35, L61) buy the NO
+of the high's bucket (`RISE_BAND`, 0.10–0.70), which pays on any new high,
+not only the next degree. The quiet-book rules (L59, L60, L64) ask
+`Day::near_report`: ahead of a routine report, and after it from the
+moment it came in (`WxReport::known_at`), holding while it is still out
+(`REPORT_OUT`, ten minutes past its minute; `last_routine_report`). L58
+reads a round bucket's fair share off `curve_share`, a parabola in log
+share through its neighbours within 2 °C, and never judges the ladder's
+peak ([first day](../research/strategy-lab.md#85-the-first-day-15-october-2026-and-what-it-changed)).
 
 **INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
 readings of the last 48 hours, the neighbours' readings with their
@@ -891,7 +902,8 @@ KNMI's other parameters (`knmi_extra`), the upstream airports' METARs with
 bearing and distance (`upstream`) and today's price ladder (`ladder`, a
 `LadderSample` of the fresh YES books at most once a minute, three hours).
 The engine keeps them (`LabState`) from `NowcastUpdate` (station and
-neighbours), `WeatherObservation`, `ForecastUpdate`, `TakerTrades` (each
+neighbours; a neighbour's reading evaluates its location at once, as the
+station's does), `WeatherObservation`, `ForecastUpdate`, `TakerTrades` (each
 trade once, by id), `WalletScores`, `KnmiExtras` and `UpstreamReports`
 events (where they come from: [ingestion](04-ingestion.md),
 `runtime/lab.rs`) and samples the ladder itself. A–K never read them.
@@ -931,7 +943,12 @@ data age, prices) gate every book.
   scenario built for it, its variant differs, the condition that breaks it
   blocks it; the minute's hold and its 15-second gap; the limit a cent over
   the ask and the stake by profile; a bare day: only the book rules may
-  trade.
+  trade; the quiet-book window from the moment a report came in; L59's
+  stop from the bid at entry, its profit after the sale's fee; L58's curve
+  exact on a normal ladder and never on its peak; the rise rules on the
+  high's NO and its band.
+* `wm-engine/tests/engine_scenarios.rs`: a neighbour's KNMI reading
+  evaluates the location around it (`a_neighbour_s_reading_evaluates_the_location_around_it`).
 * `wm-app`: `[strategies.lab]` and `[lab]` validation
   (`lab_settings_are_validated`: unknown codes, stakes the books would
   refuse, L3's stake against F's shares, timings, neighbours), the shipped

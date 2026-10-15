@@ -525,7 +525,7 @@ inconsistencies, who trades and when, and how traders react — or fail to.
   market, as the replayed rules do; the makers (L38, L44, L47, L60), whose
   quotes expire before each report, and L39's pair may open again; L59
   makes its one round trip.
-* **Stakes by profile.** Aggressive families (cheap YES on a rise) stake
+* **Stakes by profile.** Aggressive families (a rise, the book's flow) stake
   $15, balanced ones $20, defensive ones (NO of what the weather or the
   market's own structure rules out) $25 — each on a paper book of its own
   with the lab's limits ($25 an order, $120 open, $100 of loss a day).
@@ -550,18 +550,18 @@ run (`variants = ["L26"]`).
 
 | | family | signal | trade | variant |
 |---|---|---|---|---|
-| L26 | warm air upstream | 08:00–14:00, METAR wind ≥ 8 kt; an airport within 35° of it, 60–300 km away, ≥ 2.5 °C warmer than Schiphol and at least the rounding edge, its air (1.5 × the surface wind) due before 16:00 | YES next degree 0.05–0.35 | ≥ 3.5 °C |
+| L26 | warm air upstream | 08:00–14:00, METAR wind ≥ 8 kt; an airport within 35° of it, 60–300 km away, ≥ 2.5 °C warmer than Schiphol and at least the rounding edge, its air (1.5 × the surface wind) due before 16:00 | NO of the high's bucket 0.10–0.70 (any new high) | ≥ 3.5 °C |
 | L27 | mixing surge | 09:00–13:00, KNMI dew point down ≥ 1.5 °C in an hour while the temperature rose ≥ 1 °C: thermals mix dry warm air down | YES above the favourite 0.04–0.30 | ≥ 2.5 °C |
 | L28 | ladder dip | 00:00–16:00, a live bucket ≥ 0.05 under both neighbours (each ≥ 0.12): a day's maximum has one peak | YES of the dip 0.03–0.30 | dip 0.08, sides 0.20 |
-| L29 | wind slack | 11:00–15:00, KNMI wind ≤ 3.5 m/s and ≤ 0.6 × an hour before, sunny in two of three readings | YES next degree 0.05–0.35 | ≤ 2.5 m/s, ≤ half |
+| L29 | wind slack | 11:00–15:00, KNMI wind ≤ 3.5 m/s and ≤ 0.6 × an hour before, sunny in two of three readings | NO of the high's bucket 0.10–0.70 | ≤ 2.5 m/s, ≤ half |
 | L30 | yesterday's anchor | 08:00–11:00, the favourite holds yesterday's high while the forecast lies ≥ 1.5 °C away | YES forecast's bucket 0.05–0.35 | ≥ 2.5 °C |
-| L31 | upwind clearing | 09:00–14:00, Schiphol under ≤ 2500 ft; an airport 60–200 km upwind clear twice, its air due within 3 h and by 16:00 | YES next degree 0.05–0.30 | within 2 h |
-| L32 | gust onset | 10:00–13:30, gusts ≥ 4 m/s over the mean wind in three readings after ≤ 2 an hour before | YES next degree 0.04–0.30 | ≥ 5 m/s |
+| L31 | upwind clearing | 09:00–14:00, Schiphol under ≤ 2500 ft; an airport 60–200 km upwind clear twice, its air due within 3 h and by 16:00 | NO of the high's bucket 0.10–0.70 | within 2 h |
+| L32 | gust onset | 10:00–13:30, gusts ≥ 4 m/s over the mean wind in three readings after ≤ 2 an hour before | NO of the high's bucket 0.10–0.70 | ≥ 5 m/s |
 | L33 | whale bid | 08:00–18:00, a best YES bid ≥ $250 and ≥ 4 × the largest of the 2–10 minutes before | YES ≤ the wall + 0.03 (0.05–0.45) | $500, 6 × |
 | L34 | stale ask | 10:00–17:00, the next degree's ask unchanged for 55 minutes while KNMI rose ≥ 1 °C | YES at ≤ 0.40 | ≥ 1.5 °C |
-| L35 | post-high drift | 3–15 minutes after a new high, the next degree up ≤ 0.05 since while KNMI still rises | YES next degree 0.05–0.35 | ≤ 0.02 |
-| L61 | SPECI pulse | 09:00–16:00, a special report (off the routine minutes) 3–20 minutes old opening the sky or ending the rain, the market not moved | YES next degree 0.05–0.35 | a worsening → NO next 0.55–0.92 |
-| L64 | sellers withdraw | 09:00–18:00 away from reports, the next degree's offered shares down ≥ 60 % in 4–7 minutes, the price not moved | YES next degree 0.05–0.40 | ≥ 75 % |
+| L35 | post-high drift | 3–15 minutes after a new high, a further new high (the high's NO) up ≤ 0.05 since while KNMI still rises | NO of the high's bucket 0.10–0.70 | ≤ 0.02 |
+| L61 | SPECI pulse | 09:00–16:00, a special report (off the routine minutes) 3–20 minutes old opening the sky or ending the rain, the market not moved | NO of the high's bucket 0.10–0.70 | a worsening → NO next 0.55–0.92 |
+| L64 | sellers withdraw | 09:00–18:00 away from reports (until 3 min after one came in), the next degree's offered shares down ≥ 60 % in 4–7 minutes, the price not moved either way (≤ 0.03) | YES next degree 0.05–0.40 | ≥ 75 % |
 
 **Defensive ($25): NO of what the weather or the market's own structure
 rules out.**
@@ -594,11 +594,11 @@ rules out.**
 | L53 | projected curve | 10:00–13:00, a sine from the night's lowest METAR through KNMI to the median peak time ≥ 0.8 °C off the ladder's mean | YES of the projection's bucket 0.10–0.45 | ≥ 1.2 °C |
 | L54 | overround squeeze | 06:00–22:00, the buckets that can still win add up to ≥ 1.08 | NO of the bucket carrying most of the excess 0.30–0.80 | ≥ 1.12 |
 | L55 | edge hover | near the median peak, KNMI's last three means within 0.2 °C of the edge while one side is ≤ 0.35 and the other ≥ 0.55 | YES of the cheap side 0.10–0.35 | 0.1 °C |
-| L56 | stations disagree | 10:00–16:00, Schiphol and the KNMI neighbours ≥ 3 °C apart, the favourite ≥ 0.55 | its NO 0.25–0.45 | ≥ 4 °C |
+| L56 | stations disagree | 10:00–16:00, Schiphol and the KNMI neighbours ≥ 3 °C apart (the newest ten minutes ≥ 3 stations read), the favourite ≥ 0.55 | its NO 0.25–0.45 | ≥ 4 °C |
 | L57 | laggard bucket | 10:00–18:00, the next degree up ≥ 0.06 in 4–7 min while the high's bucket has not fallen, KNMI near the edge | NO of the high's bucket 0.10–0.75 | ≥ 0.10 |
-| L58 | round-number premium | 07:00–20:00, a multiple-of-5 bucket ≥ 0.08 above what a normal fitted to the other buckets gives it | its NO 0.40–0.85 | ≥ 0.12 |
-| L59 | imbalance round trip | 09:00–18:00 away from reports, the favourite's spread ≤ 0.03 with ≥ 3 × the shares bid as offered | YES, sold at +0.03, −0.05, after 45 min or before a report; once a day | ≥ 5 × |
-| L60 | gap filler | 08:00–20:00, a thin best ask (≤ 50 shares) with the next ≥ 0.10 above, on the favourite or a neighbour | offer YES halfway into the gap (a NO bid) until 10 min before the report | ≥ 0.15 |
+| L58 | round-number premium | 07:00–20:00, a multiple-of-5 bucket, not the ladder's peak, ≥ 0.08 above what a curve through its neighbours within 2 °C gives it (a parabola in log share, exact for a normal day) | its NO 0.40–0.85 | ≥ 0.12 |
+| L59 | imbalance round trip | 09:00–18:00 away from reports, the favourite's spread ≤ 0.02 with ≥ 3 × the shares bid as offered | YES, sold at the bid once that nets 0.02 over the cost after the fee, once the bid lies 0.02 under the bid at entry, after 45 min or before a report; once a day | ≥ 5 × |
+| L60 | gap filler | 08:00–20:00 (not until 3 min after a report came in), a thin best ask (≤ 50 shares) with the next ≥ 0.10 above, on the favourite or a neighbour | offer YES halfway into the gap (a NO bid) until 10 min before the report | ≥ 0.15 |
 | L63 | hidden seller | 08:00–20:00, ≥ 3 buys at one price in 30 min taking ≥ 3 × the size the ask showed, the ask still there | its NO 0.20–0.80 | ≥ 5 × |
 | L65 | midnight high | 08:00–11:00, the high first reached before 02:00, KNMI ≥ 1 °C under it, the forecast's rest of the day ≤ the high + 0.4 °C | YES of the high's bucket 0.10–0.60 | forecast ≥ 0.5 °C under |
 
@@ -616,7 +616,56 @@ seen upstream before they arrive). The five extras: **L61** (special
 reports), **L62** (haze), **L63** (iceberg sellers), **L64** (withdrawn
 asks) and **L65** (the midnight high of a cold-air day).
 
-### 8.5 What would refute them
+### 8.5 The first day (15 October 2026) and what it changed
+
+The build with L26–L65 ran its first full day on 15 October (high 20 °C,
+first at 14:25 local). The new inputs all came in: KNMI accepted the seven
+parameter names, eleven of the twelve airports reported (Twente, EHTW, sent
+nothing all day: it publishes no METAR outside its few opening hours, and
+Münster-Osnabrück, EDDG, 200 km east, replaced it), the ladder sampled once
+a minute and yesterday's 48 METARs were there. Six new families traded:
+L44 (+$0.48), L59 (−$2.40), L64 (−$6.48), L35 (−$7.25), L58 (−$20.4); L60's
+two quotes expired. Four of the five losses were design faults, not luck:
+
+* **L59 stopped out 2 seconds after it bought.** Its stop lay 0.05 under
+  the average cost — but that cost carries the fee and the slippage
+  (0.5425 for a fill at 0.53), so with a spread of 0.03 the bid at entry
+  (0.49) was already under the stop. The stop is now measured from the bid
+  at entry (0.02 under it: the bids that made the imbalance gave way), the
+  profit from what a sale at the bid nets after its own fee (0.02 a share
+  over the cost), and the entry wants a spread ≤ 0.02.
+* **L58 sold the favourite at 07:01 (NO of 20 °C at 0.51), and 20 °C
+  became the high.** A normal fitted to the other buckets' moments is too
+  wide once the bucket judged is left out, so on a confident day it puts
+  any peak too low: on a perfectly normal ladder centred on 20.0 °C (sd
+  0.8) it gave 20 °C 0.33 against its true 0.47 — a "premium" of 0.14 out of
+  nothing, and still 0.09 (over the 0.08 it trades on) at sd 1.0. The share is now read off a parabola in log share through the
+  neighbours within 2 °C (exact to 0.003 on normal ladders), and the
+  ladder's peak is never judged: only a round shoulder can carry a premium
+  the curve can see.
+* **L35 and L64 bought YES of 19 °C with the high at 18 °C; the day went on
+  to 20 °C.** Both were right that the day would warm and lost on the
+  instrument: YES of the next degree pays only if the warming stops exactly
+  there, so the stronger the signal the likelier it overshoots. The rules
+  that say *the day warms further* (L26, L29, L31, L32, L35, L61) now buy
+  the NO of the high's bucket, which pays on any new high, at 0.10–0.70:
+  above that the market has priced the rise in (on the 15th it stood at
+  0.98 — no edge left to take), under it the market has ruled it out.
+  Rules about one bucket's quote (L34's stale ask, L55's coin flip on the
+  edge, L64's vacuum, L27's bucket above the favourite) keep their bucket.
+* **L64 bought 90 seconds after the 10:25 UTC report came in, on the
+  book's repricing.** The quiet-book window (L59, L60, L64) ran from the
+  minute a report was observed, so it closed just as the report reached the
+  market. It now runs from the moment the report came in (and holds while
+  it is still out, up to 10 minutes past its minute). L64 also wanted the
+  price unmoved only upwards; a price that fell 0.16 with the offers gone is
+  the book repricing, not sellers stepping back, and now blocks.
+* **L56 read one station at each KNMI checkpoint**: the neighbours come in
+  seconds after Schiphol. A neighbour's reading now makes the engine look
+  again at once, and L56 reads the newest ten minutes at least three
+  stations have.
+
+### 8.6 What would refute them
 
 Forty rules on the same days are forty chances to look good by luck, and
 none is replayed yet (`research market` replays L1–L25 only; the journal

@@ -28,6 +28,22 @@ pub fn next_routine_report(t: DateTime<Utc>, minutes: &[u8]) -> Option<DateTime<
         .min()
 }
 
+/// The last routine report at or before `t`. `None` without a schedule.
+pub fn last_routine_report(t: DateTime<Utc>, minutes: &[u8]) -> Option<DateTime<Utc>> {
+    let hour = t
+        .with_minute(0)
+        .and_then(|h| h.with_second(0))
+        .and_then(|h| h.with_nanosecond(0))?;
+    (-1..=0)
+        .flat_map(|h| {
+            minutes
+                .iter()
+                .map(move |m| hour + Duration::hours(h) + Duration::minutes(i64::from(*m)))
+        })
+        .filter(|x| *x <= t)
+        .max()
+}
+
 /// Expiry of an order resting from `now`: `cancel_before` ahead of the
 /// next routine report. `None` without a schedule, or when less than
 /// `min_rest` would remain before it.
@@ -107,6 +123,22 @@ mod tests {
             Some(utc("2026-07-02T00:25:00Z"))
         );
         assert_eq!(next_routine_report(utc("2026-07-01T10:00:00Z"), &[]), None);
+        assert_eq!(
+            last_routine_report(utc("2026-07-01T10:55:30Z"), &m),
+            Some(utc("2026-07-01T10:55:00Z")),
+            "the report half a minute ago, not the one before"
+        );
+        assert_eq!(
+            last_routine_report(utc("2026-07-01T10:55:00Z"), &m),
+            Some(utc("2026-07-01T10:55:00Z")),
+            "at or before"
+        );
+        assert_eq!(
+            last_routine_report(utc("2026-07-02T00:10:00Z"), &m),
+            Some(utc("2026-07-01T23:55:00Z")),
+            "across midnight"
+        );
+        assert_eq!(last_routine_report(utc("2026-07-01T10:00:00Z"), &[]), None);
         let ten = Duration::minutes(10);
         let three = Duration::minutes(3);
         // Posted at :28 → expires at :45.

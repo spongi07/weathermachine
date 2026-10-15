@@ -833,6 +833,20 @@ impl Engine {
                             }
                         });
                         self.evaluate_location(i, record, &mut out);
+                    } else {
+                        // A lab neighbour's reading (L24, L56): the locations
+                        // around it look again at once, not at the next book.
+                        let around: Vec<usize> = (0..self.cfg.locations.len())
+                            .filter(|&i| {
+                                self.cfg.locations[i]
+                                    .neighbours
+                                    .iter()
+                                    .any(|n| n.station == o.station)
+                            })
+                            .collect();
+                        for i in around {
+                            self.evaluate_location(i, Record::None, &mut out);
+                        }
                     }
                 }
             }

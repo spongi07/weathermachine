@@ -5,7 +5,7 @@
 use super::{LabConfig, LabInputs, LadderSample, UpstreamReadings, WxReport};
 use crate::ev::{break_even_probability, ev_per_share};
 use crate::peak::PeakFeatures;
-use crate::quoting::{next_routine_report, passive_bid, tick_of};
+use crate::quoting::{last_routine_report, next_routine_report, passive_bid, tick_of};
 use crate::strategy::{
     BucketEvaluation, Proposal, StrategyContext, StrategyOutput, common_high, holds_or_pending,
     max_data_age, size_for,
@@ -17,6 +17,17 @@ use wm_core::time::{local_day_bounds, local_minute_of_day};
 use wm_core::trading::{IntentKind, TimeInForce};
 use wm_core::units::{Price, Rounding, Shares, Usd, round_shares_to_lot, shares_for_notional};
 use wm_core::weather::{TenMinuteExtras, TenMinuteObservation};
+
+/// The band of a NO of the high's bucket for the rules that say the day
+/// warms further (L26, L29, L31, L32, L35, L61): that NO pays on any new
+/// high, the next degree or beyond, so an overshoot wins too. Above 0.70
+/// the market has priced the rise in; under 0.10 it has ruled it out.
+pub(crate) const RISE_BAND: (f64, f64) = (0.10, 0.70);
+
+/// How long past its minute a routine report not yet in holds a quiet-book
+/// rule back ([`Day::near_report`]): METARs land about 2½ minutes after it,
+/// rarely more than 6; one this late is taken as missing.
+const REPORT_OUT: Duration = Duration::minutes(10);
 
 /// `HH:MM` of a local minute of the day.
 pub(crate) fn hm(minute: u16) -> String {
@@ -41,23 +52,6 @@ pub(crate) fn mean(v: &[f64]) -> f64 {
         0.0
     } else {
         v.iter().sum::<f64>() / v.len() as f64
-    }
-}
-
-/// The standard normal distribution function (Abramowitz and Stegun
-/// 7.1.26, error < 1.5e-7).
-pub(crate) fn phi(x: f64) -> f64 {
-    let z = x.abs() / std::f64::consts::SQRT_2;
-    let t = 1.0 / (1.0 + 0.327_591_1 * z);
-    let poly = t
-        * (0.254_829_592
-            + t * (-0.284_496_736
-                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
-    let erf = 1.0 - poly * (-z * z).exp();
-    if x >= 0.0 {
-        0.5 * (1.0 + erf)
-    } else {
-        0.5 * (1.0 - erf)
     }
 }
 
@@ -534,11 +528,14 @@ impl<'c, 'a> Day<'c, 'a> {
     }
 
     /// Why now is too near a routine report for a rule that wants a quiet
-    /// book: `before` minutes ahead of one, or until `after` minutes past
-    /// the last one.
+    /// book: `before` minutes ahead of one; and, when `after` > 0, while the
+    /// last one is still out (up to [`REPORT_OUT`] past its minute) and for
+    /// `after` minutes from the moment it came in. A METAR moves the book
+    /// when it lands, minutes after the minute it was observed.
     pub fn near_report(&self, before: i64, after: i64) -> Option<String> {
         let now = self.now();
-        let next = next_routine_report(now, self.ctx.routine_minutes)?;
+        let minutes = self.ctx.routine_minutes;
+        let next = next_routine_report(now, minutes)?;
         if next - now <= Duration::minutes(before) {
             return Some(format!(
                 "{} min before the {} UTC report (quiet book wanted)",
@@ -546,15 +543,25 @@ impl<'c, 'a> Day<'c, 'a> {
                 next.format("%H:%M")
             ));
         }
-        let prev = next_routine_report(now - Duration::minutes(31), self.ctx.routine_minutes)
-            .filter(|t| *t <= now)?;
-        (now - prev < Duration::minutes(after)).then(|| {
-            format!(
-                "{} min after the {} UTC report (quiet book wanted)",
-                (now - prev).num_minutes(),
-                prev.format("%H:%M")
-            )
-        })
+        if after <= 0 {
+            return None;
+        }
+        let prev = last_routine_report(now, minutes)?;
+        match self.report_observed(prev).filter(|r| r.known_at <= now) {
+            Some(r) => (now - r.known_at < Duration::minutes(after)).then(|| {
+                format!(
+                    "{} min after the {} UTC report came in (quiet book wanted)",
+                    (now - r.known_at).num_minutes(),
+                    prev.format("%H:%M")
+                )
+            }),
+            None => (now - prev < REPORT_OUT).then(|| {
+                format!(
+                    "the {} UTC report not in yet (quiet book wanted)",
+                    prev.format("%H:%M")
+                )
+            }),
+        }
     }
 
     // -- Upstream airports --------------------------------------------------

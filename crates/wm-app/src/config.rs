@@ -255,14 +255,15 @@ impl Default for LabSection {
 }
 
 /// Airports 60–300 km around Schiphol, every direction but the open sea:
-/// De Kooy, Leeuwarden, Groningen, Twente, Düsseldorf, Volkel, Eindhoven,
-/// Antwerp, Brussels, Ostend, Southend and Norwich.
+/// De Kooy, Leeuwarden, Groningen, Münster-Osnabrück, Düsseldorf, Volkel,
+/// Eindhoven, Antwerp, Brussels, Ostend, Southend and Norwich. (Twente,
+/// nearer to the east, publishes no METAR outside its few opening hours.)
 pub fn default_upstream() -> Vec<UpstreamToml> {
     [
         ("EHKD", 52.924, 4.780),
         ("EHLW", 53.228, 5.761),
         ("EHGG", 53.120, 6.579),
-        ("EHTW", 52.274, 6.889),
+        ("EDDG", 52.135, 7.685),
         ("EDDL", 51.289, 6.767),
         ("EHVK", 51.657, 5.707),
         ("EHEH", 51.450, 5.374),

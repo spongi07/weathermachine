@@ -6,7 +6,7 @@
 
 use super::UpstreamReadings;
 use super::WxReport;
-use super::day::{Buy, Day, c};
+use super::day::{Buy, Day, RISE_BAND, c};
 use super::solar::angle_between;
 use crate::strategy::StrategyOutput;
 use chrono::{DateTime, Duration, Utc};
@@ -104,10 +104,10 @@ fn latest<'a>(day: &Day<'_, '_>, u: &UpstreamReadings<'a>) -> Result<&'a WxRepor
 /// L26 (`variant`: ≥ 3.5 °C warmer). Warm air upstream on its way:
 /// 08:00–14:00, the METAR wind ≥ 8 kt, an airport within 35° of it and
 /// 60–300 km away ≥ 2.5 °C warmer than Schiphol's latest METAR (and at
-/// least the high's rounding edge), its air due before 16:00 → YES of the
-/// next degree at 0.05–0.35.
+/// least the high's rounding edge), its air due before 16:00 → NO of the
+/// high's bucket (a new high, however far) at 0.10–0.70.
 pub(crate) fn warmth(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
-    let Some(j) = day.next_outcome() else {
+    let Some(h) = day.high_outcome() else {
         return;
     };
     let min_delta = if variant { 35 } else { 25 };
@@ -169,9 +169,9 @@ pub(crate) fn warmth(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput)
     }
     day.taker(
         Buy {
-            outcome: j,
-            side: OutcomeSide::Yes,
-            band: (0.05, 0.35),
+            outcome: h,
+            side: OutcomeSide::No,
+            band: RISE_BAND,
             p_win: None,
             rationale,
         },
@@ -184,9 +184,10 @@ pub(crate) fn warmth(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput)
 /// Schiphol under a ceiling ≤ 2500 ft within 2 °C of the high, an airport
 /// within 40° of the wind (≥ 6 kt) and 60–200 km away clear (no ceiling
 /// under 5000 ft) in its last two reports, its air due within 3 hours and
-/// before 16:00 → YES of the next degree at 0.05–0.30.
+/// before 16:00 → NO of the high's bucket (a new high, however far) at
+/// 0.10–0.70.
 pub(crate) fn clearing(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
-    let Some(j) = day.next_outcome() else {
+    let Some(h) = day.high_outcome() else {
         return;
     };
     let within = Duration::hours(if variant { 2 } else { 3 });
@@ -266,9 +267,9 @@ pub(crate) fn clearing(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutpu
     }
     day.taker(
         Buy {
-            outcome: j,
-            side: OutcomeSide::Yes,
-            band: (0.05, 0.30),
+            outcome: h,
+            side: OutcomeSide::No,
+            band: RISE_BAND,
             p_win: None,
             rationale,
         },

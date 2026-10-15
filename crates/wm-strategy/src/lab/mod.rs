@@ -67,6 +67,7 @@ use wm_core::weather::{Observation, TenMinuteExtras, TenMinuteObservation, Upstr
 
 pub use crate::forecast::ForecastDay;
 pub use day::taker_size;
+pub use ladder::curve_share;
 pub use wallets::{WalletBook, WalletScores, WalletStats};
 
 /// Number of families.
@@ -227,9 +228,10 @@ pub const KNMI_FAMILIES: [u8; 30] = [
 ];
 
 /// How hard a family of L26–L65 bets, which sets its stake
-/// ([`LabConfig::aggressive_notional`] …): cheap YES on a rise
-/// (aggressive), NO of what the weather or the market's own structure rules
-/// out (defensive), and both sides of the market's mistakes (balanced).
+/// ([`LabConfig::aggressive_notional`] …): a rise or the book's flow, at
+/// prices that pay several times the stake (aggressive), NO of what the
+/// weather or the market's own structure rules out (defensive), and both
+/// sides of the market's mistakes (balanced).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Profile {
@@ -650,8 +652,8 @@ pub struct LabStrategy {
     /// L26–L65: since when each token's signal has held, and when it was
     /// last seen ([`LabConfig::confirm_seconds`]).
     armed: HashMap<TokenId, (DateTime<Utc>, DateTime<Utc>)>,
-    /// L59: when its position was first seen (its round trip's clock).
-    entered: Option<(TokenId, DateTime<Utc>)>,
+    /// L59: its round trip while it holds the position (clock and stop).
+    entered: Option<ladder::Entry>,
 }
 
 impl LabStrategy {
@@ -788,12 +790,12 @@ fn one_a_day(out: &mut StrategyOutput) {
     }
 }
 
-/// L26–L65 (`entered`: L59's position clock).
+/// L26–L65 (`entered`: L59's round trip).
 fn evaluate_new(
     family: u8,
     day: &day::Day<'_, '_>,
     v: bool,
-    entered: &mut Option<(TokenId, DateTime<Utc>)>,
+    entered: &mut Option<ladder::Entry>,
     out: &mut StrategyOutput,
 ) {
     match family {

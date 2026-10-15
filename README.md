@@ -92,6 +92,10 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   None races: a signal trades only after it has held a minute, a taker
   buys at up to a cent over the ask it saw, and every paper order meets the
   book 350 ms after the decision and pays a tick of slippage (`[paper]`).
+  After their first day (15 October) L58, L59 and the quiet-book window
+  were fixed and the rules that expect a warmer day buy the NO of the
+  high's bucket, which pays on any new high
+  ([§8.5](docs/research/strategy-lab.md#85-the-first-day-15-october-2026-and-what-it-changed)).
   The dashboard's lab panel, each family's page and `report paper` show
   their record apart from the main book's.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo

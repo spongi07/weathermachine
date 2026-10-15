@@ -626,7 +626,7 @@ fn a_taker_counts_its_profit_at_the_limit_and_sizes_to_its_profile() {
 // ---------------------------------------------------------- upstream ---
 
 #[test]
-fn l26_buys_the_next_degree_when_warm_air_is_on_its_way() {
+fn l26_buys_a_new_high_when_warm_air_is_on_its_way() {
     let mut w = World::new("10:00");
     w.temps(&[("08:55", 180)]);
     w.metar(
@@ -641,13 +641,17 @@ fn l26_buys_the_next_degree_when_warm_air_is_on_its_way() {
         126.0,
         &[("09:50", 220, "EBAW 010950Z 19010KT CAVOK 22/12 Q1014")],
     );
-    w.yes_book(20, "0.14", "0.16");
+    // A new high, the next degree or beyond: the high's NO.
+    w.no_book(19, "0.58", "0.60");
     let out = w.run(26, false);
     let pr = proposal(&out);
-    assert_buy(pr, &w.yes(20), "0.16");
-    assert_eq!(pr.shares, Shares::from_whole(88), "$15 at 0.17");
+    assert_buy(pr, &w.no(19), "0.60");
+    assert_eq!(pr.shares, Shares::from_whole(24), "$15 at 0.61");
     assert!(pr.rationale[0].contains("EBAW"));
     assert_blocked(&w.run(26, true), "needs ≥ 3.5 °C warmer");
+    // A rise the market has priced in is no trade.
+    w.no_book(19, "0.80", "0.82");
+    assert_blocked(&w.run(26, false), "NO ask 0.82 outside [0.10, 0.70]");
     // A northerly wind has no warm airport upstream.
     let mut north = World::new("10:00");
     north.temps(&[("08:55", 180)]);
@@ -663,12 +667,12 @@ fn l26_buys_the_next_degree_when_warm_air_is_on_its_way() {
         126.0,
         &[("09:50", 220, "EBAW 010950Z 19010KT CAVOK 22/12 Q1014")],
     );
-    north.yes_book(20, "0.14", "0.16");
+    north.no_book(19, "0.58", "0.60");
     assert_blocked(&north.run(26, false), "no airport within 35°");
 }
 
 #[test]
-fn l31_buys_the_next_degree_when_the_clear_sky_upwind_arrives_in_time() {
+fn l31_buys_a_new_high_when_the_clear_sky_upwind_arrives_in_time() {
     let mut w = World::new("09:30");
     w.temps(&[("06:55", 150), ("08:55", 170)]);
     w.metar(
@@ -686,8 +690,8 @@ fn l31_buys_the_next_degree_when_the_clear_sky_upwind_arrives_in_time() {
             ("09:20", 190, "EBOS 010920Z 24012KT 9999 FEW040 19/12 Q1013"),
         ],
     );
-    w.yes_book(19, "0.12", "0.14");
-    assert_buy(proposal(&w.run(31, false)), &w.yes(19), "0.14");
+    w.no_book(18, "0.50", "0.52");
+    assert_buy(proposal(&w.run(31, false)), &w.no(18), "0.52");
     assert_blocked(&w.run(31, true), "within 2 h");
     let mut cloudy = World::new("09:30");
     cloudy.temps(&[("06:55", 150), ("08:55", 170)]);
@@ -706,7 +710,7 @@ fn l31_buys_the_next_degree_when_the_clear_sky_upwind_arrives_in_time() {
             ("09:20", 190, "EBOS 010920Z 24012KT 9999 FEW040 19/12 Q1013"),
         ],
     );
-    cloudy.yes_book(19, "0.12", "0.14");
+    cloudy.no_book(18, "0.50", "0.52");
     assert_blocked(&cloudy.run(31, false), "not clear in its last two reports");
 }
 
@@ -769,7 +773,7 @@ fn l27_buys_above_the_favourite_when_the_dew_point_drops_as_it_warms() {
 }
 
 #[test]
-fn l29_buys_the_next_degree_when_the_wind_drops_under_the_sun() {
+fn l29_buys_a_new_high_when_the_wind_drops_under_the_sun() {
     let mut w = World::new("11:00");
     warm_morning(&mut w);
     w.reading("10:50", 196);
@@ -777,24 +781,28 @@ fn l29_buys_the_next_degree_when_the_wind_drops_under_the_sun() {
     w.extra("10:30", &[("ss", 8.0)]);
     w.extra("10:40", &[("ss", 7.0)]);
     w.extra("10:50", &[("ff", 2.8), ("ss", 3.0)]);
-    w.yes_book(21, "0.18", "0.20");
-    assert_buy(proposal(&w.run(29, false)), &w.yes(21), "0.20");
+    w.no_book(20, "0.40", "0.42");
+    assert_buy(proposal(&w.run(29, false)), &w.no(20), "0.42");
     assert_blocked(&w.run(29, true), "needs ≤ 2.5");
     w.extra("10:40", &[("ss", 2.0)]);
     assert_blocked(&w.run(29, false), "sunshine ≥ 7 min in 1 of the last 3");
 }
 
 #[test]
-fn l32_buys_the_next_degree_when_gusts_begin() {
+fn l32_buys_a_new_high_when_gusts_begin() {
     let mut w = World::new("10:30");
     warm_morning(&mut w);
     w.extra("09:20", &[("ff", 4.0), ("fx", 5.5)]);
     w.extra("10:00", &[("ff", 4.0), ("fx", 8.5)]);
     w.extra("10:10", &[("ff", 4.2), ("fx", 8.6)]);
     w.extra("10:20", &[("ff", 4.1), ("fx", 8.4)]);
-    w.yes_book(21, "0.10", "0.12");
-    assert_buy(proposal(&w.run(32, false)), &w.yes(21), "0.12");
+    w.no_book(20, "0.30", "0.32");
+    assert_buy(proposal(&w.run(32, false)), &w.no(20), "0.32");
     assert_blocked(&w.run(32, true), "needs ≥ 5.0 m/s");
+    // Ruled out by the market: no lottery ticket.
+    w.no_book(20, "0.06", "0.08");
+    assert_blocked(&w.run(32, false), "NO ask 0.08 outside [0.10, 0.70]");
+    w.no_book(20, "0.30", "0.32");
     w.extra("09:20", &[("fx", 7.0)]);
     assert_blocked(&w.run(32, false), "already gusty an hour before");
 }
@@ -1018,29 +1026,75 @@ fn l54_sells_the_bucket_that_carries_the_overround() {
     assert_blocked(&fair.run(54, false), "< 1.08");
 }
 
+/// 20 °C a shoulder of the ladder (21 °C priced higher) at `q`–`a`.
 fn round_world(q: &str, a: &str) -> World {
     let mut w = World::new("10:00");
     mild_morning(&mut w);
     for (v, b, ask) in [
-        (18, "0.04", "0.06"),
-        (19, "0.24", "0.26"),
+        (18, "0.02", "0.04"),
+        (19, "0.05", "0.07"),
         (20, q, a),
-        (21, "0.19", "0.21"),
-        (22, "0.04", "0.06"),
+        (21, "0.44", "0.46"),
+        (22, "0.29", "0.31"),
+        (23, "0.09", "0.11"),
     ] {
         w.yes_book(v, b, ask);
     }
-    w.no_book(20, "0.54", "0.56");
+    w.no_book(20, "0.64", "0.66");
     w
 }
 
 #[test]
-fn l58_sells_a_round_number_priced_over_its_neighbours_curve() {
-    let w = round_world("0.44", "0.46");
+fn l58_sells_a_round_shoulder_priced_over_its_neighbours_curve() {
+    let w = round_world("0.34", "0.36");
     let out = w.run(58, false);
-    assert_buy(proposal(&out), &w.no(20), "0.56");
-    assert!(proposal(&out).rationale[0].contains("normal"));
-    assert_blocked(&round_world("0.34", "0.36").run(58, false), "< 0.08");
+    assert_buy(proposal(&out), &w.no(20), "0.66");
+    assert!(
+        proposal(&out).rationale[0].contains("+0.12 over the 0.15 a curve through its neighbours"),
+        "{:?}",
+        proposal(&out).rationale
+    );
+    assert_blocked(&w.run(58, true), "< 0.12");
+    assert_blocked(&round_world("0.24", "0.26").run(58, false), "< 0.08");
+    // The ladder's peak is never judged: a confident forecast makes a peak
+    // taller than any curve through its shoulders (15 October 2026: NO of
+    // the favourite 20 °C at 0.51, and 20 °C became the high).
+    let mut peak = World::new("10:00");
+    mild_morning(&mut peak);
+    for (v, b, ask) in [
+        (18, "0.01", "0.03"),
+        (19, "0.22", "0.24"),
+        (20, "0.58", "0.60"),
+        (21, "0.17", "0.19"),
+        (22, "0.01", "0.02"),
+    ] {
+        peak.yes_book(v, b, ask);
+    }
+    peak.no_book(20, "0.40", "0.42");
+    assert_blocked(&peak.run(58, false), "is the ladder's peak");
+}
+
+#[test]
+fn a_curve_through_the_neighbours_is_exact_on_a_normal_ladder() {
+    use wm_strategy::lab::curve_share;
+    // Shares of a normal maximum (mean 20.3 °C, sd 1.0) by whole degree.
+    let normal = [
+        (17, 0.0027),
+        (18, 0.0334),
+        (19, 0.1759),
+        (20, 0.3674),
+        (21, 0.3057),
+        (22, 0.1012),
+        (23, 0.0132),
+    ];
+    for (v, share) in [(19, 0.1759), (20, 0.3674), (21, 0.3057)] {
+        let fair = curve_share(&normal, v).unwrap();
+        assert!((fair - share).abs() < 0.003, "{v}: {fair} vs {share}");
+    }
+    // Neighbours on one side only, too few, or no hump: no curve.
+    assert!(curve_share(&normal[4..], 20).is_none());
+    assert!(curve_share(&normal, 22).is_none(), "23 °C under 0.02");
+    assert!(curve_share(&[(19, 0.4), (20, 0.1), (22, 0.1), (23, 0.4)], 21).is_none());
 }
 
 fn scalp_world(bid_size: i64) -> World {
@@ -1051,6 +1105,33 @@ fn scalp_world(bid_size: i64) -> World {
     w
 }
 
+/// 37 YES of 20 °C bought at 0.53 with the taker fee (as on 15 October
+/// 2026: an average cost of 0.5425).
+fn bought_scalp(w: &mut World) {
+    let o = w.m.outcome_for_value(20).unwrap().clone();
+    w.positions
+        .apply_fill(
+            &Fill {
+                client_order_id: ClientOrderId::new("l59-1").unwrap(),
+                token: o.yes_token.clone(),
+                side: Side::Buy,
+                price: p("0.53"),
+                shares: Shares::from_whole(37),
+                fee: Usd::from_micros(460_835),
+                liquidity: Liquidity::Taker,
+                ts: w.now,
+            },
+            &InstrumentRef {
+                token: o.yes_token.clone(),
+                condition_id: o.condition_id.clone(),
+                event_slug: w.m.event_slug.clone(),
+                outcome_side: OutcomeSide::Yes,
+                bucket: o.bucket,
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 fn l59_makes_one_round_trip_on_an_imbalanced_book() {
     let w = scalp_world(400);
@@ -1059,43 +1140,64 @@ fn l59_makes_one_round_trip_on_an_imbalanced_book() {
     assert_buy(pr, &w.yes(20), "0.52");
     assert_eq!(pr.shares, Shares::from_whole(37), "$20 (balanced) at 0.53");
     assert_blocked(&w.run(59, true), "needs ≥ 100 and ≥ 5 ×");
-    // Held: sold at the bid once it pays 0.03 over the average cost.
+    // A spread of 0.03 costs a round trip too much.
+    let mut wide = scalp_world(400);
+    wide.levels(wide.yes(20), &[("0.49", 400)], &[("0.52", 100)]);
+    assert_blocked(&wide.run(59, false), "spread 0.030 > 0.02");
+
+    // Held at 0.5425 a share, the bid 0.49: no stop at once (15 October:
+    // the stop sat 0.05 under a cost the fee and slippage had raised, at
+    // the bid itself). The bid at entry is the stop's reference.
     let mut held = scalp_world(400);
-    let o = held.m.outcome_for_value(20).unwrap().clone();
-    held.positions
-        .apply_fill(
-            &Fill {
-                client_order_id: ClientOrderId::new("l59-1").unwrap(),
-                token: o.yes_token.clone(),
-                side: Side::Buy,
-                price: p("0.50"),
-                shares: Shares::from_whole(37),
-                fee: Usd::ZERO,
-                liquidity: Liquidity::Taker,
-                ts: z("10:00"),
-            },
-            &InstrumentRef {
-                token: o.yes_token.clone(),
-                condition_id: o.condition_id.clone(),
-                event_slug: held.m.event_slug.clone(),
-                outcome_side: OutcomeSide::Yes,
-                bucket: o.bucket,
-            },
-        )
-        .unwrap();
+    bought_scalp(&mut held);
+    held.levels(held.yes(20), &[("0.49", 400)], &[("0.52", 100)]);
     let mut s = LabStrategy::new(59, &World::cfg(59, false), &PeakSlotConfig::default());
+    assert_blocked(
+        &held.run_with(&mut s),
+        "holding 37 YES 20°C since 10:10 UTC (average 0.542, bid 0.490, stop under 0.470)",
+    );
+    // One tick lower is no stop yet …
+    held.levels(held.yes(20), &[("0.48", 400)], &[("0.50", 100)]);
     assert_blocked(&held.run_with(&mut s), "holding 37 YES");
-    held.levels(held.yes(20), &[("0.53", 400)], &[("0.55", 100)]);
+    // … two are: the bids gave way.
+    held.levels(held.yes(20), &[("0.47", 400)], &[("0.49", 100)]);
     let out = held.run_with(&mut s);
     let pr = proposal(&out);
     assert_eq!((pr.side, pr.kind), (Side::Sell, IntentKind::Reduce));
-    assert_eq!(pr.limit_price, p("0.53"));
+    assert_eq!(pr.limit_price, p("0.47"));
+    assert!(
+        pr.rationale[0].contains("the bids gave way"),
+        "{:?}",
+        pr.rationale
+    );
+
+    // Its profit is taken once a sale at the bid nets 0.02 over the cost
+    // after the fee: 0.57 does not (0.558), 0.58 does (0.568).
+    let mut up = scalp_world(400);
+    bought_scalp(&mut up);
+    up.levels(up.yes(20), &[("0.50", 400)], &[("0.52", 100)]);
+    let mut s = LabStrategy::new(59, &World::cfg(59, false), &PeakSlotConfig::default());
+    assert_blocked(&up.run_with(&mut s), "holding 37 YES");
+    up.levels(up.yes(20), &[("0.57", 400)], &[("0.59", 100)]);
+    assert_blocked(&up.run_with(&mut s), "holding 37 YES");
+    up.levels(up.yes(20), &[("0.58", 400)], &[("0.60", 100)]);
+    let out = up.run_with(&mut s);
+    let pr = proposal(&out);
+    assert_eq!((pr.side, pr.limit_price), (Side::Sell, p("0.58")));
+    assert!(
+        pr.rationale[0].contains("take the profit"),
+        "{:?}",
+        pr.rationale
+    );
+
     // After 45 minutes it sells whatever the bid.
-    held.levels(held.yes(20), &[("0.51", 400)], &[("0.53", 100)]);
-    held.now += Duration::minutes(46);
-    held.levels(held.yes(20), &[("0.51", 400)], &[("0.53", 100)]);
-    let out = held.run_with(&mut s);
-    assert!(proposal(&out).rationale[0].contains("≥ 45"));
+    let mut late = scalp_world(400);
+    bought_scalp(&mut late);
+    let mut s = LabStrategy::new(59, &World::cfg(59, false), &PeakSlotConfig::default());
+    assert_blocked(&late.run_with(&mut s), "holding 37 YES");
+    late.now += Duration::minutes(46);
+    late.levels(late.yes(20), &[("0.51", 400)], &[("0.53", 100)]);
+    assert!(proposal(&late.run_with(&mut s)).rationale[0].contains("≥ 45"));
 }
 
 fn gapfill_world(second: &str) -> World {
@@ -1138,6 +1240,46 @@ fn l64_follows_sellers_who_withdraw() {
     assert_buy(proposal(&w.run(64, false)), &w.yes(19), "0.21");
     assert_blocked(&w.run(64, true), "< 75 %");
     assert_blocked(&vacuum_world(300).run(64, false), "down 40 %");
+    // Offers gone and the price down 0.07: the book repricing, not sellers
+    // stepping back ahead of a rise.
+    let mut fell = vacuum_world(150);
+    fell.levels(fell.yes(19), &[("0.12", 200)], &[("0.14", 150)]);
+    assert_blocked(
+        &fell.run(64, false),
+        "a repricing, not sellers stepping back",
+    );
+}
+
+#[test]
+fn a_quiet_book_rule_waits_for_the_report_to_come_in_and_settle() {
+    // L64 at `hm` UTC; the 10:25 UTC report (when `report`) comes in at
+    // 10:28.
+    let at = |hm: &str, report: bool| {
+        let mut w = World::new(hm);
+        mild_morning(&mut w);
+        if report {
+            w.metar("10:25", 180, None, "");
+        }
+        w.sample_at(z(hm) - Duration::minutes(5), &[(19, 0.19, 0.21, 500.0)]);
+        w.levels(w.yes(19), &[("0.19", 200)], &[("0.21", 150)]);
+        w
+    };
+    assert_blocked(
+        &at("10:27", true).run(64, false),
+        "the 10:25 UTC report not in yet (quiet book wanted)",
+    );
+    // 15 October 2026: L64 bought 90 s after the report came in, on the
+    // book's repricing; the window ran from the minute it was observed.
+    assert_blocked(
+        &at("10:30", true).run(64, false),
+        "2 min after the 10:25 UTC report came in (quiet book wanted)",
+    );
+    let w = at("10:31", true);
+    assert_buy(proposal(&w.run(64, false)), &w.yes(19), "0.21");
+    // A report that does not come holds it back ten minutes at most.
+    assert_blocked(&at("10:34", false).run(64, false), "report not in yet");
+    let w = at("10:35", false);
+    assert_buy(proposal(&w.run(64, false)), &w.yes(19), "0.21");
 }
 
 // -------------------------------------------------------------- tape ---
@@ -1223,22 +1365,32 @@ fn l63_sells_a_bucket_whose_ask_keeps_refilling() {
 
 // ---------------------------------------------------------- reaction ---
 
+/// The 09:55 UTC report raises the high to 20 °C (known 09:58), when 20 °C
+/// stood at 0.56; its YES now `now_bid`–`now_ask`.
 fn drift_world(now_bid: &str, now_ask: &str) -> World {
     let mut w = World::new("10:05");
     w.temps(&[("08:55", 180), ("09:25", 190), ("09:55", 200)]);
-    w.sample("09:58", &[(21, 0.11, 0.13, 200.0)]);
-    w.yes_book(21, now_bid, now_ask);
+    w.sample("09:58", &[(20, 0.55, 0.57, 200.0)]);
+    w.yes_book(20, now_bid, now_ask);
+    w.no_book(20, "0.46", "0.48");
     w.reading("09:30", 196);
     w.reading("10:00", 201);
     w
 }
 
 #[test]
-fn l35_buys_the_next_degree_the_market_did_not_move_after_a_new_high() {
-    let w = drift_world("0.15", "0.17");
-    assert_buy(proposal(&w.run(35, false)), &w.yes(21), "0.17");
+fn l35_buys_a_further_new_high_the_market_did_not_price_after_a_report() {
+    // A further new high (NO of 20 °C) up 0.04 since the report.
+    let w = drift_world("0.51", "0.53");
+    let out = w.run(35, false);
+    assert_buy(proposal(&out), &w.no(20), "0.48");
+    assert!(proposal(&out).rationale[0].contains("NO 20°C moved only +0.040"));
     assert_blocked(&w.run(35, true), "> 0.02: priced in");
-    let mut early = drift_world("0.15", "0.17");
+    assert_blocked(
+        &drift_world("0.45", "0.47").run(35, false),
+        "> 0.05: priced in",
+    );
+    let mut early = drift_world("0.51", "0.53");
     early.now = z("10:00");
     assert_blocked(&early.run(35, false), "3–15 wanted");
 }
@@ -1369,6 +1521,15 @@ fn l56_sells_the_favourite_when_the_stations_disagree() {
     w.no_book(20, "0.37", "0.39");
     assert_buy(proposal(&w.run(56, false)), &w.no(20), "0.39");
     assert_blocked(&w.run(56, true), "apart < 4.0 °C");
+    // Schiphol's next reading comes in seconds before the neighbours': the
+    // newest ten minutes three stations read decides.
+    w.reading("12:00", 191);
+    let out = w.run(56, false);
+    assert!(
+        proposal(&out).rationale[0].contains("at 11:50 UTC"),
+        "{:?}",
+        proposal(&out).rationale
+    );
 }
 
 fn laggard_world(next_bid: &str, next_ask: &str) -> World {
@@ -1405,17 +1566,25 @@ fn speci_world(speci: &str) -> World {
         "EHAM 010955Z 24008KT 9999 BKN010 18/15 Q1015",
     );
     w.metar("10:02", 180, Some(140), speci);
-    w.sample("10:05", &[(19, 0.19, 0.21, 200.0)]);
+    w.sample("10:05", &[(18, 0.49, 0.51, 200.0), (19, 0.19, 0.21, 200.0)]);
+    w.yes_book(18, "0.48", "0.50");
+    w.no_book(18, "0.50", "0.52");
     w.yes_book(19, "0.22", "0.24");
     w.no_book(19, "0.76", "0.78");
     w
 }
 
 #[test]
-fn l61_buys_the_next_degree_when_a_speci_opens_the_sky() {
+fn l61_buys_a_new_high_when_a_speci_opens_the_sky() {
     let w = speci_world("EHAM 011002Z 24009KT 9999 SCT035 18/14 Q1015");
-    assert_buy(proposal(&w.run(61, false)), &w.yes(19), "0.24");
+    assert_buy(proposal(&w.run(61, false)), &w.no(18), "0.52");
     assert_blocked(&w.run(61, true), "shows no worsening");
+    let mut priced = speci_world("EHAM 011002Z 24009KT 9999 SCT035 18/14 Q1015");
+    priced.yes_book(18, "0.40", "0.42");
+    assert_blocked(
+        &priced.run(61, false),
+        "NO 18°C up +0.090 since the SPECI: priced in",
+    );
     let wet = speci_world("EHAM 011002Z 24009KT 6000 -RA BKN008 18/15 Q1015");
     assert_buy(proposal(&wet.run(61, true)), &w.no(19), "0.78");
     assert_blocked(&wet.run(61, false), "shows no improvement");

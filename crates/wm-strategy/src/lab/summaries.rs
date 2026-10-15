@@ -6,7 +6,7 @@
 pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
     match (family, variant) {
         (26, false) => {
-            "Aggressive. 08:00–14:00: an airport 60–300 km upwind (within 35° of the METAR wind, ≥ 8 kt) ≥ 2.5 °C warmer than Schiphol and at least the high's rounding edge, its air due before 16:00 → YES of the next degree at 0.05–0.35."
+            "Aggressive. 08:00–14:00: an airport 60–300 km upwind (within 35° of the METAR wind, ≥ 8 kt) ≥ 2.5 °C warmer than Schiphol and at least the high's rounding edge, its air due before 16:00 → NO of the high's bucket at 0.10–0.70: it pays on any new high, the next degree or beyond."
         }
         (26, true) => "As L26 with the airport ≥ 3.5 °C warmer.",
         (27, false) => {
@@ -18,7 +18,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (28, true) => "As L28 with a dip ≥ 0.08 between neighbours ≥ 0.20.",
         (29, false) => {
-            "Aggressive. 11:00–15:00: KNMI's wind ≤ 3.5 m/s and ≤ 0.6 × an hour before (≥ 4 m/s then), sunny in two of the last three readings, KNMI no more than 1.2 °C under the edge → YES of the next degree at 0.05–0.35."
+            "Aggressive. 11:00–15:00: KNMI's wind ≤ 3.5 m/s and ≤ 0.6 × an hour before (≥ 4 m/s then), sunny in two of the last three readings, KNMI no more than 1.2 °C under the edge → NO of the high's bucket (any new high) at 0.10–0.70."
         }
         (29, true) => "As L29 with the wind ≤ 2.5 m/s at ≤ half its earlier speed.",
         (30, false) => {
@@ -26,11 +26,11 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (30, true) => "As L30 with the forecast ≥ 2.5 °C from yesterday's high.",
         (31, false) => {
-            "Aggressive. 09:00–14:00: Schiphol under a ceiling ≤ 2500 ft within 2 °C of the high, an airport 60–200 km upwind clear in its last two reports, its air due within 3 hours and before 16:00 → YES of the next degree at 0.05–0.30."
+            "Aggressive. 09:00–14:00: Schiphol under a ceiling ≤ 2500 ft within 2 °C of the high, an airport 60–200 km upwind clear in its last two reports, its air due within 3 hours and before 16:00 → NO of the high's bucket (any new high) at 0.10–0.70."
         }
         (31, true) => "As L31 with the clear air due within 2 hours.",
         (32, false) => {
-            "Aggressive. 10:00–13:30: KNMI's gusts ≥ 4 m/s above its mean wind (≥ 3 m/s) in the last three readings after ≤ 2 m/s an hour before (thermals reaching the wind above) → YES of the next degree at 0.04–0.30."
+            "Aggressive. 10:00–13:30: KNMI's gusts ≥ 4 m/s above its mean wind (≥ 3 m/s) in the last three readings after ≤ 2 m/s an hour before (thermals reaching the wind above) → NO of the high's bucket (any new high) at 0.10–0.70."
         }
         (32, true) => "As L32 with gusts ≥ 5 m/s above the mean.",
         (33, false) => {
@@ -42,9 +42,9 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (34, true) => "As L34 with KNMI up ≥ 1.5 °C.",
         (35, false) => {
-            "Aggressive. 10:00–15:00 (until the median peak + 60 min): 3–15 minutes after a report raised the high, the next degree up ≤ 0.05 since while KNMI still rose ≥ 0.3 °C in 30 minutes → YES of the next degree at 0.05–0.35."
+            "Aggressive. 10:00–15:00 (until the median peak + 60 min): 3–15 minutes after a report raised the high, a further new high (the high's NO) up ≤ 0.05 since while KNMI still rose ≥ 0.3 °C in 30 minutes → that NO at 0.10–0.70."
         }
-        (35, true) => "As L35 with the next degree up ≤ 0.02.",
+        (35, true) => "As L35 with the high's NO up ≤ 0.02 since the report.",
         (36, false) => {
             "Defensive. 08:00–14:00: an airport 60–300 km upwind saw a front pass in the last 3 hours (≥ 2 °C down within 70 minutes, the wind veering 40–180° or QNH up), due at Schiphol before the median peak → NO of the next degree at 0.60–0.95 (p = 0.92)."
         }
@@ -126,7 +126,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (55, true) => "As L55 with KNMI within 0.1 °C of the edge.",
         (56, false) => {
-            "Balanced. 10:00–16:00: Schiphol and the KNMI neighbours ≥ 3 °C apart in the same ten minutes while the favourite is ≥ 0.55 → the favourite's NO at 0.25–0.45."
+            "Balanced. 10:00–16:00: Schiphol and the KNMI neighbours ≥ 3 °C apart in the same ten minutes (the newest at least three stations read) while the favourite is ≥ 0.55 → the favourite's NO at 0.25–0.45."
         }
         (56, true) => "As L56 with the stations ≥ 4 °C apart.",
         (57, false) => {
@@ -134,19 +134,19 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (57, true) => "As L57 with the next degree up ≥ 0.10.",
         (58, false) => {
-            "Balanced. 07:00–20:00: a bucket of a multiple of 5 °C (≥ 0.15 of the ladder) priced ≥ 0.08 above the share a normal fitted to the other buckets gives it → its NO at 0.40–0.85."
+            "Balanced. 07:00–20:00: a bucket of a multiple of 5 °C (≥ 0.15 of the ladder), not the ladder's peak, priced ≥ 0.08 above the share a curve through its neighbours within 2 °C gives it (a log-parabola, exact for a normal day) → its NO at 0.40–0.85."
         }
-        (58, true) => "As L58 with ≥ 0.12 over the normal.",
+        (58, true) => "As L58 with ≥ 0.12 over the curve.",
         (59, false) => {
-            "Balanced. One round trip a day: 09:00–18:00 away from reports, the favourite (0.20–0.80) with a spread ≤ 0.03 and ≥ 3 × as many shares bid as offered (≥ 100) → its YES, sold at the bid at +0.03, −0.05, after 45 minutes or 10 minutes before a report."
+            "Balanced. One round trip a day: 09:00–18:00 away from reports, the favourite (0.20–0.80) with a spread ≤ 0.02 and ≥ 3 × as many shares bid as offered (≥ 100) → its YES; sold at the bid once that nets 0.02 a share over the cost after the fee, once the bid lies 0.02 under the bid at entry, after 45 minutes, or 10 minutes before a report."
         }
         (59, true) => "As L59 with ≥ 5 × as many shares bid.",
         (60, false) => {
-            "Balanced. 08:00–20:00, not in the 10 minutes before a report: the favourite or a neighbour (0.10–0.60) whose best ask holds ≤ 50 shares with the next ask ≥ 0.10 above → offer YES halfway into the gap (a NO bid) until 10 minutes before the next report."
+            "Balanced. 08:00–20:00, not in the 10 minutes before a report nor the 3 after it came in: the favourite or a neighbour (0.10–0.60) whose best ask holds ≤ 50 shares with the next ask ≥ 0.10 above → offer YES halfway into the gap (a NO bid) until 10 minutes before the next report."
         }
         (60, true) => "As L60 on gaps of ≥ 0.15.",
         (61, false) => {
-            "Aggressive. 09:00–16:00: a SPECI (off the routine minutes) known 3–20 minutes ago opening the sky or ending the rain, ≤ 2 °C under the high, the next degree up ≤ 0.05 since → its YES at 0.05–0.35."
+            "Aggressive. 09:00–16:00: a SPECI (off the routine minutes) known 3–20 minutes ago opening the sky or ending the rain, ≤ 2 °C under the high, a further new high (the high's NO) up ≤ 0.05 since → that NO at 0.10–0.70."
         }
         (61, true) => {
             "The worsening: a SPECI bringing rain, thunder or a ceiling under 1000 ft → NO of the next degree at 0.55–0.92 (p = 0.90)."
@@ -160,7 +160,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (63, true) => "As L63 with ≥ 5 × the size shown.",
         (64, false) => {
-            "Aggressive. 09:00–18:00 away from reports: the next degree's offered shares down ≥ 60 % against 4–7 minutes before (≥ 100 then) while its price moved ≤ +0.03 → its YES at 0.05–0.40."
+            "Aggressive. 09:00–18:00 away from reports (until 3 minutes after one came in): the next degree's offered shares down ≥ 60 % against 4–7 minutes before (≥ 100 then) while its price moved no more than 0.03 either way → its YES at 0.05–0.40."
         }
         (64, true) => "As L64 with ≥ 75 % withdrawn.",
         (65, false) => {

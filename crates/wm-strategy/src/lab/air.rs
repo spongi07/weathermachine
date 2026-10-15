@@ -5,7 +5,7 @@
 //! down, a dropping wind under the sun, falling pressure ahead of weather,
 //! saturated air that cannot warm, a sea wind all day.
 
-use super::day::{Buy, Day, c};
+use super::day::{Buy, Day, RISE_BAND, c};
 use crate::strategy::StrategyOutput;
 use chrono::Duration;
 use wm_core::market::{MarketOutcome, OutcomeSide};
@@ -103,10 +103,11 @@ pub(crate) fn mixing_surge(day: &Day<'_, '_>, variant: bool, out: &mut StrategyO
 /// L29 (`variant`: ≤ 2.5 m/s at half the speed). Wind slack under the sun:
 /// 11:00–15:00, KNMI's wind ≤ 3.5 m/s and ≤ 0.6 × its speed an hour before
 /// (≥ 4.0 m/s then), sunshine ≥ 7 of 10 minutes in two of the last three
-/// readings, KNMI ≥ 1.2 °C under the edge at most → YES of the next degree
-/// at 0.05–0.35. Less wind mixes less cool air into the sunlit surface layer.
+/// readings, KNMI ≥ 1.2 °C under the edge at most → NO of the high's
+/// bucket (a new high, however far) at 0.10–0.70. Less wind mixes less
+/// cool air into the sunlit surface layer.
 pub(crate) fn wind_slack(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
-    let Some(j) = day.next_outcome() else {
+    let Some(h) = day.high_outcome() else {
         return;
     };
     let (max_ff, ratio) = if variant { (2.5, 0.5) } else { (3.5, 0.6) };
@@ -154,9 +155,9 @@ pub(crate) fn wind_slack(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
     }
     day.taker(
         Buy {
-            outcome: j,
-            side: OutcomeSide::Yes,
-            band: (0.05, 0.35),
+            outcome: h,
+            side: OutcomeSide::No,
+            band: RISE_BAND,
             p_win: None,
             rationale,
         },
@@ -168,10 +169,10 @@ pub(crate) fn wind_slack(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
 /// L32 (`variant`: gusts ≥ 5 m/s over the mean). Gusts begin: 10:00–13:30,
 /// KNMI's gusts ≥ 4 m/s above its mean wind (≥ 3 m/s) in each of the last
 /// three readings, ≤ 2 m/s above it an hour before — thermals reach the
-/// wind above and mix it down, and with it warmer air → YES of the next
-/// degree at 0.04–0.30.
+/// wind above and mix it down, and with it warmer air → NO of the high's
+/// bucket (a new high, however far) at 0.10–0.70.
 pub(crate) fn gust_onset(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
-    let Some(j) = day.next_outcome() else {
+    let Some(h) = day.high_outcome() else {
         return;
     };
     let min_excess = if variant { 5.0 } else { 4.0 };
@@ -217,9 +218,9 @@ pub(crate) fn gust_onset(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
     }
     day.taker(
         Buy {
-            outcome: j,
-            side: OutcomeSide::Yes,
-            band: (0.04, 0.30),
+            outcome: h,
+            side: OutcomeSide::No,
+            band: RISE_BAND,
             p_win: None,
             rationale,
         },

@@ -4,10 +4,11 @@
 //! before it reads what the market did, so it never races the traders who
 //! see a report 2 minutes before the bot does.
 
-use super::day::{Buy, Day, c, hm, implied, round_half_up};
+use super::day::{Buy, Day, RISE_BAND, c, hm, implied, round_half_up};
 use crate::strategy::StrategyOutput;
 use chrono::{Duration, Timelike};
 use wm_core::market::OutcomeSide;
+use wm_core::weather::TenMinuteObservation;
 
 /// The report that first reached today's high (`None` before one did).
 fn high_report<'a>(day: &Day<'_, 'a>) -> Option<&'a super::WxReport> {
@@ -16,13 +17,14 @@ fn high_report<'a>(day: &Day<'_, 'a>) -> Option<&'a super::WxReport> {
         .find(|r| r.temp_tenths.is_some_and(|t| t >= day.high * 10))
 }
 
-/// L35 (`variant`: the next degree up ≤ 0.02). Under-reaction after a new
-/// high: 10:00–15:00 and before the season's median peak + 60 minutes,
-/// 3–15 minutes after a report raised the high, the next degree's price up
-/// ≤ 0.05 since while KNMI is still rising (≥ 0.3 °C in 30 minutes) → YES
-/// of the next degree at 0.05–0.35.
+/// L35 (`variant`: up ≤ 0.02). Under-reaction after a new high:
+/// 10:00–15:00 and before the season's median peak + 60 minutes, 3–15
+/// minutes after a report raised the high, the price of a further new high
+/// (the NO of the high's bucket) up ≤ 0.05 since while KNMI is still rising
+/// (≥ 0.3 °C in 30 minutes) → that NO (a new high, however far) at
+/// 0.10–0.70.
 pub(crate) fn post_high_drift(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
-    let Some(j) = day.next_outcome() else {
+    let Some(h) = day.high_outcome() else {
         return;
     };
     let max_move = if variant { 0.02 } else { 0.05 };
@@ -42,20 +44,22 @@ pub(crate) fn post_high_drift(day: &Day<'_, '_>, variant: bool, out: &mut Strate
                     since.num_minutes()
                 ));
             } else {
-                match (day.yes_price(j), day.mid_at(j, r.known_at)) {
+                // A further new high is priced as the high's NO: one
+                // minus its YES.
+                match (day.yes_price(h), day.mid_at(h, r.known_at)) {
                     (Some(now_p), Some(then)) => {
-                        let moved = now_p - then;
+                        let moved = then - now_p;
                         if moved > max_move + 1e-9 {
                             blockers.push(format!(
-                                "{} up {moved:+.3} since the report > {max_move:.2}: priced in",
-                                j.label
+                                "NO {} up {moved:+.3} since the report > {max_move:.2}: priced in",
+                                h.label
                             ));
                         } else {
                             rationale.push(format!(
-                                "new high {} at {} UTC; {} moved only {moved:+.3} since",
+                                "new high {} at {} UTC; NO {} moved only {moved:+.3} since",
                                 c(day.high * 10),
                                 r.observed_at.format("%H:%M"),
-                                j.label
+                                h.label
                             ));
                         }
                     }
@@ -88,9 +92,9 @@ pub(crate) fn post_high_drift(day: &Day<'_, '_>, variant: bool, out: &mut Strate
     }
     day.taker(
         Buy {
-            outcome: j,
-            side: OutcomeSide::Yes,
-            band: (0.05, 0.35),
+            outcome: h,
+            side: OutcomeSide::No,
+            band: RISE_BAND,
             p_win: None,
             rationale,
         },
@@ -534,9 +538,10 @@ pub(crate) fn edge_hover(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOut
 }
 
 /// L56 (`variant`: ≥ 4 °C). Stations disagree: 10:00–16:00, Schiphol and
-/// the KNMI neighbours ≥ 3 °C apart in the same ten minutes (≥ 3 stations)
-/// — a front or a sea breeze is crossing the area — while the market's
-/// favourite is priced ≥ 0.55 → the favourite's NO at 0.25–0.45.
+/// the KNMI neighbours ≥ 3 °C apart in the same ten minutes (the newest
+/// that ≥ 3 stations read, at most 20 minutes back) — a front or a sea
+/// breeze is crossing the area — while the market's favourite is priced ≥
+/// 0.55 → the favourite's NO at 0.25–0.45.
 pub(crate) fn station_spread(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
     let min_spread = if variant { 40 } else { 30 };
     let Some((fav, p)) = day.favourite() else {
@@ -548,21 +553,33 @@ pub(crate) fn station_spread(day: &Day<'_, '_>, variant: bool, out: &mut Strateg
     match day.latest_reading() {
         Err(why) => blockers.push(why),
         Ok(r) => {
-            let at = r.interval_end;
-            let mut temps: Vec<(String, i32)> = r
-                .mean
-                .map(|m| vec![("Schiphol".to_owned(), m.tenths())])
-                .unwrap_or_default();
-            for n in day.lab.neighbours {
-                if let Some(m) = n
-                    .readings
-                    .iter()
-                    .find(|x| x.interval_end == at)
-                    .and_then(|x| x.mean)
-                {
-                    temps.push((n.name.to_owned(), m.tenths()));
+            let temps_at = |x: &TenMinuteObservation| {
+                let mut v: Vec<(String, i32)> = x
+                    .mean
+                    .map(|m| vec![("Schiphol".to_owned(), m.tenths())])
+                    .unwrap_or_default();
+                for n in day.lab.neighbours {
+                    if let Some(m) = n
+                        .readings
+                        .iter()
+                        .find(|y| y.interval_end == x.interval_end)
+                        .and_then(|y| y.mean)
+                    {
+                        v.push((n.name.to_owned(), m.tenths()));
+                    }
                 }
-            }
+                v
+            };
+            // The neighbours are read seconds after Schiphol: the newest ten
+            // minutes at least three stations read, up to 20 minutes back.
+            let (at, temps) = day
+                .readings()
+                .iter()
+                .rev()
+                .take(3)
+                .map(|x| (x.interval_end, temps_at(x)))
+                .find(|(_, t)| t.len() >= 3)
+                .unwrap_or_else(|| (r.interval_end, temps_at(r)));
             let hi = temps.iter().map(|t| t.1).max().unwrap_or(0);
             let lo = temps.iter().map(|t| t.1).min().unwrap_or(0);
             let list = temps
@@ -679,11 +696,12 @@ fn special(day: &Day<'_, '_>, r: &super::WxReport) -> bool {
 /// special report's improvement: 09:00–16:00, the latest report a SPECI
 /// (off the routine minutes) known 3–20 minutes ago, the sky opening (a
 /// ceiling ≤ 1500 ft gone or ≥ 3000 ft) or the rain stopped against the
-/// report before, ≤ 2 °C under the high, the next degree up ≤ 0.05 since
-/// → its YES at 0.05–0.35. The variant: rain, thunder or a ceiling under
-/// 1000 ft arriving → its NO at 0.55–0.92.
+/// report before, ≤ 2 °C under the high, a further new high (the NO of the
+/// high's bucket) up ≤ 0.05 since → that NO (a new high, however far) at
+/// 0.10–0.70. The variant: rain, thunder or a ceiling under 1000 ft
+/// arriving → the next degree's NO at 0.55–0.92.
 pub(crate) fn speci_pulse(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
-    let Some(j) = day.next_outcome() else {
+    let (Some(h), Some(j)) = (day.high_outcome(), day.next_outcome()) else {
         return;
     };
     let mut blockers: Vec<String> = day.outside(9 * 60, 16 * 60).into_iter().collect();
@@ -745,11 +763,11 @@ pub(crate) fn speci_pulse(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOu
                     }
                     None => blockers.push("no temperature in the SPECI".into()),
                 }
-                match (day.yes_price(j), day.mid_at(j, last.known_at)) {
-                    (Some(p), Some(b)) if p - b > 0.05 + 1e-9 => blockers.push(format!(
-                        "{} up {:+.3} since the SPECI: priced in",
-                        j.label,
-                        p - b
+                match (day.yes_price(h), day.mid_at(h, last.known_at)) {
+                    (Some(p), Some(b)) if b - p > 0.05 + 1e-9 => blockers.push(format!(
+                        "NO {} up {:+.3} since the SPECI: priced in",
+                        h.label,
+                        b - p
                     )),
                     (Some(_), Some(_)) => {}
                     _ => blockers.push("no price at the SPECI and now".into()),
@@ -758,15 +776,15 @@ pub(crate) fn speci_pulse(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOu
         }
         _ => blockers.push("the latest report is no SPECI".into()),
     }
-    let (side, band, p) = if variant {
-        (OutcomeSide::No, (0.55, 0.92), Some((0.90, 0.005)))
+    let (outcome, band, p) = if variant {
+        (j, (0.55, 0.92), Some((0.90, 0.005)))
     } else {
-        (OutcomeSide::Yes, (0.05, 0.35), None)
+        (h, RISE_BAND, None)
     };
     day.taker(
         Buy {
-            outcome: j,
-            side,
+            outcome,
+            side: OutcomeSide::No,
             band,
             p_win: p,
             rationale,
