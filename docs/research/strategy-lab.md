@@ -623,9 +623,10 @@ first at 14:25 local). The new inputs all came in: KNMI accepted the seven
 parameter names, eleven of the twelve airports reported (Twente, EHTW, sent
 nothing all day: it publishes no METAR outside its few opening hours, and
 Münster-Osnabrück, EDDG, 200 km east, replaced it), the ladder sampled once
-a minute and yesterday's 48 METARs were there. Six new families traded:
-L44 (+$0.48), L59 (−$2.40), L64 (−$6.48), L35 (−$7.25), L58 (−$20.4); L60's
-two quotes expired. Four of the five losses were design faults, not luck:
+a minute and yesterday's 48 METARs were there. Five new families traded
+(at the 17:31 marks; the day settles overnight): L44 (+$0.48), L59 (−$2.40,
+realized), L64 (−$6.48), L35 (−$7.25) and L58 (−$20.38); L60's two quotes
+expired unfilled. The four losses were design faults, not bad luck:
 
 * **L59 stopped out 2 seconds after it bought.** Its stop lay 0.05 under
   the average cost — but that cost carries the fee and the slippage
