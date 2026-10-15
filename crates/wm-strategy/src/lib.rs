@@ -2,7 +2,7 @@
 //!
 //! The pure decision core shared by backtest, paper and live runs:
 //! temperature state, peak features, probability models, EV math,
-//! strategies A–K, the strategy lab's paper strategies L1–L25 and the unwind
+//! strategies A–K, the strategy lab's paper strategies L1–L65 and the unwind
 //! engine. No I/O, no clocks, no randomness.
 
 pub mod book_confirmed;

@@ -46,6 +46,14 @@ pub fn bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     y.atan2(x).to_degrees().rem_euclid(360.0)
 }
 
+/// Great-circle distance (km) from `(lat1, lon1)` to `(lat2, lon2)`.
+pub fn distance_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let (dp, dl) = ((lat2 - lat1).to_radians(), (lon2 - lon1).to_radians());
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 6371.0 * a.sqrt().atan2((1.0 - a).sqrt())
+}
+
 /// Smallest angle between two bearings (degrees, 0–180).
 pub fn angle_between(a: f64, b: f64) -> f64 {
     let d = (a - b).rem_euclid(360.0);
@@ -55,6 +63,15 @@ pub fn angle_between(a: f64, b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distance_between_airports() {
+        // Schiphol to Brussels Airport: about 158 km, a little west of south.
+        let d = distance_km(52.318, 4.790, 50.901, 4.484);
+        assert!((d - 158.6).abs() < 1.5, "{d}");
+        assert!((bearing(52.318, 4.790, 50.901, 4.484) - 187.7).abs() < 1.5);
+        assert!(distance_km(52.0, 4.0, 52.0, 4.0).abs() < 1e-9);
+    }
 
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

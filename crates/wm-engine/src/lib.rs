@@ -6,7 +6,7 @@
 //! ```text
 //! event → state (temperature / markets / books / orders / health)
 //!       → per-view peak assessment + probability model
-//!       → strategies A–K, the lab's L1–L25 + unwind → proposals
+//!       → strategies A–K, the lab's L1–L65 + unwind → proposals
 //!       → risk engine → approved intents (→ execution)
 //!       → decision audit records, polling hints, dashboard snapshot
 //! ```
@@ -19,11 +19,11 @@ mod snapshot;
 
 pub use engine::{
     Engine, EngineConfig, EngineLocation, EngineOutput, EngineStats, KNMI_CHECKPOINT_LATEST,
-    LiveBookConfig, NeighbourStation, SettledHolding, StationHint, default_rejection_dedup_secs,
-    lab_risk_config,
+    LiveBookConfig, NeighbourStation, SettledHolding, StationHint, UpstreamStation,
+    default_rejection_dedup_secs, lab_risk_config,
 };
 pub use restore::{RestoreState, RestoreSummary, RestoredFill};
 pub use snapshot::{
     EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LiveBookSnapshot,
-    LocationSnapshot, NeighbourSnapshot, ViewSnapshot,
+    LocationSnapshot, NeighbourSnapshot, UpstreamSnapshot, ViewSnapshot,
 };

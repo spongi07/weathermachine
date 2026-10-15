@@ -10,7 +10,7 @@ use wm_core::ids::{LocationId, ProviderId, RunId, StationId};
 use wm_core::market::FeeSchedule;
 use wm_core::time::Clock;
 use wm_core::trading::RunMode;
-use wm_engine::{EngineConfig, EngineLocation, NeighbourStation};
+use wm_engine::{EngineConfig, EngineLocation, NeighbourStation, UpstreamStation};
 use wm_net::{HttpFetcher, ProviderGate};
 use wm_polymarket::LocationMarketSpec;
 use wm_strategy::{EmpiricalPeakModel, NoEdgeModel, PeakConfig, ProbabilityModel};
@@ -99,6 +99,32 @@ pub fn lab_neighbours(cfg: &AppConfig, l: &LocationFile) -> Result<Vec<Neighbour
         .collect()
 }
 
+/// The airports upstream of a location that the lab's L26, L31 and L36
+/// read (none when the lab is off).
+pub fn lab_upstream(cfg: &AppConfig, l: &LocationFile) -> Vec<UpstreamStation> {
+    if !cfg.file.strategies.lab.enabled {
+        return Vec::new();
+    }
+    let (lat, lon) = (l.station.latitude, l.station.longitude);
+    cfg.file
+        .lab
+        .upstream
+        .iter()
+        .filter_map(|u| {
+            Some(UpstreamStation {
+                station: StationId::new(u.icao.clone()).ok()?,
+                bearing_deg: wm_strategy::lab::solar::bearing(lat, lon, u.latitude, u.longitude),
+                distance_km: wm_strategy::lab::solar::distance_km(
+                    lat,
+                    lon,
+                    u.latitude,
+                    u.longitude,
+                ),
+            })
+        })
+        .collect()
+}
+
 /// Engine configuration for a run.
 pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<EngineConfig> {
     let mut locations = Vec::new();
@@ -113,6 +139,7 @@ pub fn engine_config(cfg: &AppConfig, mode: RunMode, run_id: RunId) -> Result<En
             routine_minutes: l.station.routine_minutes.clone(),
             position: Some((l.station.latitude, l.station.longitude)),
             neighbours: lab_neighbours(cfg, l)?,
+            upstream: lab_upstream(cfg, l),
         });
     }
     Ok(EngineConfig {

@@ -1,26 +1,32 @@
 //! The strategy lab's live inputs beyond A–K's: who trades today (the Data
-//! API's taker trades with hashed wallets, for L18–L21) and how each taker
-//! fared on the settled days before (their scores, for L19 and L20).
-//! Read-only, through the shared Data API and Gamma gates; a failure only
-//! leaves the flow rules idle, and says so on the dashboard.
+//! API's taker trades with hashed wallets, for L18–L21, L38, L44, L47 and
+//! L63), how each taker fared on the settled days before (their scores,
+//! for L19, L20 and L44), and the METARs of the airports upstream (L26,
+//! L31, L36). Read-only, through the shared Data API, Gamma and AWC gates;
+//! a failure only leaves the rules that read it idle, and says so on the
+//! dashboard.
 
 use super::{SharedSide, with_side};
 use crate::market_research::{market_day, short_hash};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use wm_backtest::MarketDay;
 use wm_core::event::{
-    EventEnvelope, EventSource, TakerTradesEvent, WalletScoresEvent, WeatherMachineEvent,
+    EventEnvelope, EventSource, TakerTradesEvent, UpstreamReportsEvent, WalletScoresEvent,
+    WeatherMachineEvent,
 };
-use wm_core::ids::{ConditionId, EventSlug};
+use wm_core::ids::{ConditionId, EventSlug, StationId};
 use wm_core::market::{DailyTemperatureMarket, TakerTrade};
 use wm_core::time::{Clock, local_date, local_day_bounds};
+use wm_core::weather::UpstreamReport;
+use wm_net::{FetchRequest, HttpFetcher};
 use wm_polymarket::{DataApiClient, DataTrade, GammaClient, LocationMarketSpec};
 use wm_strategy::lab::WalletBook;
 use wm_strategy::lab::wallets::ScoredTrade;
+use wm_weather::AwcMetarSource;
 
 /// Longest wait for a gate per request (the flow rules act within minutes).
 const POLL_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -285,6 +291,151 @@ pub(super) async fn wallet_loop(
     }
 }
 
+/// Minutes past each hour at which the upstream airports are read: away
+/// from Schiphol's report windows (:25 and :55, published minutes later),
+/// so the shared AWC gate is free when the market station's report is due.
+const UPSTREAM_MINUTES: [i64; 2] = [10, 40];
+/// History read at each poll: the front rule looks back three hours.
+const UPSTREAM_HOURS: u32 = 3;
+
+/// The next upstream poll strictly after `now`.
+pub(super) fn next_upstream_poll(now: DateTime<Utc>) -> DateTime<Utc> {
+    let hour = now
+        .date_naive()
+        .and_hms_opt(now.hour(), 0, 0)
+        .map_or(now, |h| h.and_utc());
+    (0..=1)
+        .flat_map(|h| {
+            UPSTREAM_MINUTES
+                .iter()
+                .map(move |m| hour + Duration::hours(h) + Duration::minutes(*m))
+        })
+        .find(|t| *t > now)
+        .unwrap_or(now + Duration::minutes(30))
+}
+
+/// An AWC report as the lab keeps an upstream airport's.
+pub(super) fn to_upstream(
+    r: &wm_weather::ParsedReport,
+    received_at: DateTime<Utc>,
+) -> UpstreamReport {
+    UpstreamReport {
+        station: r.station.clone(),
+        observed_at: r.observed_at,
+        raw_text: r.raw_text.clone(),
+        temperature: r
+            .metar
+            .as_ref()
+            .and_then(|m| m.temperature())
+            .map(|(t, _)| t),
+        dewpoint: r
+            .metar
+            .as_ref()
+            .and_then(wm_weather::metar::MetarReport::dewpoint),
+        received_at,
+    }
+}
+
+/// Reads the upstream airports' METARs in one AWC request at :10 and :40
+/// and hands the new ones to the engine. The first read waits for such a
+/// slot at least two minutes after the start: the market station's own
+/// backfill goes first through the shared AWC gate. A failure leaves L26,
+/// L31 and L36 idle; it is alerted once until recovery.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn upstream_loop(
+    fetcher: Arc<HttpFetcher>,
+    base_url: String,
+    stations: Vec<StationId>,
+    events: mpsc::Sender<EventEnvelope>,
+    side: SharedSide,
+    clock: Arc<dyn Clock>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut last: HashMap<StationId, DateTime<Utc>> = HashMap::new();
+    let mut failing = false;
+    let first = next_upstream_poll(clock.now() + Duration::minutes(2));
+    let wait = (first - clock.now())
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(120));
+    tokio::select! {
+        _ = tokio::time::sleep(wait) => {}
+        r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+    }
+    loop {
+        let endpoint = AwcMetarSource::endpoint_many(&stations, UPSTREAM_HOURS);
+        let req = FetchRequest::get(format!("{base_url}{endpoint}"), endpoint)
+            .accept("application/json")
+            .max_gate_wait(std::time::Duration::from_secs(60));
+        let fetched = tokio::select! {
+            r = fetcher.get(&req) => r.map_err(|e| e.to_string()),
+            _ = shutdown.changed() => return,
+        };
+        let parsed = fetched.and_then(|resp| {
+            AwcMetarSource::parse_body_any(&resp.body, resp.fetched_at)
+                .map(|(r, _)| (r, resp.fetched_at))
+        });
+        match parsed {
+            Ok((reports, at)) => {
+                if failing {
+                    failing = false;
+                    with_side(&side, |s| {
+                        s.alert("info", "upstream METARs available again")
+                    });
+                }
+                let mut fresh: Vec<UpstreamReport> = reports
+                    .iter()
+                    .filter(|r| stations.contains(&r.station))
+                    .filter(|r| last.get(&r.station).is_none_or(|t| r.observed_at > *t))
+                    .map(|r| to_upstream(r, at))
+                    .collect();
+                fresh.sort_by_key(|r| r.observed_at);
+                for r in &fresh {
+                    let t = last.entry(r.station.clone()).or_insert(r.observed_at);
+                    *t = (*t).max(r.observed_at);
+                }
+                tracing::debug!(
+                    new = fresh.len(),
+                    airports = last.len(),
+                    "upstream METARs for the strategy lab"
+                );
+                if !fresh.is_empty() {
+                    let env = EventEnvelope::new(
+                        clock.now(),
+                        EventSource::Live,
+                        WeatherMachineEvent::UpstreamReports(UpstreamReportsEvent {
+                            reports: fresh,
+                        }),
+                    );
+                    if events.send(env).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "upstream METARs unavailable");
+                if !failing {
+                    failing = true;
+                    with_side(&side, |s| {
+                        s.alert(
+                            "warning",
+                            format!(
+                                "upstream METARs unavailable ({e}); the lab's L26, L31 and L36 wait"
+                            ),
+                        )
+                    });
+                }
+            }
+        }
+        let wait = (next_upstream_poll(clock.now()) - clock.now())
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(60));
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +501,22 @@ mod tests {
         let good = book.get("good").unwrap();
         assert!((good.mean() - (0.60 - 0.05 * 0.4 * 0.6)).abs() < 1e-9);
         assert!(book.get("bad").unwrap().mean() < -0.6);
+    }
+
+    #[test]
+    fn upstream_airports_are_read_at_ten_and_forty_past() {
+        assert_eq!(
+            next_upstream_poll(utc("2026-07-01T12:05:00Z")),
+            utc("2026-07-01T12:10:00Z")
+        );
+        assert_eq!(
+            next_upstream_poll(utc("2026-07-01T12:10:00Z")),
+            utc("2026-07-01T12:40:00Z")
+        );
+        assert_eq!(
+            next_upstream_poll(utc("2026-07-01T23:41:00Z")),
+            utc("2026-07-02T00:10:00Z")
+        );
     }
 
     #[test]

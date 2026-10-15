@@ -44,7 +44,7 @@ use wm_core::time::{Clock, SystemClock, local_date};
 use wm_core::trading::{DecisionRecord, Fill, RunMode};
 use wm_core::weather::DedupClass;
 use wm_dashboard_api::{AlertDto, ModelDto};
-use wm_execution::{OrderRecord, SimConfig};
+use wm_execution::OrderRecord;
 use wm_net::ProviderGate;
 use wm_polymarket::{
     ClobClient, GammaClient, LocationMarketSpec, MarketStream, MarketStreamConfig, StreamStatus,
@@ -1018,6 +1018,16 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                                 station: n.station,
                             })
                             .collect(),
+                        extras: if lab.enabled {
+                            lab_inputs
+                                .knmi_extra_parameters
+                                .iter()
+                                .map(|p| p.trim().to_owned())
+                                .filter(|p| !p.is_empty())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        },
                     })
                 })
                 .collect();
@@ -1036,20 +1046,26 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         }
         None => {
             let k = cfg.file.strategies.knmi_nowcast.enabled;
-            let lab = wm_strategy::lab::KNMI_FAMILIES
+            let lab: Vec<String> = wm_strategy::lab::KNMI_FAMILIES
                 .iter()
-                .any(|f| cfg.file.strategies.lab.runs(*f));
-            let message = match (k, lab) {
-                (true, false) => Some(
-                    "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then K stays idle",
-                ),
+                .filter(|f| cfg.file.strategies.lab.runs(**f))
+                .map(|f| wm_strategy::lab::code(*f))
+                .collect();
+            let key = "need KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then";
+            let message = match (k, lab.is_empty()) {
                 (true, true) => Some(
-                    "strategy K and the lab's KNMI rules (L1–L7, L18, L21, L23–L25) need KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then they stay idle (L3 enters as F does, without its exit)",
+                    "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then K stays idle"
+                        .to_owned(),
                 ),
-                (false, true) => Some(
-                    "the lab's KNMI rules (L1–L7, L18, L21, L23–L25) need KNMI's ten-minute readings: set WM_KNMI_API_KEY (a free key from the KNMI Developer Portal); until then they stay idle (L3 enters as F does, without its exit)",
-                ),
-                (false, false) => None,
+                (true, false) => Some(format!(
+                    "strategy K and the lab's KNMI rules ({}) {key} they stay idle",
+                    lab.join(", ")
+                )),
+                (false, false) => Some(format!(
+                    "the lab's KNMI rules ({}) {key} they stay idle",
+                    lab.join(", ")
+                )),
+                (false, true) => None,
             };
             if let Some(m) = message {
                 with_side(&side, |s| s.alert("warning", m));
@@ -1087,8 +1103,10 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
 
     // -- The strategy lab's flow inputs: today's takers and their records ----------------
     let lab_cfg = &cfg.file.strategies.lab;
-    let flow_rules = [18u8, 19, 20, 21].iter().any(|f| lab_cfg.runs(*f));
-    let wallet_rules = [19u8, 20].iter().any(|f| lab_cfg.runs(*f));
+    let flow_rules = [18u8, 19, 20, 21, 38, 44, 47, 63]
+        .iter()
+        .any(|f| lab_cfg.runs(*f));
+    let wallet_rules = [19u8, 20, 44].iter().any(|f| lab_cfg.runs(*f));
     match (providers.fetcher("polymarket_data"), flow_rules) {
         (Some(f), true) => {
             let data = || {
@@ -1137,10 +1155,51 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
         (None, true) => with_side(&side, |s| {
             s.alert(
                 "warning",
-                "the strategy lab's flow rules (L18–L21) need the Data API: providers.polymarket_data is off, so they stay idle",
+                "the strategy lab's flow rules (L18–L21, L38, L44, L47, L63) need the Data API: providers.polymarket_data is off, so they stay idle",
             )
         }),
         _ => drop(today_markets_rx),
+    }
+    // -- The strategy lab's upstream airports (L26, L31, L36) ----------------------------
+    let upstream_rules = [26u8, 31, 36].iter().any(|f| lab_cfg.runs(*f));
+    let upstream: Vec<wm_core::ids::StationId> = cfg
+        .locations
+        .iter()
+        .flat_map(|l| setup::lab_upstream(&cfg, l))
+        .map(|u| u.station)
+        .fold(Vec::new(), |mut v, s| {
+            if !v.contains(&s) {
+                v.push(s);
+            }
+            v
+        });
+    match (
+        providers.fetcher("awc"),
+        upstream_rules && !upstream.is_empty(),
+    ) {
+        (Some(f), true) => {
+            tasks.push(tokio::spawn(lab::upstream_loop(
+                Arc::clone(f),
+                cfg.file
+                    .providers
+                    .awc
+                    .base_url
+                    .trim_end_matches('/')
+                    .to_owned(),
+                upstream,
+                events_tx.clone(),
+                Arc::clone(&side),
+                Arc::clone(&clock),
+                shutdown.clone(),
+            )));
+        }
+        (None, true) => with_side(&side, |s| {
+            s.alert(
+                "warning",
+                "the strategy lab's upstream rules (L26, L31, L36) read METARs from AWC: providers.awc is off, so they stay idle",
+            )
+        }),
+        _ => {}
     }
     if let Some(gate) = providers.gate("polymarket_ws") {
         let stream = MarketStream::new(
@@ -1205,7 +1264,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     let peak_slot_cfg = cfg.peak_slot();
     let mut peak_times = model.peak_times().cloned();
     let mut session =
-        SimulationSession::new(engine_cfg, SimConfig::default(), settle_grace(), model)
+        SimulationSession::new(engine_cfg, cfg.file.paper.sim(), settle_grace(), model)
             .with_event_capture(true);
     session.engine_mut().set_storage_ok(store.is_some());
     if let Some(why) = &live_off {
@@ -1714,6 +1773,32 @@ struct KnmiTarget {
     history: Duration,
     /// The lab's upwind stations: polled once per new reading of `station`.
     neighbours: Vec<KnmiNeighbour>,
+    /// KNMI's other parameters the lab reads (dew point, wind, pressure …):
+    /// one request per new reading of `station`.
+    extras: Vec<String>,
+}
+
+/// The lab's other KNMI parameters are read this far back at the first
+/// request (L37 compares the pressure with three hours before).
+const KNMI_EXTRAS_HISTORY: Duration = Duration::hours(4);
+
+/// New points of KNMI's other parameters as the engine keeps them.
+fn new_extras(
+    station: &StationId,
+    points: Vec<wm_weather::SeriesPoint>,
+    last: Option<DateTime<Utc>>,
+    received_at: DateTime<Utc>,
+) -> Vec<wm_core::weather::TenMinuteExtras> {
+    points
+        .into_iter()
+        .filter(|p| last.is_none_or(|l| p.interval_end > l))
+        .map(|p| wm_core::weather::TenMinuteExtras {
+            station: station.clone(),
+            interval_end: p.interval_end,
+            values: p.values,
+            received_at,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -1755,6 +1840,14 @@ async fn knmi_loop(
     let mut failing = false;
     let mut last_sent: HashMap<StationId, DateTime<Utc>> = HashMap::new();
     let mut neighbour_failing: HashMap<StationId, bool> = HashMap::new();
+    // The lab's other parameters per station: those KNMI accepts, and the
+    // newest interval handed on.
+    let mut extras: HashMap<StationId, Vec<String>> = targets
+        .iter()
+        .map(|t| (t.station.clone(), t.extras.clone()))
+        .collect();
+    let mut extras_last: HashMap<StationId, DateTime<Utc>> = HashMap::new();
+    let mut extras_failing = false;
     loop {
         for t in &targets {
             let now = clock.now();
@@ -1820,6 +1913,91 @@ async fn knmi_loop(
                         );
                         if events.send(env).await.is_err() {
                             return;
+                        }
+                    }
+                    let params = extras.get(&t.station).cloned().unwrap_or_default();
+                    if !params.is_empty() {
+                        let now = clock.now();
+                        let last = extras_last.get(&t.station).copied();
+                        let from = now
+                            - if last.is_some() {
+                                lookback
+                            } else {
+                                KNMI_EXTRAS_HISTORY
+                            };
+                        let names: Vec<&str> = params.iter().map(String::as_str).collect();
+                        let fetched = tokio::select! {
+                            r = client.fetch_series(&t.location, &names, from, now, wait, 1) => r,
+                            _ = shutdown.changed() => return,
+                        };
+                        match fetched {
+                            Ok(points) => {
+                                extras_failing = false;
+                                let fresh = new_extras(&t.station, points, last, clock.now());
+                                if let Some(newest) = fresh.last() {
+                                    extras_last.insert(t.station.clone(), newest.interval_end);
+                                    let env = EventEnvelope::new(
+                                        clock.now(),
+                                        EventSource::Live,
+                                        WeatherMachineEvent::KnmiExtras(
+                                            wm_core::event::KnmiExtrasEvent { readings: fresh },
+                                        ),
+                                    );
+                                    if events.send(env).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(wm_weather::KnmiError::Fetch(wm_net::FetchError::Status {
+                                status,
+                                ..
+                            })) if (400..500).contains(&status) && status != 429 => {
+                                // One parameter KNMI does not know refuses the
+                                // whole request: find it and read the others.
+                                let mut kept = Vec::new();
+                                let mut refused = Vec::new();
+                                for p in &params {
+                                    let one = [p.as_str()];
+                                    let r = tokio::select! {
+                                        r = client.fetch_series(&t.location, &one, now - lookback, now, wait, 1) => r,
+                                        _ = shutdown.changed() => return,
+                                    };
+                                    match r {
+                                        Err(wm_weather::KnmiError::Fetch(
+                                            wm_net::FetchError::Status { status, .. },
+                                        )) if (400..500).contains(&status) && status != 429 => {
+                                            refused.push(p.clone());
+                                        }
+                                        _ => kept.push(p.clone()),
+                                    }
+                                }
+                                tracing::warn!(station = %t.station, ?refused, "KNMI refused lab parameters");
+                                with_side(&side, |s| {
+                                    s.alert(
+                                        "warning",
+                                        format!(
+                                            "KNMI refused the lab's parameter(s) {} (HTTP {status}); the rules that read them stay idle, the others read {}",
+                                            refused.join(", "),
+                                            if kept.is_empty() { "nothing".to_owned() } else { kept.join(", ") }
+                                        ),
+                                    )
+                                });
+                                extras.insert(t.station.clone(), kept);
+                            }
+                            Err(e) => {
+                                tracing::warn!(station = %t.station, error = %e, "KNMI lab parameters unavailable");
+                                if !extras_failing {
+                                    extras_failing = true;
+                                    with_side(&side, |s| {
+                                        s.alert(
+                                            "warning",
+                                            format!(
+                                                "KNMI's other parameters unavailable ({e}); the lab's air rules (L27, L29, L32, L37, L42, L43) wait"
+                                            ),
+                                        )
+                                    });
+                                }
+                            }
                         }
                     }
                     for n in &t.neighbours {
@@ -2369,8 +2547,8 @@ mod tests {
 
     /// Whether KNMI publishes its readings on time, late or not at all, the
     /// loop's requests over a day — one a poll, plus one per lab neighbour
-    /// after each new reading — stay inside the shipped daily budget, with
-    /// room left for restarts.
+    /// and one for the lab's other parameters after each new reading — stay
+    /// inside the shipped daily budget, with room left for restarts.
     #[test]
     fn knmi_requests_stay_inside_the_daily_budget() {
         let cfg = crate::config::AppConfig::load(Some(
@@ -2380,7 +2558,9 @@ mod tests {
         .unwrap();
         let budget = cfg.file.providers.knmi.policy.daily_budget.unwrap();
         let poll = std::time::Duration::from_secs(cfg.file.knmi.poll_seconds);
-        let neighbours = u32::try_from(cfg.file.lab.neighbours.len()).unwrap();
+        // One request per neighbour and one for the lab's other parameters.
+        let neighbours = u32::try_from(cfg.file.lab.neighbours.len()).unwrap()
+            + u32::from(!cfg.file.lab.knmi_extra_parameters.is_empty());
         let t0: DateTime<Utc> = "2026-10-03T00:00:00Z".parse().unwrap();
         // Each reading is published `delay` after its interval's end (never
         // with None); returns the requests of a day and the mean wait from a

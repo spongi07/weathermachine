@@ -126,7 +126,9 @@ fn priority(e: &WeatherMachineEvent) -> u8 {
         WeatherMachineEvent::WeatherObservation(_)
         | WeatherMachineEvent::WeatherCorrection(_)
         | WeatherMachineEvent::ForecastUpdate(_)
-        | WeatherMachineEvent::NowcastUpdate(_) => 4,
+        | WeatherMachineEvent::NowcastUpdate(_)
+        | WeatherMachineEvent::KnmiExtras(_)
+        | WeatherMachineEvent::UpstreamReports(_) => 4,
         WeatherMachineEvent::Timer(_) => 5,
     }
 }

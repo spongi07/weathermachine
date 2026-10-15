@@ -4,6 +4,7 @@ use crate::ids::{ProviderId, StationId};
 use crate::units::TempC;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// METAR (routine) or SPECI (special, unscheduled) report.
@@ -175,4 +176,41 @@ impl TenMinuteObservation {
     pub fn delay_minutes(&self) -> f64 {
         (self.received_at - self.interval_end).num_seconds() as f64 / 60.0
     }
+}
+
+/// KNMI's other ten-minute parameters of a station — dew point, humidity,
+/// wind, gusts, pressure, sunshine — in the collection's units (°C, %, m/s,
+/// degrees, hPa, minutes), keyed by KNMI's parameter name (`td`, `rh`,
+/// `ff`, `fx`, `dd`, `pp`, `ss`). Predictive input of the strategy lab
+/// only: it never changes the observed high, the views or settlement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TenMinuteExtras {
+    pub station: StationId,
+    /// End of the ten-minute interval (UTC).
+    pub interval_end: DateTime<Utc>,
+    /// The parameters with a finite value.
+    pub values: BTreeMap<String, f64>,
+    /// When the bot received it.
+    pub received_at: DateTime<Utc>,
+}
+
+impl TenMinuteExtras {
+    pub fn get(&self, parameter: &str) -> Option<f64> {
+        self.values.get(parameter).copied()
+    }
+}
+
+/// A METAR (or SPECI) of an airport upstream of a market's station, which
+/// the strategy lab reads for the air that is on its way. Predictive input
+/// only: it never touches the market station's high, views or settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamReport {
+    /// The airport's ICAO code (`EBBR`).
+    pub station: StationId,
+    pub observed_at: DateTime<Utc>,
+    pub raw_text: String,
+    pub temperature: Option<TempC>,
+    pub dewpoint: Option<TempC>,
+    /// When the bot received it.
+    pub received_at: DateTime<Utc>,
 }

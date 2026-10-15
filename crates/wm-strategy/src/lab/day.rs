@@ -2,10 +2,10 @@
 //! buys at the ask (fill-and-kill), resting NO bids (good-till-date) and
 //! L3's sale of its YES at the bid.
 
-use super::{LabConfig, LabInputs, WxReport};
+use super::{LabConfig, LabInputs, LadderSample, UpstreamReadings, WxReport};
 use crate::ev::{break_even_probability, ev_per_share};
 use crate::peak::PeakFeatures;
-use crate::quoting::{next_routine_report, passive_bid};
+use crate::quoting::{next_routine_report, passive_bid, tick_of};
 use crate::strategy::{
     BucketEvaluation, Proposal, StrategyContext, StrategyOutput, common_high, holds_or_pending,
     max_data_age, size_for,
@@ -16,7 +16,7 @@ use wm_core::market::{MarketOutcome, OrderBook, OutcomeSide, Side, TakerTrade};
 use wm_core::time::{local_day_bounds, local_minute_of_day};
 use wm_core::trading::{IntentKind, TimeInForce};
 use wm_core::units::{Price, Rounding, Shares, Usd, round_shares_to_lot, shares_for_notional};
-use wm_core::weather::TenMinuteObservation;
+use wm_core::weather::{TenMinuteExtras, TenMinuteObservation};
 
 /// `HH:MM` of a local minute of the day.
 pub(crate) fn hm(minute: u16) -> String {
@@ -42,6 +42,50 @@ pub(crate) fn mean(v: &[f64]) -> f64 {
     } else {
         v.iter().sum::<f64>() / v.len() as f64
     }
+}
+
+/// The standard normal distribution function (Abramowitz and Stegun
+/// 7.1.26, error < 1.5e-7).
+pub(crate) fn phi(x: f64) -> f64 {
+    let z = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
+    let poly = t
+        * (0.254_829_592
+            + t * (-0.284_496_736
+                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    if x >= 0.0 {
+        0.5 * (1.0 + erf)
+    } else {
+        0.5 * (1.0 - erf)
+    }
+}
+
+/// The whole degree a bucket stands for in the ladder's mean: its value,
+/// the middle of a range, one degree beyond an open end.
+pub(crate) fn value_of(o: &MarketOutcome) -> f64 {
+    match (o.bucket.lower, o.bucket.upper) {
+        (Some(lo), Some(hi)) => f64::from(lo + hi) / 2.0,
+        (None, Some(hi)) => f64::from(hi) - 1.0,
+        (Some(lo), None) => f64::from(lo) + 1.0,
+        (None, None) => 0.0,
+    }
+}
+
+/// The mean and standard deviation (°C) of the distribution `prices`
+/// imply, normalised to one. `None` when they sum to nothing.
+pub(crate) fn implied(prices: &[(&MarketOutcome, f64)]) -> Option<(f64, f64)> {
+    let total: f64 = prices.iter().map(|(_, p)| p).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let mu = prices.iter().map(|(o, p)| value_of(o) * p).sum::<f64>() / total;
+    let var = prices
+        .iter()
+        .map(|(o, p)| (value_of(o) - mu).powi(2) * p)
+        .sum::<f64>()
+        / total;
+    Some((mu, var.sqrt()))
 }
 
 /// Whole shares for `notional` at `ask`, no more than the book offers at
@@ -105,6 +149,10 @@ pub(crate) struct Day<'c, 'a> {
     pub high: i32,
     /// The first view's features.
     pub f: &'c PeakFeatures,
+    /// The cost of one trade at its price ([`LabConfig::stake`]).
+    pub stake: Usd,
+    /// How far above the ask a taker buy's limit lies (L26–L65).
+    pub tolerance: Price,
 }
 
 impl<'c, 'a> Day<'c, 'a> {
@@ -113,6 +161,7 @@ impl<'c, 'a> Day<'c, 'a> {
         ctx: &'c StrategyContext<'a>,
         cfg: &'c LabConfig,
         id: &'c StrategyId,
+        stake: Usd,
     ) -> Option<Self> {
         let high = common_high(ctx.views).ok()?;
         let f = &ctx.views.first()?.assessment.features;
@@ -123,7 +172,23 @@ impl<'c, 'a> Day<'c, 'a> {
             lab: ctx.lab,
             high,
             f,
+            stake,
+            tolerance: Price::ZERO,
         })
+    }
+
+    /// This view with taker limits `tolerance` above the ask.
+    pub fn with_tolerance(&self, tolerance: Price) -> Self {
+        Self {
+            ctx: self.ctx,
+            cfg: self.cfg,
+            id: self.id,
+            lab: self.lab,
+            high: self.high,
+            f: self.f,
+            stake: self.stake,
+            tolerance,
+        }
     }
 
     pub fn now(&self) -> DateTime<Utc> {
@@ -199,6 +264,37 @@ impl<'c, 'a> Day<'c, 'a> {
         let mut v: Vec<&MarketOutcome> = self.ctx.market.outcomes.iter().collect();
         v.sort_by_key(|o| o.bucket.sort_key());
         v
+    }
+
+    /// Whether a bucket can still win (a new high never kills it).
+    pub fn alive(&self, o: &MarketOutcome) -> bool {
+        o.bucket.upper.is_none_or(|u| u >= self.high)
+    }
+
+    /// The buckets that can still win with their YES prices, coldest first
+    /// (a bucket without a fresh book is left out).
+    pub fn alive_prices(&self) -> Vec<(&'c MarketOutcome, f64)> {
+        self.ordered()
+            .into_iter()
+            .filter(|o| self.alive(o))
+            .filter_map(|o| self.yes_price(o).map(|p| (o, p)))
+            .collect()
+    }
+
+    /// The fresh YES book of a bucket.
+    pub fn yes_book(&self, o: &MarketOutcome) -> Option<&'c OrderBook> {
+        let books: &'c std::collections::HashMap<TokenId, OrderBook> = self.ctx.books;
+        books
+            .get(&o.yes_token)
+            .filter(|b| b.age_ms(self.now()) <= self.cfg.max_book_age_ms)
+    }
+
+    /// The bucket `steps` places above `o` (below when negative).
+    pub fn neighbour(&self, o: &MarketOutcome, steps: i32) -> Option<&'c MarketOutcome> {
+        let v = self.ordered();
+        let i = v.iter().position(|x| x.condition_id == o.condition_id)?;
+        let j = i64::try_from(i).ok()? + i64::from(steps);
+        usize::try_from(j).ok().and_then(|j| v.get(j).copied())
     }
 
     /// A YES price of a bucket from its fresh book: the midpoint, else the
@@ -334,6 +430,139 @@ impl<'c, 'a> Day<'c, 'a> {
         }
     }
 
+    // -- KNMI's other parameters ------------------------------------------
+
+    /// The station's other readings up to now, oldest first.
+    pub fn extras(&self) -> &'a [TenMinuteExtras] {
+        let k = self.lab.knmi_extra;
+        &k[..k.partition_point(|r| r.interval_end <= self.now())]
+    }
+
+    /// `parameter`'s values whose intervals end in `(end − minutes, end]`,
+    /// oldest first.
+    pub fn extra_window(
+        &self,
+        parameter: &str,
+        end: DateTime<Utc>,
+        minutes: i64,
+    ) -> Vec<(DateTime<Utc>, f64)> {
+        self.extras()
+            .iter()
+            .filter(|r| r.interval_end > end - Duration::minutes(minutes) && r.interval_end <= end)
+            .filter_map(|r| r.get(parameter).map(|v| (r.interval_end, v)))
+            .collect()
+    }
+
+    /// `parameter`'s value in the interval ending at `t`.
+    pub fn extra_at(&self, parameter: &str, t: DateTime<Utc>) -> Option<f64> {
+        let rs = self.extras();
+        rs.binary_search_by_key(&t, |r| r.interval_end)
+            .ok()
+            .and_then(|i| rs[i].get(parameter))
+    }
+
+    /// `parameter`'s latest value, if fresh enough to act on.
+    pub fn extra_latest(&self, parameter: &str) -> Result<(DateTime<Utc>, f64), String> {
+        let Some((t, v)) = self
+            .extras()
+            .iter()
+            .rev()
+            .find_map(|r| r.get(parameter).map(|v| (r.interval_end, v)))
+        else {
+            return Err(format!(
+                "no KNMI '{parameter}' reading ([lab] knmi_extra_parameters)"
+            ));
+        };
+        let age = self.now() - t;
+        if age > Duration::minutes(self.cfg.max_reading_age_minutes) {
+            return Err(format!(
+                "latest KNMI '{parameter}' reading {} min old > {}",
+                age.num_minutes(),
+                self.cfg.max_reading_age_minutes
+            ));
+        }
+        Ok((t, v))
+    }
+
+    // -- The price ladder's history ----------------------------------------
+
+    /// Today's ladder samples up to now, oldest first.
+    pub fn ladder(&self) -> &'a [LadderSample] {
+        let l = self.lab.ladder;
+        &l[..l.partition_point(|x| x.at <= self.now())]
+    }
+
+    /// The latest sample at or before `t`.
+    pub fn sample_at(&self, t: DateTime<Utc>) -> Option<&'a LadderSample> {
+        let l = self.ladder();
+        l[..l.partition_point(|x| x.at <= t)].last()
+    }
+
+    /// Samples taken in `[from, to]`, oldest first.
+    pub fn samples_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> &'a [LadderSample] {
+        let l = self.ladder();
+        let lo = l.partition_point(|x| x.at < from);
+        let hi = l.partition_point(|x| x.at <= to);
+        &l[lo..hi.max(lo)]
+    }
+
+    /// A bucket's YES price at the latest sample at or before `t`, when
+    /// that sample is at most 3 minutes older than `t`.
+    pub fn mid_at(&self, o: &MarketOutcome, t: DateTime<Utc>) -> Option<f64> {
+        let s = self
+            .sample_at(t)
+            .filter(|s| t - s.at <= Duration::minutes(3))?;
+        s.quote(&o.yes_token)?.mid()
+    }
+
+    /// The ladder's YES prices of the buckets that can still win at the
+    /// sample nearest before `t` (≤ 3 minutes older).
+    pub fn alive_prices_at(&self, t: DateTime<Utc>) -> Vec<(&'c MarketOutcome, f64)> {
+        self.ordered()
+            .into_iter()
+            .filter(|o| self.alive(o))
+            .filter_map(|o| self.mid_at(o, t).map(|p| (o, p)))
+            .collect()
+    }
+
+    // -- The report schedule ----------------------------------------------
+
+    /// Minutes until the next routine report (`None` without a schedule).
+    pub fn minutes_to_report(&self) -> Option<i64> {
+        next_routine_report(self.now(), self.ctx.routine_minutes)
+            .map(|t| (t - self.now()).num_minutes())
+    }
+
+    /// Why now is too near a routine report for a rule that wants a quiet
+    /// book: `before` minutes ahead of one, or until `after` minutes past
+    /// the last one.
+    pub fn near_report(&self, before: i64, after: i64) -> Option<String> {
+        let now = self.now();
+        let next = next_routine_report(now, self.ctx.routine_minutes)?;
+        if next - now <= Duration::minutes(before) {
+            return Some(format!(
+                "{} min before the {} UTC report (quiet book wanted)",
+                (next - now).num_minutes(),
+                next.format("%H:%M")
+            ));
+        }
+        let prev = next_routine_report(now - Duration::minutes(31), self.ctx.routine_minutes)
+            .filter(|t| *t <= now)?;
+        (now - prev < Duration::minutes(after)).then(|| {
+            format!(
+                "{} min after the {} UTC report (quiet book wanted)",
+                (now - prev).num_minutes(),
+                prev.format("%H:%M")
+            )
+        })
+    }
+
+    // -- Upstream airports --------------------------------------------------
+
+    pub fn upstream(&self) -> &'a [UpstreamReadings<'a>] {
+        self.lab.upstream
+    }
+
     // -- METAR ------------------------------------------------------------
 
     /// Today's reports up to now, oldest first.
@@ -438,6 +667,14 @@ impl<'c, 'a> Day<'c, 'a> {
         });
     }
 
+    /// An evaluation shown on the high's bucket when a rule has no bucket
+    /// to price.
+    pub fn idle(&self, why: String, out: &mut StrategyOutput) {
+        if let Some(h) = self.outcome_of(self.high) {
+            self.note(h, OutcomeSide::Yes, vec![why], out);
+        }
+    }
+
     fn common_blockers(
         &self,
         outcome: &MarketOutcome,
@@ -455,8 +692,40 @@ impl<'c, 'a> Day<'c, 'a> {
         }
     }
 
-    /// A taker buy at the ask, fill-and-kill.
-    pub fn taker(&self, b: Buy<'_>, mut blockers: Vec<String>, out: &mut StrategyOutput) {
+    /// A taker buy at the ask (plus [`Self::tolerance`]), fill-and-kill,
+    /// sized to the stake.
+    pub fn taker(&self, b: Buy<'_>, blockers: Vec<String>, out: &mut StrategyOutput) {
+        self.taker_with(b, None, blockers, out);
+    }
+
+    /// A taker buy of exactly `shares` (L39's pair).
+    pub fn taker_shares(
+        &self,
+        b: Buy<'_>,
+        shares: Shares,
+        blockers: Vec<String>,
+        out: &mut StrategyOutput,
+    ) {
+        self.taker_with(b, Some(shares), blockers, out);
+    }
+
+    /// The limit of a taker buy that saw `ask`: [`Self::tolerance`] above
+    /// it, below one.
+    pub fn limit_for(&self, ask: Price, book: &OrderBook) -> Price {
+        if self.tolerance.micros() == 0 {
+            return ask;
+        }
+        let cap = Price::ONE.saturating_sub(tick_of(book));
+        ask.saturating_add(self.tolerance).min(cap).max(ask)
+    }
+
+    fn taker_with(
+        &self,
+        b: Buy<'_>,
+        fixed: Option<Shares>,
+        mut blockers: Vec<String>,
+        out: &mut StrategyOutput,
+    ) {
         let ctx = self.ctx;
         let token = Self::token(b.outcome, b.side);
         let side = b.side.as_str();
@@ -482,8 +751,11 @@ impl<'c, 'a> Day<'c, 'a> {
         }
         let fees = ctx.market.fees;
         let slip = self.cfg.slippage_allowance;
-        let ev = match (b.p_win, ask) {
-            (Some((p, _)), Some(a)) => Some(ev_per_share(p, a, &fees, slip)),
+        // The worst price the order may pay: its expected profit is counted
+        // there.
+        let limit = book.zip(ask).map(|(bk, a)| self.limit_for(a, bk));
+        let ev = match (b.p_win, limit) {
+            (Some((p, _)), Some(l)) => Some(ev_per_share(p, l, &fees, slip)),
             _ => None,
         };
         if let (Some((p, min)), Some(e)) = (b.p_win, ev)
@@ -491,14 +763,18 @@ impl<'c, 'a> Day<'c, 'a> {
         {
             blockers.push(format!("edge {e:.4} < {min:.4} at p {p:.2}"));
         }
-        let shares = book
-            .zip(ask)
-            .and_then(|(bk, a)| taker_size(bk, a, self.cfg.notional, b.outcome.min_order_size));
+        let shares = book.zip(limit).and_then(|(bk, l)| match fixed {
+            None => taker_size(bk, l, self.stake, b.outcome.min_order_size),
+            Some(sh) => {
+                let (depth, _) = bk.ask_depth_up_to(l);
+                (sh.micros() > 0 && sh >= b.outcome.min_order_size && depth >= sh).then_some(sh)
+            }
+        });
         if ask.is_some() && shares.is_none() {
             blockers.push("size below the market minimum (stake or depth at the ask)".into());
         }
         self.common_blockers(b.outcome, token, &mut blockers);
-        let be = ask.map(|a| break_even_probability(a, &fees, slip));
+        let be = limit.map(|l| break_even_probability(l, &fees, slip));
         let signal = blockers.is_empty();
         out.evaluations.push(BucketEvaluation {
             strategy: self.id.clone(),
@@ -516,16 +792,21 @@ impl<'c, 'a> Day<'c, 'a> {
             market_p: None,
             maker_bid: None,
         });
-        if signal && let (Some(a), Some(sh)) = (ask, shares) {
+        if signal && let (Some(a), Some(l), Some(sh)) = (ask, limit, shares) {
             let mut rationale = b.rationale;
+            let at = if l == a {
+                format!("at {a}")
+            } else {
+                format!("at {a} (limit {l}: the book may move on the order's way)")
+            };
             rationale.push(match b.p_win {
                 Some((p, _)) => format!(
-                    "{side} {} at {a}: p {p:.2} (the rule's) vs break-even {:.3}",
+                    "{side} {} {at}: p {p:.2} (the rule's) vs break-even {:.3}",
                     b.outcome.label,
                     be.unwrap_or(0.0)
                 ),
                 None => format!(
-                    "{side} {} at {a}, inside [{:.2}, {:.2}] (no probability claimed)",
+                    "{side} {} {at}, inside [{:.2}, {:.2}] (no probability claimed)",
                     b.outcome.label, b.band.0, b.band.1
                 ),
             });
@@ -539,12 +820,12 @@ impl<'c, 'a> Day<'c, 'a> {
                 side: Side::Buy,
                 kind: IntentKind::Open,
                 weather_dependent: true,
-                limit_price: a,
+                limit_price: l,
                 shares: sh,
                 tif: TimeInForce::Fak,
-                p_win: b.p_win.map_or(a.as_f64(), |x| x.0),
+                p_win: b.p_win.map_or(l.as_f64(), |x| x.0),
                 ev_per_share: ev.unwrap_or(0.0),
-                break_even: be.unwrap_or(a.as_f64()),
+                break_even: be.unwrap_or(l.as_f64()),
                 research_only: false,
                 rationale,
             });
@@ -616,7 +897,7 @@ impl<'c, 'a> Day<'c, 'a> {
         if q.expires_at.is_none() && blockers.is_empty() {
             blockers.push("no time to rest before the next report".into());
         }
-        let shares = price.and_then(|p| size_for(self.cfg.notional, p, q.outcome.min_order_size));
+        let shares = price.and_then(|p| size_for(self.stake, p, q.outcome.min_order_size));
         if price.is_some() && shares.is_none() {
             blockers.push("size below the market minimum".into());
         }

@@ -122,6 +122,7 @@ intervals, never on win rate.
 | K | KNMI nowcast (§27i) | **on**, idle without `WM_KNMI_API_KEY` | replay 2 Oct: every trade won (4 of 4, +$81.10); out of sample too; no paper trade to 14 Oct (about one a month in the replay) |
 | U | unwind (§28) | off (14 Oct) | the exit engine; everything that runs holds to settlement (G and K exempt, the lab and G's live twin on books of their own), so it had nothing to manage |
 | L1–L25 | strategy lab (§27j) | **paper**, each on its own book (KNMI rules idle without `WM_KNMI_API_KEY`); six run: L4, L7, L18, L20, L24, L25 | built on 2 Oct on request, so their live record grows beside the replay's; none trades money. Off: seven refuted by the replay or never finding a bid to join (8 Oct), L1 (9 Oct), ten that lost live or made no trade in nine days (12 Oct), L3 with F (14 Oct) |
+| L26–L65 | strategy lab (§27j) | **paper**, all forty, each on its own book: aggressive $15, balanced $20, defensive $25 | built on 14 Oct on request from how the market works (upstream air, KNMI's boundary layer, the price ladder, the tape, the market's reactions); a signal holds a minute before it trades, a taker pays up to a cent over the ask; not replayed yet |
 
 The review of 3 October 2026 weighs every one of them against the replays,
 the first paper days and the code, with recommendations for the operator:
@@ -832,11 +833,13 @@ and its dashboard page mark them ("KNMI reading before the report").
   order must fit), the shipped values, `research market` with a KNMI mock
   (download, weekly cache, report section).
 
-## 27j. STRATEGY LAB — L1–L25 in paper
+## 27j. STRATEGY LAB — L1–L65 in paper
 
-**PURPOSE.** Let the strategy lab's 25 families
+**PURPOSE.** Let the strategy lab's 65 families
 ([reasoning and replay](../research/strategy-lab.md)) build a live record
-beside the replay's — paper only, without touching A–K.
+— L1–L25 beside the replay's, L26–L65 (14 October 2026,
+[§8 of the lab](../research/strategy-lab.md#8-l26l65-forty-families-from-how-the-market-works-14-october-2026))
+from scratch — paper only, without touching A–K.
 
 **RULES** (`wm_strategy::lab`). `LabStrategy::new(family, cfg, f)` for
 families 1–25 (`IDS`: `L1_shielded_maker` … `L25_radiation`, letters `L1`
@@ -860,15 +863,38 @@ since 12 October L2, L5, L6, L8, L10, L11, L13, L14, L15 and L16
 ([live review of 14 October](../research/live-review-2026-10-14.md)): six
 families run, L4, L7, L18, L20, L24 and L25.
 
+**L26–L65** (`REPLAYED = 25`; above it `evaluate_new`) live in
+`upstream.rs` (L26, L31, L36), `air.rs` (L27, L29, L32, L37, L42, L43),
+`ladder.rs` (L28, L33, L34, L39, L40, L45, L48, L54, L58–L60, L64),
+`tape.rs` (L38, L44, L47, L63), `reaction.rs` (L35, L46, L50–L53, L55–L57,
+L61, L62) and `memory.rs` (L30, L41, L49, L65); `summaries.rs` says what
+each does. Each has a `Profile` (`profile(family)`): its stake is
+`aggressive_notional` ($15), `balanced_notional` ($20) or
+`defensive_notional` ($25), `LabConfig::stake`. Two rules keep them off
+speed races: `LabStrategy::confirm` holds an opening proposal until its
+token's signal has held `confirm_seconds` (60; a gap of up to
+`CONFIRM_GAP`, 15 s, keeps the clock; exits are not held), and their taker
+buys carry a limit `taker_tolerance` (0.01) above the ask they saw
+(`Day::limit_for`), the expected profit, break-even and size counted at
+that limit. L39 buys two legs of equal shares (`Day::taker_shares`), both
+or neither; L59 sells its YES at the bid (`Day::sell_yes`) on its own
+clock (`LabStrategy::entered`, reset by a restart). A family that already
+traded today's market opens nothing more that day (`one_a_day`), except
+the makers and L39 (`MANY_A_DAY`).
+
 **INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
-readings of the last 36 hours, the neighbours' readings with their
-bearings, today's METARs with their weather groups, the day-1 forecast
-(also when the model does not use it) and yesterday's error, today's taker
-trades, the takers' scores and the location's position. The engine keeps
-them (`LabState`) from `NowcastUpdate` (station and neighbours),
-`WeatherObservation`, `ForecastUpdate`, `TakerTrades` (each trade once, by
-id) and `WalletScores` events (where they come from:
-[ingestion](04-ingestion.md), `runtime/lab.rs`). A–K never read them.
+readings of the last 48 hours, the neighbours' readings with their
+bearings, today's and yesterday's METARs with their weather groups, the
+day-1 forecast (also when the model does not use it) and yesterday's
+error, today's taker trades, the takers' scores, the location's position,
+KNMI's other parameters (`knmi_extra`), the upstream airports' METARs with
+bearing and distance (`upstream`) and today's price ladder (`ladder`, a
+`LadderSample` of the fresh YES books at most once a minute, three hours).
+The engine keeps them (`LabState`) from `NowcastUpdate` (station and
+neighbours), `WeatherObservation`, `ForecastUpdate`, `TakerTrades` (each
+trade once, by id), `WalletScores`, `KnmiExtras` and `UpstreamReports`
+events (where they come from: [ingestion](04-ingestion.md),
+`runtime/lab.rs`) and samples the ladder itself. A–K never read them.
 
 **OWN BOOKS.** The engine keeps a `PaperBook` per lab strategy beside the
 main one (A–K and the unwind engine): its positions, the strategy behind
@@ -897,7 +923,15 @@ data age, prices) gate every book.
 * `wm-backtest/tests/lab_session.rs`: K, L2 and L7 buy the same NO in the
   shared session loop, each on its own book, and settle apart; a restart
   gives each fill back to its own book, a switched-off lab strategy's
-  too; yesterday's forecast error and each taker trade counted once.
+  too; yesterday's forecast error and each taker trade counted once; a
+  new family (L28) holds its signal a minute, its order fills 350 ms later
+  a tick above the ask on its own book; KNMI's other parameters, upstream
+  reports and the ladder kept and shown.
+* `wm-strategy/tests/lab_mechanics.rs`: every family of L26–L65 trades in a
+  scenario built for it, its variant differs, the condition that breaks it
+  blocks it; the minute's hold and its 15-second gap; the limit a cent over
+  the ask and the stake by profile; a bare day: only the book rules may
+  trade.
 * `wm-app`: `[strategies.lab]` and `[lab]` validation
   (`lab_settings_are_validated`: unknown codes, stakes the books would
   refuse, L3's stake against F's shares, timings, neighbours), the shipped

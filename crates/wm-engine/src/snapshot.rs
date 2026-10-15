@@ -79,7 +79,7 @@ pub struct NeighbourSnapshot {
 /// The strategy lab's inputs at a location, for the dashboard.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LabInputsSnapshot {
-    /// KNMI readings of the station kept (the last 36 hours).
+    /// KNMI readings of the station kept (the last 48 hours).
     pub knmi_readings: usize,
     /// The latest reading's global radiation (W/m²) and its share of the
     /// clear sky.
@@ -99,6 +99,29 @@ pub struct LabInputsSnapshot {
     pub wallet_days: Option<u32>,
     pub wallets_skilled: usize,
     pub wallets_losing: usize,
+    /// KNMI's other parameters of the latest interval read.
+    #[serde(default)]
+    pub knmi_extra: Option<(DateTime<Utc>, BTreeMap<String, f64>)>,
+    /// The upstream airports with their latest report.
+    #[serde(default)]
+    pub upstream: Vec<UpstreamSnapshot>,
+    /// Ladder samples kept of today's market (one a minute, 3 hours).
+    #[serde(default)]
+    pub ladder_samples: usize,
+    /// Yesterday's METARs kept (L30, L41).
+    #[serde(default)]
+    pub yesterday_reports: usize,
+}
+
+/// An upstream airport and its latest report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpstreamSnapshot {
+    pub icao: String,
+    pub bearing_deg: f64,
+    pub distance_km: f64,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub temp_tenths: Option<i32>,
+    pub weather: Option<String>,
 }
 
 /// One lab strategy's own paper book.

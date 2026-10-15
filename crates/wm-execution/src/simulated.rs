@@ -2,8 +2,10 @@
 //!
 //! Orders become effective `latency` after submission and execute against the
 //! book *as it is then* (liquidity can vanish in between). Marketable parts
-//! walk the book; resting parts fill only from trades printing at/through
-//! their price after the queue ahead (conservative). No mid-price fills.
+//! walk the book, paying `slippage_ticks` above each level they take (never
+//! above their limit); resting parts fill only from trades printing
+//! at/through their price after the queue ahead (conservative). No
+//! mid-price fills.
 
 use crate::fill_model::{passive_fill_from_trade, simulate_taker};
 use chrono::{DateTime, Duration, Utc};
@@ -23,6 +25,10 @@ pub struct SimConfig {
     pub latency_ms: i64,
     /// Pessimism: shift the opposite side of the book this many ticks against us.
     pub adverse_ticks: u32,
+    /// A taker pays this many ticks worse than each level it takes, never
+    /// beyond its limit: the price moves while the order is on its way.
+    #[serde(default)]
+    pub slippage_ticks: u32,
 }
 
 impl Default for SimConfig {
@@ -30,6 +36,7 @@ impl Default for SimConfig {
         Self {
             latency_ms: 250,
             adverse_ticks: 0,
+            slippage_ticks: 0,
         }
     }
 }
@@ -81,6 +88,29 @@ fn shifted(book: &OrderBook, ticks: u32) -> OrderBook {
     }
     for l in &mut b.bids {
         l.price = l.price.saturating_sub(delta);
+    }
+    b
+}
+
+/// The side a taker of `side` takes, `ticks` worse at each level up to
+/// `limit` (a level beyond the limit stays beyond it).
+fn slipped(book: &OrderBook, ticks: u32, side: Side, limit: Price) -> OrderBook {
+    if ticks == 0 {
+        return book.clone();
+    }
+    let delta = Price::saturating_from_micros(book.tick_size.micros().saturating_mul(ticks));
+    let mut b = book.clone();
+    match side {
+        Side::Buy => {
+            for l in b.asks.iter_mut().filter(|l| l.price <= limit) {
+                l.price = l.price.saturating_add(delta).min(limit);
+            }
+        }
+        Side::Sell => {
+            for l in b.bids.iter_mut().filter(|l| l.price >= limit) {
+                l.price = l.price.saturating_sub(delta).max(limit);
+            }
+        }
     }
     b
 }
@@ -219,7 +249,8 @@ impl SimulatedExchange {
                 continue;
             };
             let fok = matches!(p.tif, TimeInForce::Fok);
-            let t = simulate_taker(&book, p.side, p.limit, p.shares, &p.fees, fok);
+            let taken = slipped(&book, self.cfg.slippage_ticks, p.side, p.limit);
+            let t = simulate_taker(&taken, p.side, p.limit, p.shares, &p.fees, fok);
             let mut fill = None;
             if t.filled.micros() > 0 {
                 r.filled = t.filled;

@@ -37,7 +37,7 @@ pub(crate) fn forecast_peak(fc: &ForecastDay) -> Option<DateTime<Utc>> {
 }
 
 /// The forecast (usable now) or why not, shown on the high's bucket.
-fn usable<'a>(day: &Day<'_, 'a>, out: &mut StrategyOutput) -> Option<&'a ForecastDay> {
+pub(crate) fn usable<'a>(day: &Day<'_, 'a>, out: &mut StrategyOutput) -> Option<&'a ForecastDay> {
     let why = match day.lab.forecast {
         None => match day.lab.forecast_ready {
             // Before the knowledge rule's ready time: yesterday's fetch

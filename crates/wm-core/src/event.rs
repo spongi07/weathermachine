@@ -10,7 +10,9 @@ use crate::ids::{LocationId, ProviderId};
 use crate::market::{DailyTemperatureMarket, OrderBook, TakerTrade, TradePrint};
 use crate::trading::{Fill, OrderUpdate};
 use crate::units::TempC;
-use crate::weather::{DedupClass, Observation, TenMinuteObservation};
+use crate::weather::{
+    DedupClass, Observation, TenMinuteExtras, TenMinuteObservation, UpstreamReport,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +79,10 @@ pub enum WeatherMachineEvent {
     /// Takers' records on recent settled market days (the strategy lab's
     /// L19 and L20).
     WalletScores(WalletScoresEvent),
+    /// KNMI's other ten-minute parameters (the strategy lab's air rules).
+    KnmiExtras(KnmiExtrasEvent),
+    /// METARs of airports upstream (the strategy lab's upstream rules).
+    UpstreamReports(UpstreamReportsEvent),
 }
 
 impl WeatherMachineEvent {
@@ -96,6 +102,8 @@ impl WeatherMachineEvent {
             WeatherMachineEvent::MarketStreamHeartbeat(_) => "market_stream_heartbeat",
             WeatherMachineEvent::TakerTrades(_) => "taker_trades",
             WeatherMachineEvent::WalletScores(_) => "wallet_scores",
+            WeatherMachineEvent::KnmiExtras(_) => "knmi_extras",
+            WeatherMachineEvent::UpstreamReports(_) => "upstream_reports",
         }
     }
 }
@@ -232,4 +240,18 @@ pub struct ProviderHealthEvent {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum OperatorCommand {
     KillSwitch { engaged: bool, reason: String },
+}
+
+/// New readings of KNMI's other ten-minute parameters, oldest first (a later
+/// copy of an interval replaces the earlier one).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnmiExtrasEvent {
+    pub readings: Vec<TenMinuteExtras>,
+}
+
+/// New METARs of upstream airports, oldest first (a later copy of a report
+/// replaces the earlier one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamReportsEvent {
+    pub reports: Vec<UpstreamReport>,
 }

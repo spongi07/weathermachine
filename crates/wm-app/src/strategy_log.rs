@@ -261,6 +261,38 @@ fn lab_book(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
                 )
             )
         );
+        let _ = writeln!(
+            s,
+            "- KNMI's other parameters: {}; upstream airports: {}; {} ladder sample(s) today, {} METAR(s) yesterday.",
+            if i.knmi_extra.is_empty() {
+                "none read".to_owned()
+            } else {
+                i.knmi_extra
+                    .iter()
+                    .map(|(k, v)| format!("{k} {v:.1}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            if i.upstream.is_empty() {
+                "none".to_owned()
+            } else {
+                i.upstream
+                    .iter()
+                    .map(|u| {
+                        format!(
+                            "{} ({:.0}°, {:.0} km) {} °C",
+                            u.icao,
+                            u.bearing_deg,
+                            u.distance_km,
+                            opt(u.temp_c, 0)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            i.ladder_samples,
+            i.yesterday_reports
+        );
     }
     s.push('\n');
 }

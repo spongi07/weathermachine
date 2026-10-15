@@ -228,6 +228,10 @@ impl World {
             takers: &self.takers,
             wallets: self.wallets.as_ref(),
             position: self.position,
+            knmi_extra: &[],
+            upstream: &[],
+            ladder: &[],
+            yesterday_reports: &[],
         };
         let ctx = StrategyContext {
             now: self.now,

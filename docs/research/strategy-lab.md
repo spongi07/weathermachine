@@ -1,4 +1,8 @@
-# Strategy lab: 25 new strategies (October 2026)
+# Strategy lab: 65 strategies in paper (October 2026)
+
+L1–L25 (2 October 2026, §1–§7) are replayed at traded prices and run in
+paper; L26–L65 (14 October 2026, §8) are forty more from how this market
+works, run in paper only.
 
 *Question (2 October 2026).* Invent 25 good strategies that cannot be found
 on the internet: new combinations, with the internet as a source of
@@ -455,7 +459,7 @@ uses, so it takes a while once; every later morning adds a day.
 
 **Reading the results.**
 
-* The dashboard's panel *Strategy lab · paper · L1–L25*: each running
+* The dashboard's panel *Strategy lab · paper · L1–L65*: each running
   family's status now (its signal or its first blocker), its approvals,
   rejections, orders and fills this run, and its own book's open positions
   and realized P&L; above it, per location, what the lab reads (KNMI's
@@ -477,3 +481,151 @@ to it. One city, correlated days, and 25 rules on the same days are 25
 chances to look good by luck: a family's paper record counts only on days
 after its rule was fixed, and only together with the replay (§4).
 
+
+## 8. L26–L65: forty families from how the market works (14 October 2026)
+
+*Question (14 October 2026).* The lab as it ran was not working and lost:
+think of strategies that do not exist yet — combinations nobody tried,
+aggressive, defensive and balanced — with no signal reused, at least 25,
+then ten more "ways we have not considered", then five more; paper trade
+them all in the lab. Midway: rely less on the internet and reason about how
+the market works; take the bot's latency into account (250 ms to Polymarket
+and 100 ms from decision to order on the server) so that no strategy
+depends on being fast; and count slippage.
+
+**Why not more forecasts.** The public evidence is one-sided: bots that
+trade a public forecast against these markets lose (the post-mortems we
+read before: about −14 % a trade over 1,905 trades for one, adverse
+selection for another), because the market already prices every public
+model within minutes. The eight forecast-model ideas first drafted for this
+batch (more models, ensembles, 850 hPa, rain nowcasts, cloud busts, sea
+temperature, day-ahead) were dropped for that reason. What is left is what
+the market cannot price from a website: air that is still on its way, the
+boundary layer at Schiphol before the thermometer moves, the market's own
+inconsistencies, who trades and when, and how traders react — or fail to.
+
+### 8.1 How they trade: no race, no free fills
+
+* **The bot is slow by design.** It learns a METAR about 150 s after its
+  observation, while the market reprices about 39 s after it, and an order
+  takes 350 ms from decision to matching. So every family of L26–L65 waits
+  until its signal has held for a minute (`confirm_seconds = 60`; a gap of
+  up to 15 s, a book refreshing level by level, keeps the clock). A signal
+  that lives less than a minute was never ours to win. The families that
+  read a report wait minutes after it (L35: 3–15, L61: 3–20) and check that
+  the market had time to react and did not.
+* **Slippage.** A taker's limit lies a cent above the ask it saw
+  (`taker_tolerance = 0.01`), and its expected profit and break-even are
+  counted at that limit, with the taker fee and the slippage allowance. In
+  paper (`[paper]`, every book) an order meets the book as it is 350 ms
+  later and a taker pays a tick above each level it takes, never above its
+  limit (`slippage_ticks = 1`); a resting order fills only from trades
+  through its price after the queue ahead.
+* **One position a day.** A taker family opens one position a day in a
+  market, as the replayed rules do; the makers (L38, L44, L47, L60), whose
+  quotes expire before each report, and L39's pair may open again; L59
+  makes its one round trip.
+* **Stakes by profile.** Aggressive families (cheap YES on a rise) stake
+  $15, balanced ones $20, defensive ones (NO of what the weather or the
+  market's own structure rules out) $25 — each on a paper book of its own
+  with the lab's limits ($25 an order, $120 open, $100 of loss a day).
+
+### 8.2 New inputs
+
+| input | source | read by |
+|---|---|---|
+| METARs of twelve airports 60–300 km around Schiphol (`[[lab.upstream]]`), three hours back | one AWC request at :10 and :40, away from Schiphol's report windows | L26, L31, L36 |
+| KNMI's dew point, humidity, wind, gust, direction, pressure and sunshine at Schiphol (`[lab].knmi_extra_parameters`) | one KNMI request after each new reading (four hours at start); a name KNMI refuses is dropped with one alert | L27, L29, L32, L37, L42, L43 |
+| the price ladder: today's YES books, a sample a minute, three hours | the engine, from the live books | L33, L34, L35, L50–L52, L57, L63, L64 |
+| yesterday's METARs (the engine keeps 48 hours) | the reports | L30, L41 |
+| the book itself (shape, depth, gaps, sums) | the live books | L28, L39, L40, L45, L48, L54, L58–L60 |
+
+### 8.3 The families
+
+Each reads a signal no other family reads. Every rule waits a minute on
+its signal and is paper only; the variant is the second rule a family can
+run (`variants = ["L26"]`).
+
+**Aggressive ($15): cheap YES on what the market has not seen coming.**
+
+| | family | signal | trade | variant |
+|---|---|---|---|---|
+| L26 | warm air upstream | 08:00–14:00, METAR wind ≥ 8 kt; an airport within 35° of it, 60–300 km away, ≥ 2.5 °C warmer than Schiphol and at least the rounding edge, its air (1.5 × the surface wind) due before 16:00 | YES next degree 0.05–0.35 | ≥ 3.5 °C |
+| L27 | mixing surge | 09:00–13:00, KNMI dew point down ≥ 1.5 °C in an hour while the temperature rose ≥ 1 °C: thermals mix dry warm air down | YES above the favourite 0.04–0.30 | ≥ 2.5 °C |
+| L28 | ladder dip | 00:00–16:00, a live bucket ≥ 0.05 under both neighbours (each ≥ 0.12): a day's maximum has one peak | YES of the dip 0.03–0.30 | dip 0.08, sides 0.20 |
+| L29 | wind slack | 11:00–15:00, KNMI wind ≤ 3.5 m/s and ≤ 0.6 × an hour before, sunny in two of three readings | YES next degree 0.05–0.35 | ≤ 2.5 m/s, ≤ half |
+| L30 | yesterday's anchor | 08:00–11:00, the favourite holds yesterday's high while the forecast lies ≥ 1.5 °C away | YES forecast's bucket 0.05–0.35 | ≥ 2.5 °C |
+| L31 | upwind clearing | 09:00–14:00, Schiphol under ≤ 2500 ft; an airport 60–200 km upwind clear twice, its air due within 3 h and by 16:00 | YES next degree 0.05–0.30 | within 2 h |
+| L32 | gust onset | 10:00–13:30, gusts ≥ 4 m/s over the mean wind in three readings after ≤ 2 an hour before | YES next degree 0.04–0.30 | ≥ 5 m/s |
+| L33 | whale bid | 08:00–18:00, a best YES bid ≥ $250 and ≥ 4 × the largest of the 2–10 minutes before | YES ≤ the wall + 0.03 (0.05–0.45) | $500, 6 × |
+| L34 | stale ask | 10:00–17:00, the next degree's ask unchanged for 55 minutes while KNMI rose ≥ 1 °C | YES at ≤ 0.40 | ≥ 1.5 °C |
+| L35 | post-high drift | 3–15 minutes after a new high, the next degree up ≤ 0.05 since while KNMI still rises | YES next degree 0.05–0.35 | ≤ 0.02 |
+| L61 | SPECI pulse | 09:00–16:00, a special report (off the routine minutes) 3–20 minutes old opening the sky or ending the rain, the market not moved | YES next degree 0.05–0.35 | a worsening → NO next 0.55–0.92 |
+| L64 | sellers withdraw | 09:00–18:00 away from reports, the next degree's offered shares down ≥ 60 % in 4–7 minutes, the price not moved | YES next degree 0.05–0.40 | ≥ 75 % |
+
+**Defensive ($25): NO of what the weather or the market's own structure
+rules out.**
+
+| | family | signal | trade | variant |
+|---|---|---|---|---|
+| L36 | front ETA | 08:00–14:00, an airport upwind saw a front pass in three hours (≥ 2 °C down in ≤ 70 min with a veer or rising pressure), due before the median peak | NO next degree 0.60–0.95 (p 0.92) | ≥ 3 °C |
+| L37 | pressure fall | 10:00–16:00, KNMI pressure down ≥ 2 hPa in three hours, ≥ 0.8 °C under the edge | NO next degree 0.55–0.92 (p 0.90) | ≥ 3 hPa |
+| L38 | calm-tape tails | 09:00–21:00, ≤ 1500 shares in 30 min, two-sided, no trade ≥ 200 in 15 | NO bids two and three above the favourite (YES 0.02–0.12) | three and four |
+| L39 | pair lock | from the 75 % peak time to 22:00, everything above the next degree ≤ 0.015 | YES of the high's bucket and the next degree, same shares, ≤ 0.99 a pair at the limits — both or neither | ≤ 0.98 |
+| L40 | tail order | after the median peak, the bucket two above priced ≥ 0.02 over the next degree | its NO 0.85–0.99 (p 0.985) | ≥ 0.01 |
+| L41 | wet ground | 08:00–14:00, ≥ 4 of yesterday's METARs with rain, the forecast ≥ 1 °C above yesterday's high | NO a degree above the forecast's 0.70–0.97 (p 0.94) | ≥ 8 |
+| L42 | saturated air | 10:00–16:00, humidity ≥ 93 % all hour, up ≤ 0.3 °C, ≥ 0.6 °C under the edge | NO next degree 0.60–0.95 (p 0.93) | ≥ 97 % |
+| L43 | onshore day | 12:00–17:00, ≥ 80 % of the wind since 09:00 from the sea, ≥ 8 kt, ≥ 0.6 °C under the edge | NO next degree 0.65–0.96 (p 0.94) | ≥ 95 % |
+| L44 | unknown longshot buyer | a wallet with no record buys ≥ 20 YES at 0.02–0.10 of a bucket ≥ 2 °C above the high | NO bid a tick under their price, 30 min | ≥ 50 shares |
+| L45 | complement gap | 07:00–22:00, a bucket's NO at its limit, fee and slippage ≥ 0.02 under the other buckets' YES bids added up | that NO 0.50–0.99 (p = the sum) | ≥ 0.04 |
+| L46 | evening discount | 21:00–23:50, KNMI ≥ 3 °C under the edge and not rising, the high's bucket offered 0.95–0.985 | its YES (p 0.997) | from 22:00, ≤ 0.98 |
+| L47 | evening lottery | 17:00–23:00, ≥ 5 small YES buys (≤ 20 shares at 0.02–0.15) in 30 min on the next two degrees, KNMI ≥ 1 °C under the edge | NO bid on that bucket | ≥ 8 buys |
+| L48 | self-contradiction | 07:00–11:30, the ladder's own mean ≥ 2 °C above the high while the high's bucket is ≥ 0.05 | its NO 0.80–0.95 (p 0.95) | ≥ 3 °C |
+| L62 | haze lid | 11:00–15:00, visibility ≤ 7 km in dry air (or HZ/FU) twice, ≥ 1 °C under the high | NO next degree 0.60–0.95 (p 0.93) | ≤ 5 km |
+
+**Balanced ($20): both sides of the market's mistakes.**
+
+| | family | signal | trade | variant |
+|---|---|---|---|---|
+| L49 | boundary straddle | 08:00–12:00, the forecast within 0.3 °C of an x.5 edge while one side is ≤ 0.55 × the other | YES of the cheap side 0.10–0.45 | 0.2 °C, 0.45 × |
+| L50 | move without news | 07:00–21:00, a bucket moved ≥ 0.12 in 8–15 min with no report, no forecast and KNMI flat | against the move 0.15–0.80 | ≥ 0.18 |
+| L51 | momentum divergence | 10:00–15:00, the ladder's mean down ≥ 0.6 °C in 30 min while KNMI rose ≥ 0.5 °C (or the reverse) | YES a degree above the mean (or NO of the mean's bucket) | 0.9 / 0.8 |
+| L52 | run-up fade | ≤ 12 min before a report, the next degree up ≥ 0.05 in 10 min while KNMI ahead of the METAR is ≥ 0.4 °C under the edge | its NO 0.40–0.92 | ≥ 0.08 |
+| L53 | projected curve | 10:00–13:00, a sine from the night's lowest METAR through KNMI to the median peak time ≥ 0.8 °C off the ladder's mean | YES of the projection's bucket 0.10–0.45 | ≥ 1.2 °C |
+| L54 | overround squeeze | 06:00–22:00, the ladder adds up to ≥ 1.08 | NO of the bucket carrying most of the excess 0.30–0.80 | ≥ 1.12 |
+| L55 | edge hover | near the median peak, KNMI's last three means within 0.2 °C of the edge while one side is ≤ 0.35 and the other ≥ 0.55 | YES of the cheap side 0.10–0.35 | 0.1 °C |
+| L56 | stations disagree | 10:00–16:00, Schiphol and the KNMI neighbours ≥ 3 °C apart, the favourite ≥ 0.55 | its NO 0.25–0.45 | ≥ 4 °C |
+| L57 | laggard bucket | 10:00–18:00, the next degree up ≥ 0.06 in 4–7 min while the high's bucket has not fallen, KNMI near the edge | NO of the high's bucket 0.10–0.75 | ≥ 0.10 |
+| L58 | round-number premium | 07:00–20:00, a multiple-of-5 bucket ≥ 0.08 above what a normal fitted to the other buckets gives it | its NO 0.40–0.85 | ≥ 0.12 |
+| L59 | imbalance round trip | 09:00–18:00 away from reports, the favourite's spread ≤ 0.03 with ≥ 3 × the shares bid as offered | YES, sold at +0.03, −0.05, after 45 min or before a report; once a day | ≥ 5 × |
+| L60 | gap filler | 08:00–20:00, a thin best ask (≤ 50 shares) with the next ≥ 0.10 above, on the favourite or a neighbour | offer YES halfway into the gap (a NO bid) until 10 min before the report | ≥ 0.15 |
+| L63 | hidden seller | 08:00–20:00, ≥ 3 buys at one price in 30 min taking ≥ 3 × the size the ask showed, the ask still there | its NO 0.20–0.80 | ≥ 5 × |
+| L65 | midnight high | 08:00–11:00, the high first reached before 02:00, KNMI ≥ 1 °C under it, the forecast's rest of the day ≤ the high + 0.4 °C | YES of the high's bucket 0.10–0.60 | forecast ≥ 0.5 °C under |
+
+### 8.4 The ten "new ways" and the five extras
+
+Asked for ten ways not yet considered, from the market's mechanics rather
+than the weather: **L46** (holders sell a near-certain winner cheap in the
+evening to free their money), **L34** (orders nobody updates while the
+weather moves on), **L47** (evening lottery buyers), **L58** (round-number
+bias), **L59** (book imbalance, the one round trip), **L35** (under-reaction
+after a new high), **L48** (the market's own distribution against its own
+price), **L60** (providing liquidity where a thin ladder has a hole),
+**L45** (the negRisk identity NO = the others' YES) and **L36** (fronts
+seen upstream before they arrive). The five extras: **L61** (special
+reports), **L62** (haze), **L63** (iceberg sellers), **L64** (withdrawn
+asks) and **L65** (the midnight high of a cold-air day).
+
+### 8.5 What would refute them
+
+Forty rules on the same days are forty chances to look good by luck, and
+none is replayed yet (`research market` replays L1–L25 only; the journal
+keeps every input these read, so a replay can follow). A family counts
+only on days after its rule was fixed, and only when its paper record over
+several weeks shows a positive mean P&L a trade with its spread, not its
+best day. Specific risks: the KNMI parameter names `td`, `rh`, `ff`, `fx`,
+`dd`, `pp` and `ss` are the collection's as we know them — one KNMI does
+not know is alerted and its families stay idle; upstream air does not
+always travel at 1.5 × the surface wind; a bid wall can be withdrawn
+(spoofing), and an imbalance can flip. The pair lock (L39) can be left with
+one leg when the other's book empties in the 350 ms; that loss is counted.

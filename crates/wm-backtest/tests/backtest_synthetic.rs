@@ -91,6 +91,7 @@ fn config() -> BacktestConfig {
                 routine_minutes: vec![25, 55],
                 position: None,
                 neighbours: Vec::new(),
+                upstream: Vec::new(),
             }],
             risk: RiskConfig {
                 max_spread: wm_core::units::Price::parse("0.05").unwrap(),
@@ -124,6 +125,7 @@ fn config() -> BacktestConfig {
         sim: SimConfig {
             latency_ms: 500,
             adverse_ticks: 0,
+            slippage_ticks: 0,
         },
         fidelity: Fidelity::Synthetic,
         settle_grace: Duration::hours(2),

@@ -106,6 +106,7 @@ fn config(live: Option<LiveBookConfig>) -> EngineConfig {
             routine_minutes: vec![25, 55],
             position: None,
             neighbours: Vec::new(),
+            upstream: Vec::new(),
         }],
         risk: RiskConfig {
             strategy_caps: [(

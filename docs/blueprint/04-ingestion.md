@@ -88,8 +88,13 @@ reads `[lab].knmi_history_minutes` (180) back at start instead of 40, hands
 every new reading to the engine oldest first, and after each new reading of
 the station asks once for each of `[lab].neighbours` (Voorschoten 06215, De
 Bilt 06260, Berkhout 06249; a failing neighbour raises one alert of its own
-and is retried after the next reading). That adds about 430 requests a day
-(about 3,330 in all, under the budget of 4,000).
+and is retried after the next reading), and once for KNMI's other
+parameters (`[lab].knmi_extra_parameters`: `td`, `rh`, `ff`, `fx`, `dd`,
+`pp`, `ss`; four hours back at the first request) handed on as a
+`KnmiExtras` event; a parameter KNMI refuses (a 4xx) is found by asking for
+each alone, dropped and alerted once. That adds about 580 requests a day
+(about 3,480 in all, at most about 3,900 when KNMI publishes late, under
+the budget of 4,500).
 
 **Inputs of the strategy lab.** `KnmiTenMinute::fetch_series` asks the
 same collection for any parameters of any station (`qg`, global radiation
@@ -105,8 +110,14 @@ today's taker trades every `[lab].taker_poll_seconds` (20; wallets hashed
 as in `research market`'s cache, each trade passed on once) for L18–L21,
 and every taker's record on the last `[lab].wallet_history_days` (60)
 settled days, scored at start and at 07:00 local from the cache under
-`research/polymarket/<STATION>/`, for L19 and L20. None of these feeds A–K,
-the observed high or settlement.
+`research/polymarket/<STATION>/`, for L19, L20 and L44. A third reads the
+METARs of the airports upstream (`[[lab.upstream]]`, twelve 60–300 km
+around Schiphol) in one AWC request (`ids=EHKD,EHLW,…`, three hours) at
+:10 and :40 past the hour — away from Schiphol's report windows, and never
+in the first two minutes after a start, so the station's own backfill goes
+first through the shared AWC gate — and hands the new ones on as an
+`UpstreamReports` event (L26, L31, L36): 48 requests a day of AWC's 2,000.
+None of these feeds A–K, the observed high or settlement.
 
 ## 10. Adaptive PollingPolicy
 

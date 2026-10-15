@@ -941,6 +941,26 @@ fn lab_dto(snap: &EngineSnapshot) -> Option<LabDto> {
                 wallet_days: lab.wallet_days,
                 wallets_skilled: lab.wallets_skilled,
                 wallets_losing: lab.wallets_losing,
+                knmi_extra: lab
+                    .knmi_extra
+                    .as_ref()
+                    .map(|(_, v)| v.iter().map(|(k, x)| (k.clone(), *x)).collect())
+                    .unwrap_or_default(),
+                knmi_extra_end_ms: lab.knmi_extra.as_ref().map(|(t, _)| ms(*t)),
+                upstream: lab
+                    .upstream
+                    .iter()
+                    .map(|u| wm_dashboard_api::LabUpstreamDto {
+                        icao: u.icao.clone(),
+                        bearing_deg: u.bearing_deg,
+                        distance_km: u.distance_km,
+                        observed_ms: u.observed_at.map(ms),
+                        temp_c: u.temp_tenths.map(c),
+                        weather: u.weather.clone(),
+                    })
+                    .collect(),
+                ladder_samples: lab.ladder_samples,
+                yesterday_reports: lab.yesterday_reports,
             })
         })
         .collect();

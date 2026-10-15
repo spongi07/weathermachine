@@ -247,10 +247,10 @@ max_body_bytes = 8388608
 # observation or resolution data). Needs WM_KNMI_API_KEY — a free key from
 # the KNMI Developer Portal, sent in the Authorization header, never logged.
 # Live: every [knmi].poll_seconds while a reading is due, plus one per [lab]
-# neighbour after each new reading — 55–65 an hour with three neighbours, at
-# most about 3,750 a day when KNMI publishes late, inside the budget below
-# and the 1,000 an hour a registered key allows; `research market`: one per
-# week of history.
+# neighbour and one for the lab's other parameters after each new reading —
+# 60–70 an hour with three neighbours, at most about 3,900 a day when KNMI
+# publishes late, inside the budget below and the 1,000 an hour a registered
+# key allows; `research market`: one per week of history.
 [providers.knmi]
 enabled = true
 base_url = "https://api.dataplatform.knmi.nl/edr/v1/collections/10-minute-in-situ-meteorological-observations"
@@ -268,7 +268,7 @@ max_retry_after_secs = 3600.0
 circuit_failure_threshold = 5
 circuit_open_base_secs = 300.0
 circuit_open_max_secs = 3600.0
-daily_budget = 4000
+daily_budget = 4500
 politeness_factor = 2
 politeness_decay_secs = 3600.0
 max_body_bytes = 2097152
@@ -683,6 +683,35 @@ slippage_allowance = "0.01"
 # fire on F's loss that day (KNMI 17.6 °C before the report, the escape
 # needing 17.8 °C). Their replay code stays: `research market` still
 # replays all 25.
+#
+# L26–L65 (since 14 October 2026, docs/research/strategy-lab.md §8): 40
+# families from how this market works, not from public forecasts (which
+# lose to it): the air on its way from airports upstream (L26, L31, L36),
+# KNMI's dew point, wind, gusts, pressure, humidity and sunshine (L27, L29,
+# L32, L37, L42, L43), the price ladder's shape and history (L28, L33, L34,
+# L39, L40, L45, L48, L54, L58, L59, L60, L64), who trades and when (L38,
+# L44, L47, L63), the market's reaction to the weather (L35, L46, L50–L53,
+# L55–L57, L61, L62) and what it remembers (L30, L41, L49, L65). Each reads
+# a signal of its own. Aggressive families (cheap YES on a rise) stake $15,
+# balanced ones $20, defensive ones (NO of what the weather or the market's
+# own structure rules out) $25. None races: a signal trades only after it
+# has held a minute, and a taker buys at up to a cent above the ask it saw,
+# its expected profit counted at that price — the bot learns a report about
+# two minutes after the market and needs 350 ms ([paper]) to place an order.
+#   L26 Warm air upstream          L39 Pair lock                L52 Pre-report run-up fade
+#   L27 Mixing surge               L40 Tail out of order        L53 Projected curve
+#   L28 Ladder dip                 L41 Wet ground               L54 Overround squeeze
+#   L29 Wind slack                 L42 Saturated air            L55 Edge hover
+#   L30 Yesterday's anchor         L43 Onshore day              L56 Stations disagree
+#   L31 Upwind clearing            L44 Unknown longshot buyer   L57 Laggard bucket
+#   L32 Gust onset                 L45 Complement gap           L58 Round-number premium
+#   L33 Whale bid                  L46 Evening discount         L59 Imbalance round trip
+#   L34 Stale ask                  L47 Evening lottery tickets  L60 Gap filler
+#   L35 Post-high drift            L48 Self-contradiction       L61 SPECI pulse
+#   L36 Front ETA                  L49 Boundary straddle        L62 Haze lid
+#   L37 Pressure fall              L50 Move without news        L63 Hidden seller
+#   L38 Calm-tape tails            L51 Momentum divergence      L64 Sellers withdraw
+#                                                               L65 Midnight high
 [strategies.lab]
 enabled = true
 disabled = [
@@ -690,7 +719,12 @@ disabled = [
     "L13", "L14", "L15", "L16", "L17", "L19", "L21", "L22", "L23",
 ]
 variants = []                     # e.g. ["L2"]: the margin of 0.6 °C instead of 0.3 °C
-notional = "20.00"                # cost of one trade at its price (L3: F's 100 shares)
+notional = "20.00"                # L1–L25: cost of one trade at its price (L3: F's 100 shares)
+aggressive_notional = "15.00"     # L26–L65 by profile: aggressive …
+balanced_notional = "20.00"       # … balanced …
+defensive_notional = "25.00"      # … defensive (at most position_size_usd)
+confirm_seconds = 60              # L26–L65: a signal trades once it has held this long
+taker_tolerance = "0.01"          # L26–L65: a taker's limit above the ask it saw (whole cents)
 slippage_allowance = "0.005"      # in the expected profit of a taker buy
 max_book_age_ms = 15000
 max_data_age_minutes = 40         # METAR age limit
@@ -781,6 +815,11 @@ radiation_parameter = "qg"        # W/m²; empty: none
 knmi_history_minutes = 180        # read at start (the rules look back 90 minutes)
 taker_poll_seconds = 20           # today's taker trades from the Data API
 wallet_history_days = 60          # settled days the takers are scored on
+# KNMI's other ten-minute parameters, one request after each new reading
+# (the last four hours at the start): dew point, humidity, wind, gust,
+# direction, pressure, sunshine minutes (L27, L29, L32, L37, L42, L43). A
+# name KNMI refuses is dropped with one alert; the others are still read.
+knmi_extra_parameters = ["td", "rh", "ff", "fx", "dd", "pp", "ss"]
 [[lab.neighbours]]
 wmo = "06215"
 name = "Voorschoten"
@@ -796,6 +835,66 @@ wmo = "06249"
 name = "Berkhout"
 latitude = 52.644
 longitude = 4.979
+# Airports 60–300 km around Schiphol (L26, L31, L36): their METARs in one
+# AWC request at :10 and :40, away from Schiphol's report windows; bearing
+# and distance follow from the positions. Every direction but the open sea.
+[[lab.upstream]]
+icao = "EHKD"                     # De Kooy, north
+latitude = 52.924
+longitude = 4.780
+[[lab.upstream]]
+icao = "EHLW"                     # Leeuwarden, north-east
+latitude = 53.228
+longitude = 5.761
+[[lab.upstream]]
+icao = "EHGG"                     # Groningen, north-east
+latitude = 53.120
+longitude = 6.579
+[[lab.upstream]]
+icao = "EHTW"                     # Twente, east
+latitude = 52.274
+longitude = 6.889
+[[lab.upstream]]
+icao = "EDDL"                     # Düsseldorf, south-east
+latitude = 51.289
+longitude = 6.767
+[[lab.upstream]]
+icao = "EHVK"                     # Volkel, south-east
+latitude = 51.657
+longitude = 5.707
+[[lab.upstream]]
+icao = "EHEH"                     # Eindhoven, south-south-east
+latitude = 51.450
+longitude = 5.374
+[[lab.upstream]]
+icao = "EBAW"                     # Antwerp, south
+latitude = 51.189
+longitude = 4.460
+[[lab.upstream]]
+icao = "EBBR"                     # Brussels, south
+latitude = 50.901
+longitude = 4.484
+[[lab.upstream]]
+icao = "EBOS"                     # Ostend, south-west
+latitude = 51.199
+longitude = 2.862
+[[lab.upstream]]
+icao = "EGMC"                     # Southend, west-south-west
+latitude = 51.571
+longitude = 0.696
+[[lab.upstream]]
+icao = "EGSH"                     # Norwich, west
+latitude = 52.676
+longitude = 1.283
+
+# How paper orders execute (every paper book: A–K and the lab). An order
+# meets the book as it is 350 ms after the decision — Polymarket's 250 ms
+# plus the 100 ms from decision to order on the server — and a taker pays a
+# tick worse than each level it takes, never above its limit. Liquidity can
+# vanish in between; a resting order fills only from trades through it.
+[paper]
+latency_ms = 350
+slippage_ticks = 1
 
 # ---------------------------------------------------------------------------
 # Strategy G's live twin (G_live): G's rule placing REAL orders on Polymarket,

@@ -3,7 +3,7 @@
 use crate::restore::{RestoreState, RestoreSummary};
 use crate::snapshot::{
     EngineSnapshot, ForecastSnapshot, LabBookSnapshot, LabInputsSnapshot, LiveBookSnapshot,
-    LocationSnapshot, NeighbourSnapshot, ViewSnapshot,
+    LocationSnapshot, NeighbourSnapshot, UpstreamSnapshot, ViewSnapshot,
 };
 use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
@@ -24,13 +24,13 @@ use wm_core::resolution::ObservationFilter;
 use wm_core::time::{local_date, local_day_bounds};
 use wm_core::trading::{DecisionRecord, IntentKind, OrderStatus, RunMode, TradeIntent};
 use wm_core::units::{Probability, Rounding, Usd, notional};
-use wm_core::weather::{Observation, TenMinuteObservation};
+use wm_core::weather::{Observation, TenMinuteExtras, TenMinuteObservation};
 use wm_execution::{Applied, OrderManager};
 use wm_risk::{
     ApprovedIntent, OpenOrderView, PortfolioView, RiskConfig, RiskDecision, RiskEngine, RiskInputs,
     WeatherStatus,
 };
-use wm_strategy::lab::{NeighbourReadings, WalletScores, WxReport};
+use wm_strategy::lab::{LadderSample, NeighbourReadings, UpstreamReadings, WalletScores, WxReport};
 use wm_strategy::{
     BookConfirmedConfig, BookConfirmedHigh, BucketEvaluation, BuyNoAboveHigh, BuyNoConfig,
     BuyYesConfig, BuyYesFinalHigh, CertainConfig, CertainOutcomes, ForecastDay, KnmiNowcast,
@@ -41,8 +41,15 @@ use wm_strategy::{
     TemperatureStateEngine, UnwindConfig, UnwindEngine, ViewEvaluation, ViewKind, lab_strategies,
 };
 
-/// How long the lab's KNMI readings and METAR weather groups are kept.
-const LAB_HISTORY: Duration = Duration::hours(36);
+/// How long the lab's KNMI readings and METAR weather groups are kept
+/// (yesterday's whole local day, for L30 and L41).
+const LAB_HISTORY: Duration = Duration::hours(48);
+
+/// The lab's price ladder: a sample of today's market's YES books at most
+/// this often …
+const LADDER_EVERY: Duration = Duration::seconds(60);
+/// … kept this long (the ladder rules look back at most an hour).
+const LADDER_HISTORY: Duration = Duration::hours(3);
 
 /// A settled market, its books and its finished orders are forgotten this
 /// long after its day: the dashboard still shows yesterday's, the database
@@ -57,6 +64,16 @@ pub struct NeighbourStation {
     pub name: String,
     /// Bearing from the location's station, degrees true.
     pub bearing_deg: f64,
+}
+
+/// An airport upstream of a location (the strategy lab's L26, L31, L36).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpstreamStation {
+    /// Its ICAO code, as its METARs carry it.
+    pub station: StationId,
+    /// Bearing from the location's station, degrees true.
+    pub bearing_deg: f64,
+    pub distance_km: f64,
 }
 
 /// A location the engine trades.
@@ -79,6 +96,9 @@ pub struct EngineLocation {
     /// KNMI stations around it (the lab's upwind rule).
     #[serde(default)]
     pub neighbours: Vec<NeighbourStation>,
+    /// Airports upstream whose METARs the lab reads.
+    #[serde(default)]
+    pub upstream: Vec<UpstreamStation>,
 }
 
 /// Engine configuration.
@@ -117,7 +137,7 @@ pub struct EngineConfig {
     /// reading says the next METAR will beat it.
     #[serde(default = "KnmiNowcastConfig::absent")]
     pub knmi_nowcast: KnmiNowcastConfig,
-    /// The strategy lab's paper strategies L1–L25, each on its own paper
+    /// The strategy lab's paper strategies L1–L65, each on its own paper
     /// book with its own limits ([`LabConfig::risk`]).
     #[serde(default = "LabConfig::absent")]
     pub lab: LabConfig,
@@ -312,6 +332,12 @@ struct LabState {
     /// Taker trades per market, oldest first, and the ids seen.
     takers: HashMap<EventSlug, (Vec<TakerTrade>, HashSet<String>)>,
     wallets: Option<WalletScores>,
+    /// KNMI's other ten-minute parameters per station, oldest first.
+    extras: HashMap<StationId, Vec<TenMinuteExtras>>,
+    /// Upstream airports' METARs, oldest first.
+    upstream: HashMap<StationId, Vec<WxReport>>,
+    /// Today's market's price ladder, a sample a minute, oldest first.
+    ladder: HashMap<EventSlug, Vec<LadderSample>>,
 }
 
 /// The kernel.
@@ -653,6 +679,55 @@ impl Engine {
         list.retain(|x| x.observed_at >= cutoff);
     }
 
+    /// Keep KNMI's other parameters of an interval for the lab (a later
+    /// copy merges into it; [`LAB_HISTORY`] of them).
+    fn note_extras(&mut self, o: &TenMinuteExtras) {
+        let list = self.lab.extras.entry(o.station.clone()).or_default();
+        match list.binary_search_by_key(&o.interval_end, |x| x.interval_end) {
+            Ok(i) => list[i].values.extend(o.values.clone()),
+            Err(i) => list.insert(i, o.clone()),
+        }
+        let cutoff = self.now - LAB_HISTORY;
+        list.retain(|x| x.interval_end >= cutoff);
+    }
+
+    /// Keep an upstream airport's report for the lab (a later copy
+    /// replaces it; [`LAB_HISTORY`] of them).
+    fn note_upstream(&mut self, r: &wm_core::weather::UpstreamReport) {
+        let list = self.lab.upstream.entry(r.station.clone()).or_default();
+        let w = WxReport::from_upstream(r);
+        match list.binary_search_by_key(&w.observed_at, |x| x.observed_at) {
+            Ok(i) => list[i] = w,
+            Err(i) => list.insert(i, w),
+        }
+        let cutoff = self.now - LAB_HISTORY;
+        list.retain(|x| x.observed_at >= cutoff);
+    }
+
+    /// Sample today's market's YES books for the lab's ladder rules, at
+    /// most once a minute.
+    fn sample_ladder(&mut self, market: &DailyTemperatureMarket) {
+        if !self.cfg.lab.enabled {
+            return;
+        }
+        let list = self
+            .lab
+            .ladder
+            .entry(market.event_slug.clone())
+            .or_default();
+        if list.last().is_some_and(|s| self.now - s.at < LADDER_EVERY) {
+            return;
+        }
+        let s = LadderSample::of(market, &self.books, self.now, self.cfg.lab.max_book_age_ms);
+        if s.quotes.is_empty() {
+            return;
+        }
+        list.push(s);
+        let cutoff = self.now - LADDER_HISTORY;
+        let old = list.partition_point(|x| x.at < cutoff);
+        list.drain(..old);
+    }
+
     /// Keep a ten-minute reading for the lab (a later copy of the same
     /// interval replaces it; [`LAB_HISTORY`] of them).
     fn note_reading(&mut self, o: &TenMinuteObservation) {
@@ -834,6 +909,47 @@ impl Engine {
             }
             WeatherMachineEvent::WalletScores(w) => {
                 self.lab.wallets = Some(WalletScores::from_event(w));
+            }
+            WeatherMachineEvent::KnmiExtras(k) => {
+                // Predictive input of the lab only.
+                let mut touched: Vec<usize> = Vec::new();
+                for r in &k.readings {
+                    self.note_extras(r);
+                    if let Some(i) = self.location_index_for_station(&r.station)
+                        && !touched.contains(&i)
+                    {
+                        touched.push(i);
+                    }
+                }
+                if self.cfg.lab.enabled {
+                    for i in touched {
+                        self.evaluate_location(i, Record::None, &mut out);
+                    }
+                }
+            }
+            WeatherMachineEvent::UpstreamReports(u) => {
+                // Predictive input of the lab only: the locations that read
+                // these airports are evaluated again.
+                for r in &u.reports {
+                    self.note_upstream(r);
+                }
+                if self.cfg.lab.enabled {
+                    let touched: Vec<usize> = self
+                        .cfg
+                        .locations
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| {
+                            l.upstream
+                                .iter()
+                                .any(|s| u.reports.iter().any(|r| r.station == s.station))
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    for i in touched {
+                        self.evaluate_location(i, Record::None, &mut out);
+                    }
+                }
             }
             WeatherMachineEvent::OrderUpdate(u) => self.apply_order_update(u, &mut out),
             WeatherMachineEvent::Timer(t) => match &t.kind {
@@ -1177,6 +1293,7 @@ impl Engine {
         }
         self.views.insert(loc.location.clone(), views.clone());
         let Some(market) = market else { return };
+        self.sample_ladder(&market);
 
         // Each book's live tokens: a strategy sees only its own book.
         let pending: Vec<HashSet<TokenId>> = (0..self.paper.len())
@@ -1198,9 +1315,28 @@ impl Engine {
                 .lab_forecast_product()
                 .map(|p| p.usable_from(today, loc.timezone));
             let day_start = local_day_bounds(today, loc.timezone).0;
-            let reports: &[WxReport] = self.lab.reports.get(&loc.station).map_or(&[], |r| {
-                &r[r.partition_point(|x| x.observed_at < day_start)..]
-            });
+            let yesterday_start = today
+                .pred_opt()
+                .map_or(day_start, |y| local_day_bounds(y, loc.timezone).0);
+            let all_reports: &[WxReport] = self
+                .lab
+                .reports
+                .get(&loc.station)
+                .map_or(&[], Vec::as_slice);
+            let split = all_reports.partition_point(|x| x.observed_at < day_start);
+            let reports = &all_reports[split..];
+            let yesterday_reports = &all_reports
+                [all_reports.partition_point(|x| x.observed_at < yesterday_start)..split];
+            let upstream: Vec<UpstreamReadings<'_>> = loc
+                .upstream
+                .iter()
+                .map(|u| UpstreamReadings {
+                    icao: u.station.as_str(),
+                    bearing_deg: u.bearing_deg,
+                    distance_km: u.distance_km,
+                    reports: self.lab.upstream.get(&u.station).map_or(&[], Vec::as_slice),
+                })
+                .collect();
             let neighbours: Vec<NeighbourReadings<'_>> = loc
                 .neighbours
                 .iter()
@@ -1224,6 +1360,14 @@ impl Engine {
                     .map_or(&[], |(v, _)| v.as_slice()),
                 wallets: self.lab.wallets.as_ref(),
                 position: loc.position,
+                knmi_extra: self.lab.extras.get(&loc.station).map_or(&[], Vec::as_slice),
+                upstream: &upstream,
+                ladder: self
+                    .lab
+                    .ladder
+                    .get(&market.event_slug)
+                    .map_or(&[], Vec::as_slice),
+                yesterday_reports,
             };
             for s in self.strategies.iter_mut() {
                 if !s.enabled() {
@@ -1635,6 +1779,7 @@ impl Engine {
             m.closed = true;
         }
         self.lab.takers.remove(slug);
+        self.lab.ladder.remove(slug);
         (main, holdings)
     }
 
@@ -1662,6 +1807,7 @@ impl Engine {
             }
             self.evaluations.remove(slug);
             self.lab.takers.remove(slug);
+            self.lab.ladder.remove(slug);
         }
         self.orders.prune_terminal_before(cutoff);
     }
@@ -1990,6 +2136,18 @@ impl Engine {
             .and_then(|m| self.lab.takers.get(&m.event_slug).map(|(v, _)| v.len()))
             .unwrap_or(0);
         let (skilled, losing) = self.lab.wallets.as_ref().map_or((0, 0), |w| w.counts(2.0));
+        let yesterday_reports = today.pred_opt().map_or(0, |y| {
+            let start = local_day_bounds(y, loc.timezone).0;
+            self.lab.reports.get(&loc.station).map_or(0, |r| {
+                r.iter()
+                    .filter(|x| x.observed_at >= start && x.observed_at < day_start)
+                    .count()
+            })
+        });
+        let ladder_samples = self
+            .today_market(loc)
+            .and_then(|m| self.lab.ladder.get(&m.event_slug).map(Vec::len))
+            .unwrap_or(0);
         LabInputsSnapshot {
             knmi_readings: knmi.len(),
             radiation_wm2: radiation,
@@ -2017,6 +2175,29 @@ impl Engine {
             wallet_days: self.lab.wallets.as_ref().map(|w| w.days),
             wallets_skilled: skilled,
             wallets_losing: losing,
+            knmi_extra: self
+                .lab
+                .extras
+                .get(&loc.station)
+                .and_then(|v| v.last())
+                .map(|r| (r.interval_end, r.values.clone())),
+            upstream: loc
+                .upstream
+                .iter()
+                .map(|u| {
+                    let r = self.lab.upstream.get(&u.station).and_then(|v| v.last());
+                    UpstreamSnapshot {
+                        icao: u.station.as_str().to_owned(),
+                        bearing_deg: u.bearing_deg,
+                        distance_km: u.distance_km,
+                        observed_at: r.map(|r| r.observed_at),
+                        temp_tenths: r.and_then(|r| r.temp_tenths),
+                        weather: r.map(|r| r.wx.summary()),
+                    }
+                })
+                .collect(),
+            ladder_samples,
+            yesterday_reports,
         }
     }
 }

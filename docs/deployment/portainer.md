@@ -341,10 +341,15 @@ On plain `http://` in the LAN the browser has no clipboard API. The button
 then copies another way, or opens the text selected: press Ctrl+C (⌘C).
 Without JavaScript, `/lite` lists every strategy with links to its log.
 
-### The strategy lab in paper (L1–L25)
+### The strategy lab in paper (L1–L65)
 
 Since 2 October 2026 the 25 lab strategies run in the service as paper
-strategies, switched on by `[strategies.lab]` in the shipped configuration.
+strategies, switched on by `[strategies.lab]` in the shipped configuration;
+since 14 October 2026 forty more, L26–L65 (aggressive $15, balanced $20,
+defensive $25 a trade; [what each does](../research/strategy-lab.md#8-l26l65-forty-families-from-how-the-market-works-14-october-2026)).
+Every paper order meets the book 350 ms after the decision and a taker pays
+a tick of slippage (`[paper]`); L26–L65 trade a signal only after it has
+held a minute.
 Each trades a paper book of its own — its own positions, limits ($25 an
 order, $100 for L3, which buys F's 100 shares; $120 open; $100 of loss a
 day) and P&L — so none of them ever blocks F–K, the unwind exits or another
@@ -353,9 +358,14 @@ beyond the KNMI key:
 
 * **KNMI** (`WM_KNMI_API_KEY`): Schiphol's ten-minute readings with global
   radiation, and after each new reading one request each for Voorschoten,
-  De Bilt and Berkhout — about 60 requests an hour in all (every 10 s only
-  while a reading is due), well inside a registered key's 1,000. Without the key the KNMI rules stay idle (one
-  alert says so).
+  De Bilt and Berkhout and one for the lab's other parameters (dew point,
+  humidity, wind, gust, direction, pressure, sunshine) — about 65 requests
+  an hour in all (every 10 s only while a reading is due), well inside a
+  registered key's 1,000 and the provider's budget of 4,500 a day. Without
+  the key the KNMI rules stay idle (one alert names them); a parameter KNMI
+  refuses is dropped with one alert.
+* **AWC** (no key): the METARs of twelve airports upstream in one request
+  at :10 and :40, away from Schiphol's report windows — 48 a day.
 * **Polymarket Data API** (public, no key): today's taker trades every
   20 s for L18–L21, and once a day the settled markets on which every taker
   is scored for L19 and L20. The first scoring after a start downloads up
@@ -364,7 +374,7 @@ beyond the KNMI key:
   it — and takes a few minutes; until then L19 and L20 show "no taker
   records yet". Every morning at 07:00 local adds the day before.
 
-The dashboard's **Strategy lab · paper · L1–L25** panel, below the
+The dashboard's **Strategy lab · paper · L1–L65** panel, below the
 strategy cards, lists every running lab strategy with its status now, this
 run's counts, and its own book's open positions and realized P&L; a line
 above the table shows what the lab reads. The letters link to each
@@ -376,9 +386,9 @@ lab's books, and `report paper` gives the lab's settled P&L apart from the
 main book's.
 
 To switch families off or run a family's variant, set `disabled` or
-`variants` in `[strategies.lab]` (codes `L1` … `L25`, e.g.
+`variants` in `[strategies.lab]` (codes `L1` … `L65`, e.g.
 `disabled = ["L19", "L20"]`) and redeploy; `enabled = false` switches the
-whole lab off, and with it the extra KNMI and Data API requests.
+whole lab off, and with it the extra KNMI, AWC and Data API requests.
 
 ### The paper-run report
 

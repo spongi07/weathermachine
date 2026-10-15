@@ -261,7 +261,7 @@ fn lab(out: &mut String, s: &DashboardSnapshot) {
     for i in &lab.inputs {
         let _ = write!(
             out,
-            "<p class=\"note\">{}: {} KNMI reading(s), radiation {}, {} neighbour(s), {} METAR(s) today, {} taker trade(s) today, takers' records {}</p>",
+            "<p class=\"note\">{}: {} KNMI reading(s), radiation {}, {} neighbour(s), {} METAR(s) today, {} taker trade(s) today, takers' records {}, {} KNMI parameter(s), {} of {} upstream airport(s) read, {} ladder sample(s)</p>",
             esc(&i.location),
             i.knmi_readings,
             i.radiation_wm2
@@ -273,6 +273,10 @@ fn lab(out: &mut String, s: &DashboardSnapshot) {
                 || "not loaded yet".to_owned(),
                 |d| format!("over {d} day(s)")
             ),
+            i.knmi_extra.len(),
+            i.upstream.iter().filter(|u| u.temp_c.is_some()).count(),
+            i.upstream.len(),
+            i.ladder_samples,
         );
     }
     out.push_str("</section>");

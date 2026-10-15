@@ -164,7 +164,7 @@ pub fn every_strategy(cfg: &AppConfig) -> Vec<StrategyDto> {
     .collect()
 }
 
-/// The strategy lab's 25 strategies, L1 first: each a paper strategy on its
+/// The strategy lab's 65 strategies, L1 first: each a paper strategy on its
 /// own book (`lab` on the dashboard).
 pub fn lab_entries(cfg: &AppConfig) -> Vec<StrategyDto> {
     let lab = &cfg.file.strategies.lab;
@@ -189,10 +189,23 @@ pub fn lab_entries(cfg: &AppConfig) -> Vec<StrategyDto> {
                     if family == 3 {
                         format!("F's {} shares", cfg.peak_slot().shares)
                     } else {
-                        usd(lab.notional)
+                        usd(lab.stake(family))
                     },
                 ),
             ];
+            if let Some(p) = wm_strategy::lab::profile(family) {
+                settings.extend([
+                    ("profile".to_owned(), p.as_str().to_owned()),
+                    (
+                        "confirm_seconds".to_owned(),
+                        lab.confirm_seconds.to_string(),
+                    ),
+                    (
+                        "taker_tolerance".to_owned(),
+                        lab.taker_tolerance.to_string(),
+                    ),
+                ]);
+            }
             let book = &lab.risk;
             let position = if family == 3 {
                 book.f_escape_position_usd
@@ -474,7 +487,7 @@ mod tests {
         );
         assert_eq!(
             lab.iter().map(|s| s.letter.clone()).collect::<Vec<_>>(),
-            (1..=25usize)
+            (1..=wm_strategy::lab::FAMILIES)
                 .filter(|n| !off.contains(n))
                 .map(|n| format!("L{n}"))
                 .collect::<Vec<_>>()
@@ -492,6 +505,21 @@ mod tests {
         );
         let family = |letter: &str| *lab.iter().find(|s| s.letter == letter).unwrap();
         assert_eq!(setting(family("L4"), "notional").as_deref(), Some("20.00"));
+        assert_eq!(setting(family("L4"), "profile"), None);
+        // L26–L65 stake by their profile, hold a signal a minute and buy up
+        // to a cent above the ask.
+        for (letter, stake, profile) in [
+            ("L26", "15.00", "aggressive"),
+            ("L36", "25.00", "defensive"),
+            ("L49", "20.00", "balanced"),
+        ] {
+            let s = family(letter);
+            assert_eq!(setting(s, "notional").as_deref(), Some(stake), "{letter}");
+            assert_eq!(setting(s, "profile").as_deref(), Some(profile), "{letter}");
+            assert_eq!(setting(s, "confirm_seconds").as_deref(), Some("60"));
+            assert_eq!(setting(s, "taker_tolerance").as_deref(), Some("0.01"));
+        }
+        assert_eq!(lab.len(), wm_strategy::lab::FAMILIES - off.len());
         // L3, off, keeps F's sizing on its page.
         let l3 = every.iter().find(|s| s.lab && s.letter == "L3").unwrap();
         assert!(!l3.enabled);
@@ -506,7 +534,10 @@ mod tests {
         fewer.file.strategies.lab.disabled = vec!["L19".into(), "L20".into()];
         fewer.file.strategies.lab.variants = vec!["L2".into()];
         let c2 = catalog(&fewer);
-        assert_eq!(c2.iter().filter(|s| s.lab).count(), 23);
+        assert_eq!(
+            c2.iter().filter(|s| s.lab).count(),
+            wm_strategy::lab::FAMILIES - 2
+        );
         assert!(!c2.iter().any(|s| s.letter == "L19" || s.letter == "L20"));
         let l2 = c2.iter().find(|s| s.letter == "L2").unwrap();
         assert!(
@@ -541,7 +572,10 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "max_total_loss_usd" && v == "20.00")
         );
-        assert_eq!(every_strategy(&fewer).iter().filter(|s| s.lab).count(), 25);
+        assert_eq!(
+            every_strategy(&fewer).iter().filter(|s| s.lab).count(),
+            wm_strategy::lab::FAMILIES
+        );
         let mut again = cfg.clone();
         again.file.strategies.buy_yes.enabled = true;
         assert_eq!(catalog(&again)[0].id, "A_buy_yes_final_high");

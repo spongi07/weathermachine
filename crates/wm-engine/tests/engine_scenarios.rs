@@ -67,6 +67,7 @@ fn config(mode: RunMode) -> EngineConfig {
             routine_minutes: vec![25, 55],
             position: None,
             neighbours: Vec::new(),
+            upstream: Vec::new(),
         }],
         risk: RiskConfig::default(),
         buy_yes: BuyYesConfig::default(),
@@ -221,6 +222,7 @@ fn run(
     let mut ex = SimulatedExchange::new(SimConfig {
         latency_ms: 250,
         adverse_ticks: 0,
+        slippage_ticks: 0,
     });
     let mut outputs = Vec::new();
     let mut queue: std::collections::VecDeque<EventEnvelope> = events.into();

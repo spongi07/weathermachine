@@ -150,10 +150,37 @@ impl AwcMetarSource {
             .insert(station.clone(), at);
     }
 
+    /// The endpoint for several stations' METARs in one request (the
+    /// strategy lab's upstream airports).
+    pub fn endpoint_many(stations: &[StationId], hours: u32) -> String {
+        let ids: Vec<&str> = stations.iter().map(StationId::as_str).collect();
+        format!(
+            "/api/data/metar?ids={}&format=json&hours={hours}",
+            ids.join(",")
+        )
+    }
+
     /// Parse an AWC JSON body. Public for fixture tests.
     pub fn parse_body(
         body: &[u8],
         station: &StationId,
+        fetched_at: DateTime<Utc>,
+    ) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
+        Self::parse_entries(body, Some(station), fetched_at)
+    }
+
+    /// Every station's reports in an AWC body for several `ids`, each as
+    /// its own station's.
+    pub fn parse_body_any(
+        body: &[u8],
+        fetched_at: DateTime<Utc>,
+    ) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
+        Self::parse_entries(body, None, fetched_at)
+    }
+
+    fn parse_entries(
+        body: &[u8],
+        only: Option<&StationId>,
         fetched_at: DateTime<Utc>,
     ) -> Result<(Vec<ParsedReport>, Vec<String>), String> {
         if body.iter().all(u8::is_ascii_whitespace) {
@@ -173,10 +200,24 @@ impl AwcMetarSource {
             let st = icao
                 .clone()
                 .or_else(|| parsed.as_ref().ok().map(|m| m.station.clone()));
-            if st.as_deref() != Some(station.as_str()) {
-                warnings.push(format!("entry {i}: station {st:?} != {station}"));
-                continue;
-            }
+            let station = match (only, st.as_deref()) {
+                (Some(want), got) if got != Some(want.as_str()) => {
+                    warnings.push(format!("entry {i}: station {st:?} != {want}"));
+                    continue;
+                }
+                (Some(want), _) => want.clone(),
+                (None, Some(got)) => match StationId::new(got) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        warnings.push(format!("entry {i}: station {got:?} is no ICAO id"));
+                        continue;
+                    }
+                },
+                (None, None) => {
+                    warnings.push(format!("entry {i}: no station"));
+                    continue;
+                }
+            };
             let reference = e
                 .obs_time
                 .and_then(|t| Utc.timestamp_opt(t, 0).single())
@@ -196,7 +237,7 @@ impl AwcMetarSource {
             }
             let metar = parsed.ok();
             reports.push(ParsedReport {
-                station: station.clone(),
+                station,
                 observed_at,
                 report_type: report_type_of(metar.as_ref(), e.metar_type.as_deref()),
                 raw_text: raw,
@@ -592,6 +633,30 @@ mod tests {
         let (r, w) = AwcMetarSource::parse_body(foreign.as_bytes(), &eham(), Utc::now()).unwrap();
         assert!(r.is_empty());
         assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn awc_reads_several_stations_in_one_request() {
+        let ids = [
+            StationId::new("EBBR").unwrap(),
+            StationId::new("EGSH").unwrap(),
+        ];
+        assert_eq!(
+            AwcMetarSource::endpoint_many(&ids, 3),
+            "/api/data/metar?ids=EBBR,EGSH&format=json&hours=3"
+        );
+        let body = r#"[
+          {"icaoId":"EBBR","obsTime":1790427000,"temp":22,"rawOb":"METAR EBBR 261250Z 19010KT CAVOK 22/12 Q1014"},
+          {"icaoId":"EGSH","obsTime":1790427000,"temp":15,"rawOb":"METAR EGSH 261250Z 30018KT 9999 -RA BKN012 15/13 Q1010"},
+          {"obsTime":1790427000,"rawOb":""}
+        ]"#;
+        let (r, w) =
+            AwcMetarSource::parse_body_any(body.as_bytes(), utc("2026-09-26T13:00:00Z")).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].station.as_str(), "EBBR");
+        assert_eq!(r[1].station.as_str(), "EGSH");
+        assert_eq!(r[1].observed_at, utc("2026-09-26T12:50:00Z"));
+        assert_eq!(w.len(), 1, "the empty entry is a warning");
     }
 
     #[test]

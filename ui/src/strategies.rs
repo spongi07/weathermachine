@@ -268,6 +268,39 @@ fn lab_inputs_line(i: &LabInputsDto) -> String {
     if let Some(e) = i.yesterday_error_c {
         parts.push(format!("yesterday's error {e:+.1} °C"));
     }
+    if !i.knmi_extra.is_empty() {
+        parts.push(format!(
+            "KNMI {}",
+            i.knmi_extra
+                .iter()
+                .map(|(k, v)| format!("{k} {v:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    let read = i.upstream.iter().filter(|u| u.temp_c.is_some()).count();
+    if !i.upstream.is_empty() {
+        parts.push(format!(
+            "upstream {read} of {} airport(s){}",
+            i.upstream.len(),
+            {
+                let warm: Vec<String> = i
+                    .upstream
+                    .iter()
+                    .filter_map(|u| u.temp_c.map(|t| format!("{} {t:.0} °C", u.icao)))
+                    .collect();
+                if warm.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", warm.join(", "))
+                }
+            }
+        ));
+    }
+    parts.push(format!(
+        "{} ladder sample(s), {} METAR(s) yesterday",
+        i.ladder_samples, i.yesterday_reports
+    ));
     parts.push(format!("{} taker trade(s) today", i.taker_trades));
     parts.push(match i.wallet_days {
         Some(d) => format!(
@@ -279,7 +312,7 @@ fn lab_inputs_line(i: &LabInputsDto) -> String {
     parts.join(" · ")
 }
 
-/// The strategy lab (L1–L25): paper strategies on their own books.
+/// The strategy lab (L1–L65): paper strategies on their own books.
 #[component]
 pub fn LabPanel(snap: Snap) -> impl IntoView {
     let data = Memo::new(move |_| {
@@ -337,7 +370,7 @@ pub fn LabPanel(snap: Snap) -> impl IntoView {
         Some(view! {
             <section class="panel">
                 <div class="panel-title">
-                    <span>"STRATEGY LAB · PAPER · L1–L25"</span>
+                    <span>"STRATEGY LAB · PAPER · L1–L65"</span>
                     <span class="muted">{format!("each on its own paper book, never blocking A–K · {open} open, capital {}, realized today {}, total {}", fmt::usd(capital), fmt::usd_signed(today), fmt::usd_signed(total))}</span>
                 </div>
                 {inputs}

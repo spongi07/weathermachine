@@ -56,7 +56,7 @@ pub struct DashboardSnapshot {
     /// Every strategy of the engine, for its page.
     #[serde(default)]
     pub strategies: Vec<StrategyDto>,
-    /// The strategy lab's paper strategies (L1–L25): their inputs and
+    /// The strategy lab's paper strategies (L1–L65): their inputs and
     /// their own books. `None` with the lab off.
     #[serde(default)]
     pub lab: Option<LabDto>,
@@ -110,7 +110,7 @@ pub struct LabDto {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LabInputsDto {
     pub location: String,
-    /// KNMI readings of the station kept (the last 36 hours).
+    /// KNMI readings of the station kept (the last 48 hours).
     pub knmi_readings: usize,
     pub radiation_wm2: Option<i32>,
     /// The latest radiation as a share of the clear sky, percent.
@@ -127,6 +127,31 @@ pub struct LabInputsDto {
     pub wallet_days: Option<u32>,
     pub wallets_skilled: usize,
     pub wallets_losing: usize,
+    /// KNMI's other parameters of the latest interval read (`td` 12.1 …).
+    #[serde(default)]
+    pub knmi_extra: Vec<(String, f64)>,
+    #[serde(default)]
+    pub knmi_extra_end_ms: Option<i64>,
+    /// The upstream airports and their latest report (L26, L31, L36).
+    #[serde(default)]
+    pub upstream: Vec<LabUpstreamDto>,
+    /// Ladder samples of today's market kept (one a minute).
+    #[serde(default)]
+    pub ladder_samples: usize,
+    /// Yesterday's METARs kept (L30, L41).
+    #[serde(default)]
+    pub yesterday_reports: usize,
+}
+
+/// An upstream airport's latest report.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabUpstreamDto {
+    pub icao: String,
+    pub bearing_deg: f64,
+    pub distance_km: f64,
+    pub observed_ms: Option<i64>,
+    pub temp_c: Option<f64>,
+    pub weather: Option<String>,
 }
 
 /// A neighbouring KNMI station's latest reading.
@@ -241,7 +266,7 @@ pub struct StrategyDto {
     /// Strategy F: its time slots.
     #[serde(default)]
     pub peak_slot: Option<PeakSlotDto>,
-    /// A strategy of the lab (L1–L25), trading its own paper book.
+    /// A strategy of the lab (L1–L65), trading its own paper book.
     #[serde(default)]
     pub lab: bool,
 }

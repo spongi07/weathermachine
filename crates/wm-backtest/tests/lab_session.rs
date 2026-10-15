@@ -59,6 +59,7 @@ fn config(families: &[u8]) -> EngineConfig {
             routine_minutes: vec![25, 55],
             position: Some((52.318, 4.790)),
             neighbours: Vec::new(),
+            upstream: Vec::new(),
         }],
         risk: RiskConfig::default(),
         buy_yes: BuyYesConfig {
@@ -91,7 +92,7 @@ fn config(families: &[u8]) -> EngineConfig {
             ..KnmiNowcastConfig::default()
         },
         lab: LabConfig {
-            disabled: (1..=25u8)
+            disabled: (1..=wm_strategy::lab::FAMILIES as u8)
                 .filter(|f| !families.contains(f))
                 .map(code)
                 .collect(),
@@ -187,12 +188,11 @@ fn session(families: &[u8], m: &DailyTemperatureMarket) -> SimulationSession {
 }
 
 fn session_with(cfg: EngineConfig, m: &DailyTemperatureMarket) -> SimulationSession {
-    let mut s = SimulationSession::new(
-        cfg,
-        SimConfig::default(),
-        Duration::hours(2),
-        Arc::new(NoEdgeModel),
-    );
+    session_sim(cfg, SimConfig::default(), m)
+}
+
+fn session_sim(cfg: EngineConfig, sim: SimConfig, m: &DailyTemperatureMarket) -> SimulationSession {
+    let mut s = SimulationSession::new(cfg, sim, Duration::hours(2), Arc::new(NoEdgeModel));
     let mut h =
         ProviderHealthSnapshot::new(ProviderId::awc(), Some(eham()), utc("2026-06-30T21:00:00Z"));
     h.state = ProviderHealthState::Healthy;
@@ -665,5 +665,172 @@ fn before_todays_ready_time_the_forecast_rules_say_when_the_forecast_is_usable()
     assert!(
         !line.contains("forecast is usable") && !line.contains("no day-1 forecast"),
         "{line}"
+    );
+}
+
+/// A YES book of `v` °C at `at`.
+fn yes_book(
+    m: &DailyTemperatureMarket,
+    v: i32,
+    bid: &str,
+    ask: &str,
+    at: DateTime<Utc>,
+) -> EventEnvelope {
+    let o = m.outcome_for_value(v).unwrap();
+    env(
+        at,
+        WeatherMachineEvent::OrderBookUpdate(OrderBookEvent {
+            book: synthetic_book(&o.yes_token, Some(bid), Some(ask), 200, at),
+        }),
+    )
+}
+
+/// L28's dip in the ladder at `at`: 20 °C under both its neighbours.
+fn dip(s: &mut SimulationSession, m: &DailyTemperatureMarket, at: DateTime<Utc>) {
+    for (v, bid, ask) in [
+        (19, "0.14", "0.16"),
+        (20, "0.08", "0.10"),
+        (21, "0.24", "0.26"),
+        (22, "0.10", "0.12"),
+    ] {
+        s.push(yes_book(m, v, bid, ask, at));
+    }
+}
+
+#[test]
+fn a_new_family_holds_its_signal_a_minute_then_pays_the_slippage_350_ms_later() {
+    let m = market();
+    let yes20 = m.outcome_for_value(20).unwrap().yes_token.clone();
+    let mut s = session_sim(
+        config(&[28]),
+        SimConfig {
+            latency_ms: 350,
+            adverse_ticks: 0,
+            slippage_ticks: 1,
+        },
+        &m,
+    );
+    let t0 = utc("2026-07-01T11:30:00Z");
+    // The books refresh every ten seconds; the signal holds a minute first.
+    for k in 0..6 {
+        let t = t0 + Duration::seconds(10 * k);
+        dip(&mut s, &m, t);
+        assert!(s.run_until(t).approved.is_empty(), "{t}");
+    }
+    dip(&mut s, &m, t0 + Duration::seconds(61));
+    let out = s.run_until(t0 + Duration::seconds(61));
+    assert_eq!(out.approved.len(), 1, "{:?}", out.decisions);
+    let i = out.approved[0].intent();
+    assert_eq!(i.strategy.as_str(), "L28_ladder_dip");
+    assert_eq!((i.token.clone(), i.side), (yes20.clone(), Side::Buy));
+    assert_eq!(
+        i.limit_price,
+        Price::parse("0.11").unwrap(),
+        "a cent above the ask"
+    );
+    assert_eq!(
+        i.shares,
+        Shares::from_whole(136),
+        "$15 (aggressive) at the limit"
+    );
+    // Nothing fills before 350 ms; then a tick above the ask, at the limit.
+    dip(&mut s, &m, t0 + Duration::milliseconds(61_300));
+    assert!(
+        s.run_until(t0 + Duration::milliseconds(61_300))
+            .trades
+            .is_empty()
+    );
+    dip(&mut s, &m, t0 + Duration::milliseconds(61_400));
+    let out = s.run_until(t0 + Duration::milliseconds(61_400));
+    assert_eq!(out.trades.len(), 1, "{:?}", out.trades);
+    let snap = s.engine().snapshot();
+    let l28 = snap
+        .lab_books
+        .iter()
+        .find(|b| b.strategy.as_str() == "L28_ladder_dip")
+        .unwrap();
+    assert_eq!(l28.positions.len(), 1);
+    assert_eq!(l28.positions[0].shares, Shares::from_whole(136));
+    let avg = l28.positions[0].avg_cost();
+    // 0.11 (the ask 0.10 and a tick of slippage) and the taker fee
+    // 0.05 × 0.11 × 0.89 = 0.0049 a share.
+    assert!(
+        (avg - 0.114_895).abs() < 1e-6,
+        "0.11 a share and the fee: {avg}"
+    );
+    assert!(
+        snap.positions.iter().all(|p| p.shares.micros() == 0),
+        "not the main book"
+    );
+}
+
+#[test]
+fn the_lab_keeps_knmi_s_other_parameters_upstream_reports_and_a_ladder() {
+    use wm_core::event::{KnmiExtrasEvent, UpstreamReportsEvent};
+    use wm_core::weather::{TenMinuteExtras, UpstreamReport};
+    let m = market();
+    let mut cfg = config(&[26, 27]);
+    cfg.locations[0].upstream = vec![wm_engine::UpstreamStation {
+        station: StationId::new("EBAW").unwrap(),
+        bearing_deg: 185.0,
+        distance_km: 126.0,
+    }];
+    let mut s = session_with(cfg, &m);
+    let at = utc("2026-07-01T11:30:00Z");
+    let extras = |end: &str, td: f64| TenMinuteExtras {
+        station: eham(),
+        interval_end: utc(end),
+        values: [("td".to_owned(), td), ("ff".to_owned(), 4.0)]
+            .into_iter()
+            .collect(),
+        received_at: at,
+    };
+    s.push(env(
+        at,
+        WeatherMachineEvent::KnmiExtras(KnmiExtrasEvent {
+            readings: vec![
+                extras("2026-07-01T11:10:00Z", 12.0),
+                extras("2026-07-01T11:20:00Z", 11.5),
+            ],
+        }),
+    ));
+    s.push(env(
+        at,
+        WeatherMachineEvent::UpstreamReports(UpstreamReportsEvent {
+            reports: vec![UpstreamReport {
+                station: StationId::new("EBAW").unwrap(),
+                observed_at: utc("2026-07-01T11:20:00Z"),
+                raw_text: "EBAW 011120Z 19010KT CAVOK 23/12 Q1014".into(),
+                temperature: Some(TempC::from_whole(23)),
+                dewpoint: Some(TempC::from_whole(12)),
+                received_at: at,
+            }],
+        }),
+    ));
+    dip(&mut s, &m, at);
+    dip(&mut s, &m, at + Duration::seconds(30));
+    dip(&mut s, &m, at + Duration::seconds(90));
+    s.run_until(at + Duration::seconds(90));
+    let snap = s.engine().snapshot();
+    let lab = snap.locations[0].lab.as_ref().unwrap();
+    let (end, values) = lab.knmi_extra.as_ref().unwrap();
+    assert_eq!(*end, utc("2026-07-01T11:20:00Z"));
+    assert_eq!(values.get("td"), Some(&11.5));
+    assert_eq!(lab.upstream.len(), 1);
+    assert_eq!(lab.upstream[0].icao, "EBAW");
+    assert_eq!(lab.upstream[0].temp_tenths, Some(230));
+    assert_eq!(lab.ladder_samples, 2, "one a minute: 11:30:00 and 11:31:30");
+    // The upstream rule reads it: wind 240° does not blow from Antwerp.
+    let l26: Vec<_> = snap.locations[0]
+        .evaluations
+        .iter()
+        .filter(|e| e.strategy.as_str() == "L26_upstream_warmth")
+        .collect();
+    assert!(
+        l26.iter().any(|e| e
+            .blockers
+            .iter()
+            .any(|b| b.contains("no airport within 35°"))),
+        "{l26:?}"
     );
 }

@@ -303,8 +303,21 @@ pub(crate) struct LabRule {
     pub(crate) kind: Kind,
 }
 
-/// The families' names, L1 first (the paper strategies' names).
-pub const NAMES: [&str; FAMILIES as usize] = wm_strategy::lab::NAMES;
+/// The replayed families' names, L1 first (the paper strategies' names;
+/// L26–L65 trade in paper only).
+pub const NAMES: [&str; FAMILIES as usize] = replayed_names();
+
+const fn replayed_names() -> [&'static str; FAMILIES as usize] {
+    let mut out = [""; FAMILIES as usize];
+    let mut i = 0;
+    while i < FAMILIES as usize {
+        out[i] = wm_strategy::lab::NAMES[i];
+        i += 1;
+    }
+    out
+}
+
+const _: () = assert!(FAMILIES as usize == wm_strategy::lab::REPLAYED);
 
 impl LabRule {
     pub(crate) fn name(&self) -> &'static str {

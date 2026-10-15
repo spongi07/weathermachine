@@ -134,7 +134,7 @@ fn default_knmi_provider() -> ProviderSection {
             circuit_failure_threshold: 5,
             circuit_open_base: std::time::Duration::from_secs(300),
             circuit_open_max: std::time::Duration::from_secs(3600),
-            daily_budget: Some(4_000),
+            daily_budget: Some(4_500),
             max_body_bytes: 2 * 1024 * 1024,
             ..RateLimitPolicy::public_data_conservative()
         },
@@ -186,6 +186,16 @@ pub struct NeighbourToml {
     pub longitude: f64,
 }
 
+/// An airport upstream whose METARs the lab reads (L26, L31, L36).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamToml {
+    /// ICAO code (`EBBR`).
+    pub icao: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
 /// What the strategy lab's paper strategies read beyond A–K's inputs;
 /// `[strategies.lab]` switches them on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +216,13 @@ pub struct LabSection {
     /// Takers are scored on this many settled market days before today
     /// (L19, L20); the days are cached beside `research market`'s.
     pub wallet_history_days: u32,
+    /// KNMI's other ten-minute parameters read after each new reading of
+    /// the station (L27, L29, L32, L37, L42, L43): one request; a
+    /// parameter KNMI refuses is dropped and alerted once. Empty: none.
+    pub knmi_extra_parameters: Vec<String>,
+    /// Airports upstream (60–300 km) whose METARs are read twice an hour,
+    /// at :10 and :40 away from the report windows (L26, L31, L36).
+    pub upstream: Vec<UpstreamToml>,
 }
 
 impl Default for LabSection {
@@ -229,6 +246,69 @@ impl Default for LabSection {
             knmi_history_minutes: 180,
             taker_poll_seconds: 20,
             wallet_history_days: 60,
+            knmi_extra_parameters: ["td", "rh", "ff", "fx", "dd", "pp", "ss"]
+                .map(String::from)
+                .to_vec(),
+            upstream: default_upstream(),
+        }
+    }
+}
+
+/// Airports 60–300 km around Schiphol, every direction but the open sea:
+/// De Kooy, Leeuwarden, Groningen, Twente, Düsseldorf, Volkel, Eindhoven,
+/// Antwerp, Brussels, Ostend, Southend and Norwich.
+pub fn default_upstream() -> Vec<UpstreamToml> {
+    [
+        ("EHKD", 52.924, 4.780),
+        ("EHLW", 53.228, 5.761),
+        ("EHGG", 53.120, 6.579),
+        ("EHTW", 52.274, 6.889),
+        ("EDDL", 51.289, 6.767),
+        ("EHVK", 51.657, 5.707),
+        ("EHEH", 51.450, 5.374),
+        ("EBAW", 51.189, 4.460),
+        ("EBBR", 50.901, 4.484),
+        ("EBOS", 51.199, 2.862),
+        ("EGMC", 51.571, 0.696),
+        ("EGSH", 52.676, 1.283),
+    ]
+    .into_iter()
+    .map(|(icao, latitude, longitude)| UpstreamToml {
+        icao: icao.into(),
+        latitude,
+        longitude,
+    })
+    .collect()
+}
+
+/// How paper orders are executed: the bot's measured latency and the
+/// slippage a taker pays.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PaperSection {
+    /// From the decision to the order's matching: Polymarket's 250 ms plus
+    /// the 100 ms from decision to order on the server.
+    pub latency_ms: i64,
+    /// A taker pays this many ticks above each level it takes, never above
+    /// its limit.
+    pub slippage_ticks: u32,
+}
+
+impl Default for PaperSection {
+    fn default() -> Self {
+        Self {
+            latency_ms: 350,
+            slippage_ticks: 1,
+        }
+    }
+}
+
+impl PaperSection {
+    pub fn sim(&self) -> wm_execution::SimConfig {
+        wm_execution::SimConfig {
+            latency_ms: self.latency_ms,
+            slippage_ticks: self.slippage_ticks,
+            ..wm_execution::SimConfig::default()
         }
     }
 }
@@ -719,6 +799,8 @@ pub struct AppConfigFile {
     pub lab: LabSection,
     #[serde(default)]
     pub live: LiveSection,
+    #[serde(default)]
+    pub paper: PaperSection,
 }
 
 /// Strategy G's live twin (`G_live`): G's rule placing real orders on
@@ -1433,6 +1515,10 @@ impl AppConfig {
             )?;
         }
         self.validate_lab()?;
+        let paper = &self.file.paper;
+        if !(0..=10_000).contains(&paper.latency_ms) || paper.slippage_ticks > 5 {
+            bail!("[paper]: need latency_ms 0–10000 and slippage_ticks 0–5");
+        }
         self.validate_live()
     }
 
@@ -1502,19 +1588,35 @@ impl AppConfig {
         let unknown = lab.unknown_codes();
         if !unknown.is_empty() {
             bail!(
-                "strategies.lab: unknown family code(s) {} (use L1 … L25)",
+                "strategies.lab: unknown family code(s) {} (use L1 … L65)",
                 unknown.join(", ")
             );
         }
-        if lab.notional <= Usd::ZERO {
-            bail!("strategies.lab.notional must be positive");
-        }
+        let stakes = [
+            ("notional", lab.notional),
+            ("aggressive_notional", lab.aggressive_notional),
+            ("balanced_notional", lab.balanced_notional),
+            ("defensive_notional", lab.defensive_notional),
+        ];
         let r = &lab.risk;
-        if r.position_size_usd < lab.notional {
+        for (name, stake) in stakes {
+            if stake <= Usd::ZERO {
+                bail!("strategies.lab.{name} must be positive");
+            }
+            if r.position_size_usd < stake {
+                bail!(
+                    "strategies.lab.risk.position_size_usd ({}) must be at least the {name} ({stake}): every trade would be rejected",
+                    r.position_size_usd
+                );
+            }
+        }
+        let cent = Price::saturating_from_micros(10_000);
+        if !(0..=600).contains(&lab.confirm_seconds)
+            || lab.taker_tolerance > Price::saturating_from_micros(50_000)
+            || !lab.taker_tolerance.micros().is_multiple_of(cent.micros())
+        {
             bail!(
-                "strategies.lab.risk.position_size_usd ({}) must be at least the notional ({}): every trade would be rejected",
-                r.position_size_usd,
-                lab.notional
+                "strategies.lab: need confirm_seconds 0–600 and taker_tolerance a whole number of cents up to 0.05"
             );
         }
         let f = self.peak_slot();
@@ -1560,6 +1662,23 @@ impl AppConfig {
             bail!(
                 "[lab]: need taker_poll_seconds ≥ 10, wallet_history_days 1–365 and knmi_history_minutes 40–1440"
             );
+        }
+        for p in &inputs.knmi_extra_parameters {
+            if p.is_empty() || !p.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                bail!("[lab].knmi_extra_parameters: '{p}' is no KNMI parameter name");
+            }
+        }
+        for u in &inputs.upstream {
+            let icao_ok = u.icao.len() == 4 && u.icao.bytes().all(|b| b.is_ascii_uppercase());
+            if !icao_ok
+                || !(-90.0..=90.0).contains(&u.latitude)
+                || !(-180.0..=180.0).contains(&u.longitude)
+            {
+                bail!(
+                    "[lab].upstream: '{}' needs a four-letter ICAO code and a position",
+                    u.icao
+                );
+            }
         }
         for n in &inputs.neighbours {
             let wmo_ok = n.wmo.len() == 5 && n.wmo.bytes().all(|b| b.is_ascii_digit());
@@ -1906,7 +2025,7 @@ mod tests {
                 ..wm_strategy::LabConfig::default()
             }
         );
-        for f in 1..=25 {
+        for f in 1..=wm_strategy::lab::FAMILIES as u8 {
             assert_eq!(st.lab.runs(f), !off.contains(&f), "L{f}");
             assert!(!st.lab.variant(f), "L{f}");
         }
@@ -2068,7 +2187,7 @@ mod tests {
         assert!(file.risk.strategy_caps.is_empty());
         // Without its section the lab is off; its inputs keep their defaults.
         assert_eq!(st.lab, wm_strategy::LabConfig::absent());
-        assert!((1..=25).all(|f| !st.lab.runs(f)));
+        assert!((1..=wm_strategy::lab::FAMILIES as u8).all(|f| !st.lab.runs(f)));
         assert_eq!(file.lab, LabSection::default());
         // Unwind leaves G–K alone even in an older file.
         assert_eq!(
@@ -2238,8 +2357,8 @@ mod tests {
         fn usd(whole: i64) -> wm_core::units::Usd {
             wm_core::units::Usd::from_whole(whole)
         }
-        let bad: [fn(&mut AppConfig); 14] = [
-            |c| c.file.strategies.lab.disabled = vec!["L26".into()],
+        let bad: [fn(&mut AppConfig); 22] = [
+            |c| c.file.strategies.lab.disabled = vec!["L66".into()],
             |c| c.file.strategies.lab.variants = vec!["l2".into()],
             |c| c.file.strategies.lab.notional = wm_core::units::Usd::ZERO,
             // Below the $20 notional, every trade would be rejected.
@@ -2261,6 +2380,15 @@ mod tests {
             |c| c.file.lab.wallet_history_days = 0,
             |c| c.file.lab.knmi_history_minutes = 30,
             |c| c.file.lab.neighbours[0].wmo = "6215".into(),
+            |c| c.file.strategies.lab.aggressive_notional = wm_core::units::Usd::ZERO,
+            // Above the $25 order cap, every defensive trade would be refused.
+            |c| c.file.strategies.lab.defensive_notional = usd(30),
+            |c| c.file.strategies.lab.confirm_seconds = 601,
+            |c| c.file.strategies.lab.taker_tolerance = Price::saturating_from_micros(5_000),
+            |c| c.file.lab.knmi_extra_parameters = vec!["t-d".into()],
+            |c| c.file.lab.upstream[0].icao = "ebbr".into(),
+            |c| c.file.paper.latency_ms = -1,
+            |c| c.file.paper.slippage_ticks = 9,
         ];
         for (i, f) in bad.into_iter().enumerate() {
             let mut c = ok.clone();
@@ -2272,7 +2400,7 @@ mod tests {
         let mut c = ok.clone();
         c.file.strategies.lab.variants = vec!["L2".into(), "L99".into()];
         let err = format!("{:#}", c.validate().unwrap_err());
-        assert!(err.contains("L99") && err.contains("L1 … L25"), "{err}");
+        assert!(err.contains("L99") && err.contains("L1 … L65"), "{err}");
         // With L3 switched off, as shipped since 14 October 2026, the lab's
         // stake need not cover F's shares.
         let mut c = ok.clone();

@@ -114,6 +114,41 @@ fn yes18(m: &DailyTemperatureMarket) -> TokenId {
 }
 
 #[test]
+fn a_taker_pays_the_slippage_up_to_its_limit_after_350_ms() {
+    let m = market();
+    let book = synthetic_book(&yes18(&m), Some("0.94"), Some("0.95"), 100, utc(T0));
+    let cfg = SimConfig {
+        latency_ms: 350,
+        adverse_ticks: 0,
+        slippage_ticks: 1,
+    };
+    // A limit a cent above the ask: the fill pays that cent.
+    let a = approve(&m, &book, "0.96", 10, TimeInForce::Fak, 1);
+    let mut ex = SimulatedExchange::new(cfg.clone());
+    ex.on_book(&book, utc(T0));
+    ex.submit(&a, FeeSchedule::taker(50_000), utc(T0));
+    assert!(
+        ex.process_due(utc(T0) + Duration::milliseconds(349))
+            .is_empty(),
+        "not before 350 ms"
+    );
+    let evs = ex.process_due(utc(T0) + Duration::milliseconds(350));
+    let fill = evs[0].fill.as_ref().unwrap();
+    assert_eq!(fill.price, Price::parse("0.96").unwrap());
+    assert_eq!(fill.shares, Shares::from_whole(10));
+    // A limit at the ask never pays more than the limit.
+    let b = approve(&m, &book, "0.95", 10, TimeInForce::Fak, 2);
+    let mut ex = SimulatedExchange::new(cfg);
+    ex.on_book(&book, utc(T0));
+    ex.submit(&b, FeeSchedule::taker(50_000), utc(T0));
+    let evs = ex.process_due(utc(T0) + Duration::milliseconds(350));
+    assert_eq!(
+        evs[0].fill.as_ref().unwrap().price,
+        Price::parse("0.95").unwrap()
+    );
+}
+
+#[test]
 fn fak_fills_after_latency_against_current_book() {
     let m = market();
     let book = synthetic_book(&yes18(&m), Some("0.94"), Some("0.95"), 100, utc(T0));
@@ -121,6 +156,7 @@ fn fak_fills_after_latency_against_current_book() {
     let mut ex = SimulatedExchange::new(SimConfig {
         latency_ms: 250,
         adverse_ticks: 0,
+        slippage_ticks: 0,
     });
     ex.on_book(&book, utc(T0));
     let evs = ex.submit(&a, FeeSchedule::taker(50_000), utc(T0));
@@ -193,6 +229,7 @@ fn fok_is_all_or_nothing_and_missing_book_rejects() {
     let mut ex = SimulatedExchange::new(SimConfig {
         latency_ms: 0,
         adverse_ticks: 0,
+        slippage_ticks: 0,
     });
     ex.on_book(&thin, utc(T0));
     let evs = ex.submit(&a, FeeSchedule::ZERO, utc(T0));
@@ -202,6 +239,7 @@ fn fok_is_all_or_nothing_and_missing_book_rejects() {
     let mut empty = SimulatedExchange::new(SimConfig {
         latency_ms: 0,
         adverse_ticks: 0,
+        slippage_ticks: 0,
     });
     let evs = empty.submit(&a, FeeSchedule::ZERO, utc(T0));
     assert_eq!(evs.last().unwrap().update.status, OrderStatus::Rejected);
@@ -216,6 +254,7 @@ fn gtc_rests_then_fills_from_trades_after_queue() {
     let mut ex = SimulatedExchange::new(SimConfig {
         latency_ms: 0,
         adverse_ticks: 0,
+        slippage_ticks: 0,
     });
     ex.on_book(&book, utc(T0));
     let evs = ex.submit(&a, FeeSchedule::taker(50_000), utc(T0));
@@ -256,6 +295,7 @@ fn gtc_crossed_by_book_fills_as_maker_and_gtd_expires() {
     let mut ex = SimulatedExchange::new(SimConfig {
         latency_ms: 0,
         adverse_ticks: 0,
+        slippage_ticks: 0,
     });
     ex.on_book(&book, utc(T0));
     let a = approve(&m, &book, "0.95", 10, TimeInForce::Gtc, 5);

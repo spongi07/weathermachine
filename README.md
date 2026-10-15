@@ -81,9 +81,19 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   that lost live and the seven that made no trade in nine days
   ([live review](docs/research/live-review-2026-10-12.md)), and on
   14 October L3, which enters as F does
-  ([live review](docs/research/live-review-2026-10-14.md)). The dashboard's
-  lab panel, each family's page and `report paper` show their record apart
-  from the main book's.
+  ([live review](docs/research/live-review-2026-10-14.md)). Since 14 October
+  forty more run in paper, **L26–L65**, from how the market works rather
+  than from public forecasts: air on its way from twelve airports upstream,
+  KNMI's dew point, wind, gusts, pressure and humidity at Schiphol, the
+  price ladder's shape and history, who trades and when, and how the market
+  reacts to the weather — aggressive ($15), balanced ($20) and defensive
+  ($25), each with a signal of its own
+  ([§8](docs/research/strategy-lab.md#8-l26l65-forty-families-from-how-the-market-works-14-october-2026)).
+  None races: a signal trades only after it has held a minute, a taker
+  buys at up to a cent over the ask it saw, and every paper order meets the
+  book 350 ms after the decision and pays a tick of slippage (`[paper]`).
+  The dashboard's lab panel, each family's page and `report paper` show
+  their record apart from the main book's.
 * **Uses forecasts only when they are proven.** A day-1 forecast (Open-Meteo
   Previous Runs: every hourly value forecast 24 h ahead, the same product in
   training and live, so no look-ahead) can refine the model with one feature:
