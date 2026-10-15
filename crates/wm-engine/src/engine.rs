@@ -1858,6 +1858,7 @@ impl Engine {
         let today = now.date_naive();
         for r in &state.fills {
             let b = self.restore_book(&r.strategy);
+            let live = self.live_book == Some(b);
             let book = &mut self.paper[b];
             let before = book.positions.total_realized_pnl();
             match book.positions.apply_fill(&r.fill, &r.instrument) {
@@ -1875,7 +1876,13 @@ impl Engine {
                         book.risk.record_realized_pnl(delta, r.fill.ts);
                         if r.fill.ts.date_naive() == today {
                             book.realized_pnl_total += delta;
-                            summary.realized_today += delta;
+                            // Each toward its own book's limit (15 October
+                            // 2026: L59's sale was named the main book's).
+                            match (b == MAIN, live) {
+                                (true, _) => summary.realized_today += delta,
+                                (false, true) => summary.live_realized_today += delta,
+                                (false, false) => summary.lab_realized_today += delta,
+                            }
                         }
                     }
                     if b == MAIN

@@ -412,6 +412,19 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
             },
             RestoredFill {
                 fill: fill("l7", 47),
+                instrument: instrument.clone(),
+                strategy: StrategyId::from_static("L7_knmi_slope"),
+            },
+            // L7 sold 10 at 0.40 today: −$0.20, its own book's.
+            RestoredFill {
+                fill: Fill {
+                    client_order_id: ClientOrderId::from_static_string("l7-sell".into()),
+                    side: Side::Sell,
+                    price: Price::parse("0.40").unwrap(),
+                    shares: Shares::from_whole(10),
+                    ts: utc("2026-07-01T12:10:00Z"),
+                    ..fill("l7-sell", 10)
+                },
                 instrument,
                 strategy: StrategyId::from_static("L7_knmi_slope"),
             },
@@ -427,6 +440,9 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
     assert_eq!(summary.open_positions, 2);
     assert_eq!(summary.new_exposure_today, Usd::from_whole(10), "main");
     assert_eq!(summary.lab_new_exposure_today, Usd::from_whole(20), "L7");
+    let minus_20c = Usd::from_micros(-200_000);
+    assert_eq!(summary.lab_realized_today, minus_20c, "L7's sale");
+    assert!(summary.realized_today.is_zero(), "not the main book's");
     let k = e.positions().get(&o.no_token).unwrap();
     assert_eq!(k.shares, Shares::from_whole(23));
     let l7 = e
@@ -434,7 +450,7 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
         .unwrap()
         .get(&o.no_token)
         .unwrap();
-    assert_eq!(l7.shares, Shares::from_whole(47));
+    assert_eq!(l7.shares, Shares::from_whole(37));
     let snap = e.snapshot();
     assert_eq!(
         snap.position_strategy
@@ -445,6 +461,11 @@ fn a_restart_gives_each_fill_back_to_its_own_book() {
     );
     assert_eq!(snap.daily_new_exposure, Usd::from_whole(10));
     assert_eq!(snap.lab_books[0].daily_new_exposure, Usd::from_whole(20));
+    assert!(
+        snap.daily_realized_pnl.is_zero(),
+        "the main book sold nothing"
+    );
+    assert_eq!(snap.lab_books[0].daily_realized_pnl, minus_20c);
 }
 
 /// A lab strategy switched off since it bought keeps its position on a

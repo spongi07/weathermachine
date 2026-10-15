@@ -56,8 +56,14 @@ pub struct RestoreSummary {
     pub open_positions: usize,
     pub open_shares: Shares,
     pub open_cost: Usd,
-    /// Realized P&L of the restored sells made today (UTC).
+    /// Realized P&L of the main book's restored sells made today (UTC).
     pub realized_today: Usd,
+    /// The lab books' together; each counts toward its own book's limit.
+    #[serde(default)]
+    pub lab_realized_today: Usd,
+    /// The live twin's, toward its own book's limit.
+    #[serde(default)]
+    pub live_realized_today: Usd,
     /// Today's new exposure restored to the main book's daily limit.
     pub new_exposure_today: Usd,
     /// The lab books' together; each counts toward its own book's limit.

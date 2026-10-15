@@ -313,17 +313,45 @@ pub fn describe(s: &RestoreSummary) -> String {
             usd(s.realized_today)
         ));
     }
-    if !s.lab_new_exposure_today.is_zero() {
-        text.push_str(&format!(
+    // The lab books' and the live twin's apart: each counts toward its own
+    // book's limits, never the main book's.
+    match (
+        s.lab_new_exposure_today.is_zero(),
+        s.lab_realized_today.is_zero(),
+    ) {
+        (true, true) => {}
+        (false, true) => text.push_str(&format!(
             "; the lab books' {} counts toward their own limits",
             usd(s.lab_new_exposure_today)
-        ));
+        )),
+        (true, false) => text.push_str(&format!(
+            "; {} realized by the lab books' sales today counts toward their own limits",
+            usd(s.lab_realized_today)
+        )),
+        (false, false) => text.push_str(&format!(
+            "; the lab books' {} counts toward their own limits, and so does {} realized by their sales today",
+            usd(s.lab_new_exposure_today),
+            usd(s.lab_realized_today)
+        )),
     }
-    if !s.live_new_exposure_today.is_zero() {
-        text.push_str(&format!(
+    match (
+        s.live_new_exposure_today.is_zero(),
+        s.live_realized_today.is_zero(),
+    ) {
+        (true, true) => {}
+        (false, true) => text.push_str(&format!(
             "; the live twin's {} toward its own",
             usd(s.live_new_exposure_today)
-        ));
+        )),
+        (true, false) => text.push_str(&format!(
+            "; {} realized by the live twin's sales today toward its own",
+            usd(s.live_realized_today)
+        )),
+        (false, false) => text.push_str(&format!(
+            "; the live twin's {} toward its own, and so does {} realized by its sales today",
+            usd(s.live_new_exposure_today),
+            usd(s.live_realized_today)
+        )),
     }
     if !s.rejected.is_empty() {
         text.push_str(&format!(
@@ -411,5 +439,31 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("1 fill(s) refused: wm-x on m"), "{text}");
+        // A lab book's sale counts toward its own book (15 October 2026:
+        // L59's −$2.40 was named the main book's).
+        s.realized_today = Usd::ZERO;
+        s.lab_new_exposure_today = Usd::from_micros(77_280_000);
+        s.lab_realized_today = Usd::from_micros(-2_400_000);
+        let text = describe(&s);
+        assert!(!text.contains("restored sales"), "{text}");
+        assert!(
+            text.contains(
+                "; the lab books' $77.28 counts toward their own limits, and so does −$2.40 realized by their sales today"
+            ),
+            "{text}"
+        );
+        s.lab_new_exposure_today = Usd::ZERO;
+        s.live_realized_today = Usd::from_micros(500_000);
+        let text = describe(&s);
+        assert!(
+            text.contains(
+                "; −$2.40 realized by the lab books' sales today counts toward their own limits"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("; the live twin's $19.13 toward its own, and so does $0.50 realized by its sales today"),
+            "{text}"
+        );
     }
 }
