@@ -203,6 +203,17 @@ pub fn max_p_in_bucket(
     any.then_some((p, support))
 }
 
+/// Whether every view's distribution prices `bucket` on its own
+/// ([`IncrementDistribution::prices_bucket`]); false without a distribution.
+pub fn views_price_bucket(views: &[ViewEvaluation], high: i32, bucket: &TemperatureBucket) -> bool {
+    !views.is_empty()
+        && views.iter().all(|v| {
+            v.distribution
+                .as_ref()
+                .is_some_and(|d| d.prices_bucket(high, bucket))
+        })
+}
+
 /// How a strategy combines its model with the market.
 ///
 /// The book is information: when it disagrees with the model, the model is

@@ -593,8 +593,16 @@ the day's high (two until 2 October 2026).
 
 Its evaluation line names the bid it would rest (`· bid 0.24 (maker)`):
 the EV is taken there, maker fee nil, not at the NO ask the line also shows.
-Its `p` is the NO's lower bound, one minus the bucket's upper bound, so
-every bucket in the model's open last cell shows the same `p`.
+A bucket in the model's open last cell (the high + K − 1 °C and beyond, one
+probability for all: with K = 4, every bucket G trades from three degrees
+up) has no probability of its own, so its line shows no `p` and no EV
+(`views_price_bucket`; until 16 October 2026 it showed the NO's floor, one
+minus the whole cell — the same `p`, 0.335 at 01:22 that day, on every such
+bucket, with an EV of −0.62); the ratio check still holds the cell's bound
+against the YES, and the history ranks G's closest calls by blockers, then
+the dearest NO bid. A day still in progress is judged by its high so far:
+its calls read "winning/losing so far", and the live twin's settled P&L is
+named real money.
 
 **RISK.** A bucket that wins costs the whole NO price (12–100 × the
 premium). The edge is a fraction of a cent per dollar a day: a small, steady

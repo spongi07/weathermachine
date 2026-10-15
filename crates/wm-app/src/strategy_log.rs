@@ -556,9 +556,10 @@ fn history_section(s: &mut String, r: &PaperReport, days: usize, strategy: &Stra
         .sum();
     let _ = writeln!(
         s,
-        "Totals: {signals} signal(s), {} proposal(s) ({} approved), {orders} order(s), settled paper P&L {}.\n",
+        "Totals: {signals} signal(s), {} proposal(s) ({} approved), {orders} order(s), settled {} {}.\n",
         proposals.len(),
         proposals.iter().filter(|p| p.approved).count(),
+        pnl_label(strategy),
         paper_report::usd(pnl)
     );
     for d in shown {
@@ -566,10 +567,25 @@ fn history_section(s: &mut String, r: &PaperReport, days: usize, strategy: &Stra
     }
 }
 
+/// What a strategy's settled P&L is: real money for the live twin.
+fn pnl_label(strategy: &StrategyDto) -> &'static str {
+    if strategy.id == wm_strategy::tail_seller::LIVE_ID {
+        "P&L (real money)"
+    } else {
+        "paper P&L"
+    }
+}
+
 fn day(s: &mut String, d: &DayReport, strategy: &StrategyDto) {
+    // A day in progress has a high so far and a leader, not a winner.
+    let (high, winner) = if d.in_progress {
+        ("METAR high so far", "leading")
+    } else {
+        ("METAR high", "winner")
+    };
     let _ = writeln!(
         s,
-        "### {}{} — METAR high {}, winner {}\n",
+        "### {}{} — {high} {}, {winner} {}\n",
         d.date,
         if d.in_progress { " (in progress)" } else { "" },
         d.weather
@@ -640,7 +656,8 @@ fn day(s: &mut String, d: &DayReport, strategy: &StrategyDto) {
         );
     }
     if let Some(p) = d.strategy_pnl.get(&strategy.id) {
-        let _ = writeln!(s, "- Settled paper P&L: {}", paper_report::usd(*p));
+        let label = pnl_label(strategy);
+        let _ = writeln!(s, "- Settled {label}: {}", paper_report::usd(*p));
     }
     s.push('\n');
 }
@@ -908,6 +925,14 @@ mod tests {
         let md = render(&two, &f(), History::Unavailable);
         assert!(md.contains("newest first; UTC time)"), "{md}");
         assert!(md.contains("- 09-21 14:13:20 UTC **REJECTED**"), "{md}");
+    }
+
+    #[test]
+    fn the_live_twin_s_pnl_is_real_money() {
+        let mut g = f();
+        g.id = wm_strategy::tail_seller::LIVE_ID.into();
+        assert_eq!(pnl_label(&g), "P&L (real money)");
+        assert_eq!(pnl_label(&f()), "paper P&L");
     }
 
     #[test]

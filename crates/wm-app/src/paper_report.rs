@@ -398,6 +398,9 @@ pub struct Call {
     /// P&L per share had it been bought: a maker at its bid (no fee),
     /// anyone else at the ask, taker fee included.
     pub pnl_per_share: Option<f64>,
+    /// Judged by the high so far: the day is still in progress.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub provisional: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -788,8 +791,17 @@ fn build_day(
         .filter(|d| d.strategy == "evaluation" && !late_checkpoint(d))
         .copied()
         .partition(|d| d.inputs.get("knmi_checkpoint").is_some());
-    let strategies = strategy_days(&evaluations, &buckets, high, fee_rate, tz);
-    let knmi = strategy_days(&checkpoints, &buckets, high, fee_rate, tz);
+    let mut strategies = strategy_days(&evaluations, &buckets, high, fee_rate, tz);
+    let mut knmi = strategy_days(&checkpoints, &buckets, high, fee_rate, tz);
+    if in_progress {
+        for c in strategies
+            .iter_mut()
+            .chain(knmi.iter_mut())
+            .flat_map(|d| d.signals.iter_mut().chain(d.closest.iter_mut()))
+        {
+            c.provisional = true;
+        }
+    }
     let model_vs_market = won.and_then(|w| {
         let tops = inputs.books.get(&w.yes_token)?;
         model_vs_market(&evaluations, &w.label, &bucket_of(w), tops, tz)
@@ -1155,6 +1167,7 @@ fn call(
         verdict: l.verdict.clone(),
         won,
         pnl_per_share,
+        provisional: false,
     }
 }
 
@@ -1177,6 +1190,10 @@ fn closeness(l: &EvalLine) -> Option<Closeness> {
     match l.tag.as_str() {
         "A" | "B" | "D" | "I" => Some((l.ev?, 0.0)),
         "E" | "F" => Some((-(blockers as f64), l.ask?)),
+        // G's buckets lie in the model's open tail, which prices none of
+        // them alone (no EV since 16 October 2026): the dearest NO bid —
+        // the cheapest YES it would sell — is the closest.
+        "G" | "GL" => Some((-(blockers as f64), l.maker_bid.or(l.ask)?)),
         _ => Some((-(blockers as f64), l.ev?)),
     }
 }
@@ -1599,15 +1616,21 @@ pub(crate) fn call_text(c: &Call) -> String {
     }
     let _ = write!(s, " — {}", c.verdict);
     let at = if c.maker_bid.is_some() { "bid" } else { "ask" };
+    // A day in progress is judged by its high so far.
+    let (win, loss) = if c.provisional {
+        ("winning so far", "losing so far")
+    } else {
+        ("won", "lost")
+    };
     match (c.won, c.pnl_per_share) {
         (Some(true), Some(p)) => {
-            let _ = write!(s, " → **won** ({p:+.3}/share at the {at})");
+            let _ = write!(s, " → **{win}** ({p:+.3}/share at the {at})");
         }
         (Some(false), Some(p)) => {
-            let _ = write!(s, " → **lost** ({p:+.3}/share at the {at})");
+            let _ = write!(s, " → **{loss}** ({p:+.3}/share at the {at})");
         }
         (Some(w), None) => {
-            let _ = write!(s, " → **{}**", if w { "won" } else { "lost" });
+            let _ = write!(s, " → **{}**", if w { win } else { loss });
         }
         _ => {}
     }
@@ -2497,6 +2520,44 @@ mod tests {
             text.ends_with("→ **lost** (-0.240/share at the bid)"),
             "{text}"
         );
+        // A day in progress is judged by its high so far (16 October 2026:
+        // "→ won" at 01:22 of a day that had barely begun).
+        let provisional = Call {
+            provisional: true,
+            ..c
+        };
+        assert!(
+            call_text(&provisional).ends_with("→ **losing so far** (-0.240/share at the bid)"),
+            "{}",
+            call_text(&provisional)
+        );
+    }
+
+    /// G's buckets lie in the model's open tail, which prices none of them
+    /// alone: its lines carry no p or EV since 16 October 2026, and its
+    /// closest call is the line with the fewest blockers, then the dearest
+    /// NO bid.
+    #[test]
+    fn g_ranks_closest_calls_without_the_model() {
+        let far = parse_line(
+            "G 20°C NO · ask 0.48 · bid 0.45 (maker) — YES offered at 0.55 outside [0.01, 0.08]",
+        )
+        .unwrap();
+        let near = parse_line(
+            "GL 22°C NO · ask 0.997 · bid 0.994 (maker) — YES offered at 0.006 outside [0.01, 0.08]",
+        )
+        .unwrap();
+        let busy = parse_line(
+            "G 23°C NO · ask 0.999 · bid 0.998 (maker) — YES offered at 0.002 outside [0.01, 0.08]; already positioned or quoting",
+        )
+        .unwrap();
+        let (f, n, b) = (
+            closeness(&far).unwrap(),
+            closeness(&near).unwrap(),
+            closeness(&busy).unwrap(),
+        );
+        assert!(by_closeness(n, f).is_gt(), "the dearer NO bid");
+        assert!(by_closeness(f, b).is_gt(), "fewer blockers first");
     }
 
     /// A rule's EV assumes its trigger fired: K's closest call is the line

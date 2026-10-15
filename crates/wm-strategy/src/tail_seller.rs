@@ -36,7 +36,7 @@ use crate::peak_times::hm;
 use crate::quoting::{maker_ev, passive_bid, quote_expiry};
 use crate::strategy::{
     BucketEvaluation, Proposal, Strategy, StrategyContext, StrategyOutput, common_high,
-    holds_or_pending, max_data_age, max_p_in_bucket,
+    holds_or_pending, max_data_age, max_p_in_bucket, views_price_bucket,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -264,8 +264,15 @@ impl TailSeller {
         if bid.is_some() && shares.is_none() {
             blockers.push("size below market minimum".into());
         }
-        // NO wins unless the bucket does.
-        let p_win = model.map(|pm| 1.0 - pm);
+        // NO wins unless the bucket does. The model's open last class (the
+        // high + K − 1 °C and beyond, one probability for all) holds every
+        // bucket G trades at three degrees and more: there the model gives
+        // the NO only a floor (all of the class as this bucket's loss), no
+        // probability of its own, so none is shown or priced (16 October
+        // 2026: NO of 20 °C and of 21 °C+ both read p 0.335, EV −0.62). The
+        // ratio check above still holds the model's bound against the YES.
+        let priced = views_price_bucket(ctx.views, high, &o.bucket);
+        let p_win = model.filter(|_| priced).map(|pm| 1.0 - pm);
         let ev = p_win
             .zip(bid)
             .map(|(p, b)| maker_ev(p, b, &ctx.market.fees));
@@ -310,8 +317,12 @@ impl TailSeller {
                         o.label, self.config.min_distance
                     ),
                     format!(
-                        "model {:.4} ≤ {:.2} × {y}; expires {} UTC, before the next report",
-                        model.unwrap_or(0.0),
+                        "model {} ≤ {:.2} × {y}; expires {} UTC, before the next report",
+                        if priced {
+                            format!("{:.4}", model.unwrap_or(0.0))
+                        } else {
+                            format!("at most {:.4} (its open tail)", model.unwrap_or(0.0))
+                        },
                         self.config.max_model_ratio,
                         exp.format("%H:%M")
                     ),

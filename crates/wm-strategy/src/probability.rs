@@ -83,6 +83,15 @@ impl IncrementDistribution {
         p.clamp(0.0, 1.0)
     }
 
+    /// Whether the distribution prices `bucket` on its own: false when the
+    /// bucket holds part of the open last class (`final ≥ high + K − 1`, one
+    /// probability for all of it), so that only bounds are known.
+    pub fn prices_bucket(&self, high_whole: i32, bucket: &TemperatureBucket) -> bool {
+        (self.p_in_bucket_upper(high_whole, bucket) - self.p_in_bucket_lower(high_whole, bucket))
+            .abs()
+            < 1e-12
+    }
+
     /// Normalize to sum 1 (defensive).
     pub fn normalized(mut self) -> Self {
         let s: f64 = self.probs.iter().sum();

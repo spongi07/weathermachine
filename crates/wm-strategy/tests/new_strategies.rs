@@ -218,6 +218,31 @@ fn g_rests_no_bids_on_cheap_buckets_two_or_more_above_the_high() {
     assert!(p20.ev_per_share > 0.03, "{}", p20.ev_per_share);
     assert_eq!(out.proposals[1].bucket_label, "21°C");
     assert_eq!(out.proposals[1].limit_price, p("0.98"));
+    // 21 °C, three above the high, lies in the model's open last class
+    // (≥ high + 3): the model bounds it, it does not price it alone.
+    let e21 = out
+        .evaluations
+        .iter()
+        .find(|e| e.bucket_label == "21°C")
+        .unwrap();
+    assert_eq!(
+        (e21.p_win, e21.ev_per_share, e21.model_p),
+        (None, None, None)
+    );
+    let e20 = out
+        .evaluations
+        .iter()
+        .find(|e| e.bucket_label == "20°C")
+        .unwrap();
+    assert!(
+        e20.p_win.is_some_and(|p| (p - 0.998).abs() < 1e-9),
+        "{e20:?}"
+    );
+    assert!(
+        out.proposals[1].rationale[1].contains("at most 0.0010 (its open tail)"),
+        "{:?}",
+        out.proposals[1].rationale
+    );
     // Buckets without a NO book say so.
     assert_eq!(
         blockers_of(&out, "22°C", OutcomeSide::No),
