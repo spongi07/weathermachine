@@ -889,7 +889,8 @@ or neither; L59 sells its YES at the bid (`Day::sell_yes`) on its own
 round trip (`LabStrategy::entered`, a `ladder::Entry`: when it first saw
 the position and the bid then, its stop's reference; a restart starts
 both again), its profit counted as what a sale at the bid nets after the
-fee. A family that already traded today's market opens nothing more that
+fee; it enters at least 16 minutes before a routine report and sells 6
+minutes before one, both on the exact clock (`Day::until_report`). A family that already traded today's market opens nothing more that
 day (`one_a_day`), except the makers and L39 (`MANY_A_DAY`). The rules
 that say the day warms further (L26, L29, L31, L32, L35, L61) buy the NO
 of the high's bucket (`RISE_BAND`, 0.10–0.70), which pays on any new high,
@@ -952,7 +953,8 @@ data age, prices) gate every book.
   blocks it; the minute's hold and its 15-second gap; the limit a cent over
   the ask and the stake by profile; a bare day: only the book rules may
   trade; the quiet-book window from the moment a report came in; L59's
-  stop from the bid at entry, its profit after the sale's fee; L58's curve
+  stop from the bid at entry, its profit after the sale's fee, its entry
+  and pre-report exit on one clock; L58's curve
   exact on a normal ladder and never on its peak; the rise rules on the
   high's NO and its band.
 * `wm-engine/tests/engine_scenarios.rs`: a neighbour's KNMI reading

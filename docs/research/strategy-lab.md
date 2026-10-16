@@ -597,7 +597,7 @@ rules out.**
 | L56 | stations disagree | 10:00–16:00, Schiphol and the KNMI neighbours ≥ 3 °C apart (the newest ten minutes ≥ 3 stations read), the favourite ≥ 0.55 | its NO 0.25–0.45 | ≥ 4 °C |
 | L57 | laggard bucket | 10:00–18:00, the next degree up ≥ 0.06 in 4–7 min while the high's bucket has not fallen, KNMI near the edge | NO of the high's bucket 0.10–0.75 | ≥ 0.10 |
 | L58 | round-number premium | 07:00–20:00, a multiple-of-5 bucket, not the ladder's peak, ≥ 0.08 above what a curve through its neighbours within 2 °C gives it (a parabola in log share, exact for a normal day) | its NO 0.40–0.85 | ≥ 0.12 |
-| L59 | imbalance round trip | 09:00–18:00 away from reports, the favourite's spread ≤ 0.02 with ≥ 3 × the shares bid as offered | YES, sold at the bid once that nets 0.02 over the cost after the fee, once the bid lies 0.02 under the bid at entry, after 45 min or before a report; once a day | ≥ 5 × |
+| L59 | imbalance round trip | 09:00–18:00, ≥ 16 min before a report and from 3 after it came in, the favourite's spread ≤ 0.02 with ≥ 3 × the shares bid as offered | YES, sold at the bid once that nets 0.02 over the cost after the fee, once the bid lies 0.02 under the bid at entry, after 45 min or 6 min before a report; once a day | ≥ 5 × |
 | L60 | gap filler | 08:00–20:00 (not until 3 min after a report came in), a thin best ask (≤ 50 shares) with the next ≥ 0.10 above, on the favourite or a neighbour | offer YES halfway into the gap (a NO bid) until 10 min before the report | ≥ 0.15 |
 | L63 | hidden seller | 08:00–20:00, ≥ 3 buys at one price in 30 min taking ≥ 3 × the size the ask showed, the ask still there | its NO 0.20–0.80 | ≥ 5 × |
 | L65 | midnight high | 08:00–11:00, the high first reached before 02:00, KNMI ≥ 1 °C under it, the forecast's rest of the day ≤ the high + 0.4 °C | YES of the high's bucket 0.10–0.60 | forecast ≥ 0.5 °C under |
@@ -665,6 +665,14 @@ expired unfilled. The four losses were design faults, not bad luck:
   seconds after Schiphol. A neighbour's reading now makes the engine look
   again at once, and L56 reads the newest ten minutes at least three
   stations have.
+
+On the second day (16 October) L59 bought YES of 18 °C at 0.54 at 09:44:56
+local, 10 minutes and 4 seconds before the 07:55 UTC report, and 0.85 s
+later sold it at 0.51 (−$2.03): its entry read the time to the report
+exactly (more than 10 minutes: allowed), its exit in whole minutes (10:
+sell). It now enters only with 16 minutes left — ten to hold before it
+sells 6 minutes ahead of the report, where L18's window for informed flow
+opens — and both read the same exact clock.
 
 ### 8.6 What would refute them
 

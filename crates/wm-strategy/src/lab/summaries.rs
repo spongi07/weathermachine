@@ -138,7 +138,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (58, true) => "As L58 with ≥ 0.12 over the curve.",
         (59, false) => {
-            "Balanced. One round trip a day: 09:00–18:00 away from reports, the favourite (0.20–0.80) with a spread ≤ 0.02 and ≥ 3 × as many shares bid as offered (≥ 100) → its YES; sold at the bid once that nets 0.02 a share over the cost after the fee, once the bid lies 0.02 under the bid at entry, after 45 minutes, or 10 minutes before a report."
+            "Balanced. One round trip a day: 09:00–18:00, at least 16 minutes before a report (ten to hold before its exit) and from 3 after one came in, the favourite (0.20–0.80) with a spread ≤ 0.02 and ≥ 3 × as many shares bid as offered (≥ 100) → its YES; sold at the bid once that nets 0.02 a share over the cost after the fee, once the bid lies 0.02 under the bid at entry, after 45 minutes, or 6 minutes before a report."
         }
         (59, true) => "As L59 with ≥ 5 × as many shares bid.",
         (60, false) => {

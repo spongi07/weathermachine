@@ -740,15 +740,24 @@ const SCALP_GIVE: f64 = 0.02;
 /// L59's widest spread at entry: a round trip pays it, two fees and a tick
 /// of slippage.
 const SCALP_SPREAD: f64 = 0.02;
+/// L59 sells this many minutes before a routine report at the latest: the
+/// report's informed trading starts with KNMI's last reading before it
+/// (L18's burst window opens 6 minutes ahead).
+const SCALP_REPORT_EXIT_MIN: i64 = 6;
+/// L59 enters only with this many minutes left before that exit: a round
+/// trip needs time to work (16 October 2026: bought 10:04 before a report,
+/// sold 0.85 s later at the exit 10 minutes ahead).
+const SCALP_MIN_HOLD_MIN: i64 = 10;
 
 /// L59 (`variant`: bids ≥ 5 × the ask). The order book's imbalance, one
-/// round trip a day: 09:00–18:00 away from reports (10 minutes before one,
-/// until 3 after it came in), the favourite (0.20–0.80) with a spread ≤
-/// 0.02 and ≥ 3 × as many shares bid as offered (≥ 100 bid) → its YES.
-/// Sold at the bid once that nets ≥ 0.02 a share over the average cost
-/// after the fee, once the bid falls 0.02 under the bid at entry (the bids
-/// gave way), after 45 minutes, or 10 minutes before a report. Returns the
-/// round trip while it holds the position.
+/// round trip a day: 09:00–18:00 away from reports (16 minutes before one —
+/// ten minutes to hold before the exit 6 minutes ahead — and until 3 after
+/// it came in), the favourite (0.20–0.80) with a spread ≤ 0.02 and ≥ 3 × as
+/// many shares bid as offered (≥ 100 bid) → its YES. Sold at the bid once
+/// that nets ≥ 0.02 a share over the average cost after the fee, once the
+/// bid falls 0.02 under the bid at entry (the bids gave way), after 45
+/// minutes, or 6 minutes before a report (both read on the same exact
+/// clock). Returns the round trip while it holds the position.
 pub(crate) fn imbalance_scalp(
     day: &Day<'_, '_>,
     variant: bool,
@@ -789,7 +798,9 @@ pub(crate) fn imbalance_scalp(
         };
         let avg = pos.avg_cost();
         let held = now - entry.since;
-        let report_soon = day.minutes_to_report().is_some_and(|m| m <= 10);
+        let report_soon = day
+            .until_report()
+            .is_some_and(|d| d <= Duration::minutes(SCALP_REPORT_EXIT_MIN));
         let fees = day.ctx.market.fees;
         let why = match bid {
             Some(b) => {
@@ -810,7 +821,9 @@ pub(crate) fn imbalance_scalp(
             (held >= Duration::minutes(45))
                 .then(|| format!("held {} min ≥ 45", held.num_minutes()))
         })
-        .or_else(|| report_soon.then(|| "10 minutes or less before a report".to_owned()));
+        .or_else(|| {
+            report_soon.then(|| format!("{SCALP_REPORT_EXIT_MIN} minutes or less before a report"))
+        });
         match why {
             Some(w) => day.sell_yes(o, pos.shares, vec![w], Vec::new(), out),
             None => day.note(
@@ -841,7 +854,7 @@ pub(crate) fn imbalance_scalp(
         return None;
     };
     let mut blockers: Vec<String> = day.outside(9 * 60, 18 * 60).into_iter().collect();
-    blockers.extend(day.near_report(10, 3));
+    blockers.extend(day.near_report(SCALP_REPORT_EXIT_MIN + SCALP_MIN_HOLD_MIN, 3));
     let mut rationale = Vec::new();
     match day
         .yes_book(fav)

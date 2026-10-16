@@ -521,6 +521,12 @@ impl<'c, 'a> Day<'c, 'a> {
 
     // -- The report schedule ----------------------------------------------
 
+    /// The time until the next routine report, exactly (`None` without a
+    /// schedule).
+    pub fn until_report(&self) -> Option<Duration> {
+        next_routine_report(self.now(), self.ctx.routine_minutes).map(|t| t - self.now())
+    }
+
     /// Minutes until the next routine report (`None` without a schedule).
     pub fn minutes_to_report(&self) -> Option<i64> {
         next_routine_report(self.now(), self.ctx.routine_minutes)

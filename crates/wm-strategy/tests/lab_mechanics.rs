@@ -1097,12 +1097,20 @@ fn a_curve_through_the_neighbours_is_exact_on_a_normal_ladder() {
     assert!(curve_share(&[(19, 0.4), (20, 0.1), (22, 0.1), (23, 0.4)], 21).is_none());
 }
 
-fn scalp_world(bid_size: i64) -> World {
-    let mut w = World::new("10:10");
+/// L59's world at `now`: 20 °C the favourite, 400 shares bid against 100
+/// offered.
+fn scalp_world_at(now: DateTime<Utc>, bid_size: i64) -> World {
+    let mut w = World::new("10:05");
+    w.now = now;
     mild_morning(&mut w);
     w.levels(w.yes(20), &[("0.50", bid_size)], &[("0.52", 100)]);
     w.yes_book(19, "0.20", "0.22");
     w
+}
+
+/// At 10:05 UTC: 20 minutes before the 10:25 report.
+fn scalp_world(bid_size: i64) -> World {
+    scalp_world_at(z("10:05"), bid_size)
 }
 
 /// 37 YES of 20 °C bought at 0.53 with the taker fee (as on 15 October
@@ -1154,7 +1162,7 @@ fn l59_makes_one_round_trip_on_an_imbalanced_book() {
     let mut s = LabStrategy::new(59, &World::cfg(59, false), &PeakSlotConfig::default());
     assert_blocked(
         &held.run_with(&mut s),
-        "holding 37 YES 20°C since 10:10 UTC (average 0.542, bid 0.490, stop under 0.470)",
+        "holding 37 YES 20°C since 10:05 UTC (average 0.542, bid 0.490, stop under 0.470)",
     );
     // One tick lower is no stop yet …
     held.levels(held.yes(20), &[("0.48", 400)], &[("0.50", 100)]);
@@ -1198,6 +1206,45 @@ fn l59_makes_one_round_trip_on_an_imbalanced_book() {
     late.now += Duration::minutes(46);
     late.levels(late.yes(20), &[("0.51", 400)], &[("0.53", 100)]);
     assert!(proposal(&late.run_with(&mut s)).rationale[0].contains("≥ 45"));
+}
+
+/// 16 October 2026: L59 bought 10:04 before a report (its entry read the
+/// exact clock, ten minutes) and sold 0.85 s later (its exit read whole
+/// minutes: 10). The entry now needs 16 minutes, the exit comes 6 ahead,
+/// and both read the same exact clock.
+#[test]
+fn l59_enters_with_time_to_hold_and_exits_on_the_same_clock() {
+    let sec = Duration::seconds;
+    // 16:04 before the 10:25 report: in.
+    let w = scalp_world_at(z("10:08") + sec(56), 400);
+    assert_buy(proposal(&w.run(59, false)), &w.yes(20), "0.52");
+    // 15:30 before: out.
+    let w = scalp_world_at(z("10:09") + sec(30), 400);
+    assert_blocked(
+        &w.run(59, false),
+        "15 min before the 10:25 UTC report (quiet book wanted)",
+    );
+
+    // Bought at 10:05: held at 6:03 before the report, sold at 5:59.
+    let mut held = scalp_world(400);
+    bought_scalp(&mut held);
+    let mut s = LabStrategy::new(59, &World::cfg(59, false), &PeakSlotConfig::default());
+    assert_blocked(
+        &held.run_with(&mut s),
+        "holding 37 YES 20°C since 10:05 UTC",
+    );
+    held.now = z("10:18") + sec(57);
+    held.levels(held.yes(20), &[("0.50", 400)], &[("0.52", 100)]);
+    assert_blocked(
+        &held.run_with(&mut s),
+        "holding 37 YES 20°C since 10:05 UTC",
+    );
+    held.now = z("10:19") + sec(1);
+    held.levels(held.yes(20), &[("0.50", 400)], &[("0.52", 100)]);
+    let out = held.run_with(&mut s);
+    let pr = proposal(&out);
+    assert_eq!((pr.side, pr.limit_price), (Side::Sell, p("0.50")));
+    assert_eq!(pr.rationale[0], "6 minutes or less before a report");
 }
 
 fn gapfill_world(second: &str) -> World {
