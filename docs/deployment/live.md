@@ -23,9 +23,9 @@ paper.
 |---|---|
 | Rule | G's: a NO bid one tick inside the book on each bucket at least `min_distance` degrees above the day's high whose YES is offered at 1–8¢, 10:00–21:00 local |
 | Order | post-only, good till ten minutes before the next routine report (stated a minute later: the venue ends GTD orders a minute early); cancelled there too |
-| Size | `[live].notional` ($10): about ten shares, sized down to whole cents |
-| Limits | resting bids and positions together at most `max_open_usd` ($40); a UTC day's loss of `max_daily_loss_usd` ($20) stops it for the day |
-| Stop | once its realized loss since going live reaches `max_total_loss_usd` ($20), earlier runs' settled days included, it opens nothing more |
+| Size | `[live].notional` ($25; $10 until 16 October 2026): about 26 shares, sized down to whole cents |
+| Limits | resting bids and positions together at most `max_open_usd` ($75: three bids); a UTC day's loss of `max_daily_loss_usd` ($50) stops it for the day |
+| Stop | once its realized loss since going live reaches `max_total_loss_usd` ($50), earlier runs' settled days included, it opens nothing more |
 | Settlement | held to settlement; a win is paid out when its shares are redeemed (claim them on polymarket.com, as for dailyprofit) |
 
 Its fills are a maker's: at its own price, without a fee.
@@ -99,14 +99,15 @@ Then, on the dashboard: the LIVE panel shows the location the venue sees, the
 protocol, the collateral, the heartbeat and every check that does not pass.
 
 **How much to keep at the venue.** G_live holds at most `max_open_usd`
-($40) in positions and resting bids at a time. A position's money comes back
+($75) in positions and resting bids at a time. A position's money comes back
 only once its market is resolved and the winning shares are claimed on
 polymarket.com, usually the day after, so yesterday's positions still hold
-their cost while today's bids need theirs: about $80 lets it bid without
-ever being short, and $50–60 is enough when the winnings are claimed every
-morning (13 October: two fills, $18.50). Less is safe, only slower: a bid
-that does not fit waits (§2). More than $80 is of no use without higher
-limits.
+their cost while today's bids need theirs: about $150 lets it bid without
+ever being short, and $90–100 is enough when the winnings are claimed every
+morning (a day's two fills at $25 hold about $47). Less is safe, only
+slower: a bid that does not fit waits (§2). More than $150 is of no use
+without higher limits. (Until 16 October 2026 the bids were $10 under a
+$40 cap and $20 loss limits; 7 fills, all won, +$3.89.)
 
 **One account, one live bot.** If dailyprofit trades live on the same
 account, its start-up check sees G_live's resting bids and holds itself
@@ -133,8 +134,8 @@ Switch dailyprofit's live trading off while G_live trades.
 
   ```
   G_live bought 4 NO 18°C at 0.94
-  $3.76 on Amsterdam 12 Oct; its bid of 10 shares at 0.94 expired with the rest unfilled. It pays $4.00 if the high is not 18°C.
-  Open now $13.16 of $40.00. Venue balance $36.84.
+  $3.76 on Amsterdam 12 Oct; its bid of 26 shares at 0.94 expired with the rest unfilled. It pays $4.00 if the high is not 18°C.
+  Open now $13.16 of $75.00. Venue balance $36.84.
   ```
 
   when a live bid ends having bought shares (one message per bid, however
@@ -144,7 +145,7 @@ Switch dailyprofit's live trading off while G_live trades.
   G_live won +$0.24
   Amsterdam 12 Oct settled at 14°C (the observed high; the venue resolves the market itself).
   NO 18°C: 4 shares at 0.94 ($3.76), won: $4.00 back.
-  Since going live +$0.24; it stops at a loss of $20.00. Venue balance $36.84; a win is added once it is claimed there.
+  Since going live +$0.24; it stops at a loss of $50.00. Venue balance $36.84; a win is added once it is claimed there.
   ```
 
   when its market settles (once the local day is over and two hours more),

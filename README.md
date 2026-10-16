@@ -10,8 +10,8 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
 
 > **Status.** Research platform and paper trading, with one strategy live:
 > strategy G's live twin (`G_live`, [docs/deployment/live.md](docs/deployment/live.md))
-> places real post-only bids on Polymarket when `WM_LIVE_G=true`, at $10 a
-> bid and $40 open at most, and stops after a $20 loss. Its live path is
+> places real post-only bids on Polymarket when `WM_LIVE_G=true`, at $25 a
+> bid and $75 open at most, and stops after a $50 loss. Its live path is
 > tested against a mock venue; the real venue's answers are first seen in
 > production. Every other strategy is paper. Nothing here is financial
 > advice, and synthetic/demo results are not evidence of edge.

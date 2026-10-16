@@ -209,8 +209,8 @@ simulator; the venue's order updates come back as events and build the
 live book. The runtime holds new live bids back (the resting ones stay)
 while the collateral free beside the resting bids is short of one bid, and
 for 5 minutes, doubling to an hour, after a refused order, so a refusal
-never turns into a stream of orders. Limits: $10 a bid, $40 open, $20 a day, $20 in total
-(`[live]`).
+never turns into a stream of orders. Limits: $25 a bid, $75 open, $50 a day, $50 in total
+(`[live]`; $10, $40, $20 and $20 until 16 October 2026).
 
 Before live trading widens beyond G_live and these limits:
 1. Positive out-of-sample EV with stable parameters across walk-forward

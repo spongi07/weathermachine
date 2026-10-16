@@ -913,10 +913,10 @@ slippage_ticks = 1
 # ---------------------------------------------------------------------------
 [live]
 enabled = false
-notional = "10.00"                # one bid's cost at its NO price (about 10 shares)
-max_open_usd = "40.00"            # resting bids and positions together, at cost
-max_daily_loss_usd = "20.00"      # a UTC day's realized loss that stops it for the day
-max_total_loss_usd = "20.00"      # the realized loss since going live that stops it
+notional = "25.00"                # one bid's cost at its NO price (about 26 shares; $10 until 16 October 2026)
+max_open_usd = "75.00"            # resting bids and positions together, at cost (three bids)
+max_daily_loss_usd = "50.00"      # a UTC day's realized loss that stops it for the day
+max_total_loss_usd = "50.00"      # the realized loss since going live that stops it
 signature_type = 1                # the account's wallet: 1 = proxy (as dailyprofit's)
 api_key_nonce = 1                 # its own API key (dailyprofit derives nonce 0)
 require_heartbeat = true

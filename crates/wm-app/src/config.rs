@@ -1863,28 +1863,28 @@ mod tests {
         let usd = wm_core::units::Usd::from_whole;
         assert!(!cfg.file.live.enabled, "real money is opt-in");
         assert!(cfg.live_book().is_none());
-        assert_eq!(cfg.file.live.notional, usd(10));
-        assert_eq!(cfg.file.live.max_open_usd, usd(40));
-        assert_eq!(cfg.file.live.max_total_loss_usd, usd(20));
+        assert_eq!(cfg.file.live.notional, usd(25));
+        assert_eq!(cfg.file.live.max_open_usd, usd(75));
+        assert_eq!(cfg.file.live.max_total_loss_usd, usd(50));
         assert_eq!(cfg.file.live.api_key_nonce, 1, "not dailyprofit's key");
         cfg.file.live.enabled = true;
         cfg.validate().unwrap();
         let book = cfg.live_book().unwrap();
-        assert_eq!(book.tail_seller.notional, usd(10));
+        assert_eq!(book.tail_seller.notional, usd(25));
         assert!(book.tail_seller.whole_cent_sizes);
         assert_eq!(
             book.tail_seller.min_distance, cfg.file.strategies.tail_seller.min_distance,
             "G's own rule"
         );
-        assert_eq!(book.risk.position_size_usd, usd(10));
-        assert_eq!(book.risk.global_max_exposure_usd, usd(40));
-        assert_eq!(book.risk.max_daily_loss_usd, Some(usd(20)));
+        assert_eq!(book.risk.position_size_usd, usd(25));
+        assert_eq!(book.risk.global_max_exposure_usd, usd(75));
+        assert_eq!(book.risk.max_daily_loss_usd, Some(usd(50)));
         assert!(book.risk.strategy_caps.is_empty());
         assert_eq!(
             book.risk.max_spread, cfg.file.risk.max_spread,
             "paper G's spread rule"
         );
-        assert_eq!(book.max_total_loss, usd(20));
+        assert_eq!(book.max_total_loss, usd(50));
         book.risk.validate().unwrap();
         let bad = |f: &dyn Fn(&mut AppConfig)| {
             let mut c = cfg.clone();
@@ -1892,7 +1892,7 @@ mod tests {
             c.validate().is_err()
         };
         assert!(
-            bad(&|c| c.file.live.max_open_usd = usd(5)),
+            bad(&|c| c.file.live.max_open_usd = usd(20)),
             "a bid larger than the cap"
         );
         assert!(bad(&|c| c.file.live.max_total_loss_usd = usd(0)));

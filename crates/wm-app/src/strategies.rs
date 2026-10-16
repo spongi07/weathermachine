@@ -565,12 +565,12 @@ mod tests {
         assert!(
             gl.settings
                 .iter()
-                .any(|(k, v)| k == "notional" && v == "10.00")
+                .any(|(k, v)| k == "notional" && v == "25.00")
         );
         assert!(
             gl.settings
                 .iter()
-                .any(|(k, v)| k == "max_total_loss_usd" && v == "20.00")
+                .any(|(k, v)| k == "max_total_loss_usd" && v == "50.00")
         );
         assert_eq!(
             every_strategy(&fewer).iter().filter(|s| s.lab).count(),
