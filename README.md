@@ -94,7 +94,9 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   book 350 ms after the decision and pays a tick of slippage (`[paper]`).
   After their first day (15 October) L58, L59 and the quiet-book window
   were fixed and the rules that expect a warmer day buy the NO of the
-  high's bucket, which pays on any new high
+  high's bucket, which pays on any new high; after the second, L59 reads
+  its entry and its exit on one clock and L36 looks west of Schiphol for
+  fronts, timed by their passages
   ([§8.5](docs/research/strategy-lab.md#85-the-first-day-15-october-2026-and-what-it-changed)).
   The dashboard's lab panel, each family's page and `report paper` show
   their record apart from the main book's.
