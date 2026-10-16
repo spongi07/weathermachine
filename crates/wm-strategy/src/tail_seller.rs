@@ -33,7 +33,7 @@
 //! [`max_yes_price`]: TailSellerConfig::max_yes_price
 
 use crate::peak_times::hm;
-use crate::quoting::{maker_ev, passive_bid, quote_expiry};
+use crate::quoting::{latest_report, maker_ev, passive_bid, quote_expiry, report_pending};
 use crate::strategy::{
     BucketEvaluation, Proposal, Strategy, StrategyContext, StrategyOutput, common_high,
     holds_or_pending, max_data_age, max_p_in_bucket, views_price_bucket,
@@ -171,6 +171,13 @@ impl Strategy for TailSeller {
         }
         if max_data_age(ctx.views) > cfg.max_data_age_minutes {
             shared.push("weather data too old".into());
+        }
+        if let Some(due) = report_pending(
+            ctx.now,
+            ctx.routine_minutes,
+            latest_report(ctx.views, ctx.now),
+        ) {
+            shared.push(format!("the {} UTC report not in yet", due.format("%H:%M")));
         }
         let expiry = quote_expiry(
             ctx.now,

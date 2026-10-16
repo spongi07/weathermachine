@@ -7,9 +7,14 @@
 //! lost 1.34¢ a share in the last five minutes before one). A strategy posts
 //! again after the report, on its next evaluation.
 
+use crate::strategy::ViewEvaluation;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use wm_core::market::{FeeSchedule, OrderBook};
 use wm_core::units::Price;
+
+/// How long past its minute a routine report is awaited before a quote
+/// goes up without it (one that late may not come at all).
+pub const REPORT_WAIT: Duration = Duration::minutes(10);
 
 /// The first routine report strictly after `t`: `minutes` past each UTC
 /// hour. `None` without a schedule.
@@ -42,6 +47,33 @@ pub fn last_routine_report(t: DateTime<Utc>, minutes: &[u8]) -> Option<DateTime<
         })
         .filter(|x| *x <= t)
         .max()
+}
+
+/// The routine report due by `now` that has not come in: the last routine
+/// minute at or before `now` while the latest report known (`latest`, by
+/// when it was observed) is older and less than [`REPORT_WAIT`] has passed.
+/// A quote placed then rests through that report's arrival minutes later
+/// (16 October 2026: G_live's bid on NO 20 °C, placed at 11:55 three above
+/// a high of 17, rested on as the 11:55 report raised the high to 18, and
+/// filled at 0.945). `None` without a schedule.
+pub fn report_pending(
+    now: DateTime<Utc>,
+    minutes: &[u8],
+    latest: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    let due = last_routine_report(now, minutes)?;
+    (now - due < REPORT_WAIT && latest.is_none_or(|t| t < due)).then_some(due)
+}
+
+/// When the latest report the views know was observed, from their data age
+/// in whole minutes (so never earlier than the report itself).
+pub fn latest_report(views: &[ViewEvaluation], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    views
+        .iter()
+        .map(|v| v.assessment.features.data_age_minutes)
+        .min()
+        .filter(|age| (0..=24 * 60).contains(age))
+        .map(|age| now - Duration::minutes(age))
 }
 
 /// Expiry of an order resting from `now`: `cancel_before` ahead of the
@@ -104,6 +136,24 @@ mod tests {
 
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn a_report_is_awaited_from_its_minute_until_it_comes_in() {
+        let m = [25u8, 55];
+        let t = |s: &str| utc(&format!("2026-07-01T{s}Z"));
+        // At 11:55:00 the latest report known is the 11:25 one: wait.
+        assert_eq!(
+            report_pending(t("11:55:00"), &m, Some(t("11:25:00"))),
+            Some(t("11:55:00"))
+        );
+        // The 11:55 report is in: quote.
+        assert_eq!(report_pending(t("11:57:40"), &m, Some(t("11:55:00"))), None);
+        // Ten minutes past its minute without it: no longer waited for.
+        assert_eq!(report_pending(t("12:05:00"), &m, Some(t("11:25:00"))), None);
+        assert_eq!(report_pending(t("11:40:00"), &m, Some(t("11:25:00"))), None);
+        assert_eq!(report_pending(t("11:56:00"), &m, None), Some(t("11:55:00")));
+        assert_eq!(report_pending(t("11:56:00"), &[], None), None);
     }
 
     #[test]

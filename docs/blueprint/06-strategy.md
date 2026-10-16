@@ -606,9 +606,14 @@ named real money. When no bucket lies `min_distance` above the high, G
 still writes one line, for the bucket nearest that distance, blocked
 "21°C or higher only 2 °C above the high 19 (needs ≥ 3)" (16 October 2026:
 with the high at 19 °C G wrote nothing, and its page blamed a missing
-model); with the high in the top bucket there is none. G quotes at a
-report's minute, before the report reaches it, so its signals fall between
-the reports' records: the engine records them as they fire (below).
+model); with the high in the top bucket there is none. G and J wait for
+the report of their minute before they quote (`quoting::report_pending`,
+up to `REPORT_WAIT`, ten minutes past the minute): until 16 October 2026
+they quoted at the minute itself, and the report that came in minutes
+later could move the high under a resting bid (G_live's NO 20 °C at 11:55,
+three above a high of 17: the 11:55 report made it 18, and the bid filled
+at 0.945). A signal that fires between reports is recorded as it fires
+(below).
 
 **RISK.** A bucket that wins costs the whole NO price (12–100 × the
 premium). The edge is a fraction of a cent per dollar a day: a small, steady

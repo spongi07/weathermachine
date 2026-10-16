@@ -183,7 +183,11 @@ const NOW: &str = "2026-07-01T13:32:00Z";
 // ---------------------------------------------------------------------------
 
 fn g_world() -> World {
-    let mut w = World::new(NOW);
+    g_world_at(NOW)
+}
+
+fn g_world_at(now: &str) -> World {
+    let mut w = World::new(now);
     let m = w.m.clone();
     w.book(no(&m, 20), Some("0.96"), Some("0.97"));
     w.book(no(&m, 21), Some("0.98"), Some("0.985"));
@@ -309,6 +313,40 @@ fn g_blockers() {
     assert_eq!(
         blockers_of(&out, "20°C", OutcomeSide::No),
         vec!["already positioned or quoting"]
+    );
+}
+
+/// 16 October 2026: G_live's bid on NO 20 °C went up at 11:55, three
+/// above a high of 17, and rested on while the 11:55 report — in minutes
+/// later — raised the high to 18; it filled at 0.945. G waits for the
+/// report of its minute before it quotes.
+#[test]
+fn g_waits_for_the_report_of_its_minute_before_it_quotes() {
+    let w = g_world_at("2026-07-01T13:56:00Z");
+    let good = Some(dist(&[0.985, 0.012, 0.002, 0.001]));
+    let out = w.run(
+        &mut TailSeller::new(TailSellerConfig::default()),
+        &views(&afternoon(), "2026-07-01T13:56:00Z", good.clone()),
+    );
+    assert!(out.proposals.is_empty());
+    assert_eq!(
+        blockers_of(&out, "20°C", OutcomeSide::No),
+        vec!["the 13:55 UTC report not in yet"]
+    );
+    // In at 13:57:40: G quotes until ten minutes before the 14:25 report.
+    let mut series = afternoon();
+    series.push(("2026-07-01T13:55:00Z", 168));
+    let w = g_world_at("2026-07-01T13:57:40Z");
+    let out = w.run(
+        &mut TailSeller::new(TailSellerConfig::default()),
+        &views(&series, "2026-07-01T13:57:40Z", good),
+    );
+    assert_eq!(out.proposals.len(), 2, "{:?}", out.evaluations);
+    assert_eq!(
+        out.proposals[0].tif,
+        TimeInForce::Gtd {
+            expires_at: utc("2026-07-01T14:15:00Z")
+        }
     );
 }
 
