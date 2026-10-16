@@ -228,6 +228,8 @@ impl Strategy for KnmiNowcast {
         let trigger = cfg.trigger_tenths(high);
         let edge = high * 10 + 5;
         let mut reading = String::from("no KNMI reading");
+        // Whether KNMI shows the new high: K's probability holds only then.
+        let mut knmi_signal = false;
         match ctx.nowcast {
             None => blockers.push("no KNMI ten-minute reading".into()),
             Some(n) => {
@@ -268,19 +270,27 @@ impl Strategy for KnmiNowcast {
                         }
                     }
                 }
-                match n.mean.map(|t| t.tenths()) {
-                    None => blockers.push("KNMI mean missing".into()),
-                    Some(m) if m < trigger => blockers.push(format!(
-                        "KNMI mean {} < {} (high {high} + 0.5 + {})",
-                        c(m),
-                        c(trigger),
-                        c(cfg.mean_margin_tenths)
-                    )),
-                    Some(_) => {}
-                }
-                if cfg.require_max_at_edge && n.max.is_none_or(|t| t.tenths() < edge) {
+                let warm = match n.mean.map(|t| t.tenths()) {
+                    None => {
+                        blockers.push("KNMI mean missing".into());
+                        false
+                    }
+                    Some(m) if m < trigger => {
+                        blockers.push(format!(
+                            "KNMI mean {} < {} (high {high} + 0.5 + {})",
+                            c(m),
+                            c(trigger),
+                            c(cfg.mean_margin_tenths)
+                        ));
+                        false
+                    }
+                    Some(_) => true,
+                };
+                let peaked = !cfg.require_max_at_edge || n.max.is_some_and(|t| t.tenths() >= edge);
+                if !peaked {
                     blockers.push(format!("KNMI maximum below {}", c(edge)));
                 }
+                knmi_signal = warm && peaked;
             }
         }
         let fees = ctx.market.fees;
@@ -328,7 +338,12 @@ impl Strategy for KnmiNowcast {
                 }
             }
         }
-        let ev = ask.map(ev_at);
+        // `p_new_high` is the chance of a new high once KNMI shows it;
+        // without that reading K has none, and no EV (16 October 2026:
+        // p 0.940 and EV +0.93 on a NO offered at 0.001 while KNMI read
+        // 5 °C under the edge).
+        let p_win = knmi_signal.then_some(cfg.p_new_high);
+        let ev = ask.map(ev_at).filter(|_| knmi_signal);
         if let Some(e) = ev
             && e < cfg.min_edge
         {
@@ -349,7 +364,7 @@ impl Strategy for KnmiNowcast {
             token: token.clone(),
             ask,
             bid,
-            p_win: Some(cfg.p_new_high),
+            p_win,
             ev_per_share: ev,
             break_even: be,
             signal,

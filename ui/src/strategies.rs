@@ -658,7 +658,7 @@ fn NowPanel(snap: Snap, strategy: Memo<Option<StrategyDto>>) -> impl IntoView {
                     })
                     .collect::<Vec<_>>();
                 let body = if rows.is_empty() {
-                    view! { <tr><td colspan="9" class="empty">"No evaluation of this strategy right now (disabled, no market, no model, incomplete views, or no report since the start)."</td></tr> }.into_any()
+                    view! { <tr><td colspan="9" class="empty">"No evaluation of this strategy right now (disabled, no market, no model, incomplete views, no report since the start, or no bucket it trades today)."</td></tr> }.into_any()
                 } else {
                     rows.into_any()
                 };

@@ -1532,6 +1532,45 @@ impl Engine {
             self.push_decision(rec.clone());
             out.decisions.push(rec);
         }
+        // A rule that fires between reports (G's quotes at their minute, a
+        // lab rule once its minute's hold is over) has its signal recorded
+        // at that moment: the reports' records show it only quoting or
+        // holding (16 October 2026: G_live's history read 0 signals beside
+        // 22 proposals).
+        let recorded = |e: &BucketEvaluation| match record {
+            Record::Report => true,
+            Record::KnmiCheckpoint { .. } => nowcast_readers.contains(&e.strategy),
+            Record::None => false,
+        };
+        let fired: Vec<String> = evaluations
+            .iter()
+            .filter(|e| e.signal && !recorded(e))
+            .filter(|e| {
+                proposals
+                    .iter()
+                    .any(|p| p.strategy == e.strategy && p.token == e.token)
+            })
+            .map(evaluation_line)
+            .collect();
+        if !fired.is_empty() {
+            let id = self.alloc_decision();
+            let rec = DecisionRecord {
+                decision_id: id,
+                strategy: StrategyId::from_static("evaluation"),
+                at: self.now,
+                location: loc.location.clone(),
+                event_slug: Some(market.event_slug.clone()),
+                summary: format!("signal between reports: {}", fired.join("; ")),
+                // No views: the model against the market is scored on the
+                // routine evaluations only.
+                inputs: serde_json::json!({ "signal": true }),
+                outputs: serde_json::json!({ "evaluations": fired }),
+                approved: false,
+                reasons: Vec::new(),
+            };
+            self.push_decision(rec.clone());
+            out.decisions.push(rec);
+        }
 
         for p in proposals {
             self.process_proposal(p, &market, &loc, out);

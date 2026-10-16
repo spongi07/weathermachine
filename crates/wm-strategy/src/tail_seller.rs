@@ -197,6 +197,27 @@ impl Strategy for TailSeller {
             out.evaluations.push(eval);
             out.proposals.extend(proposal);
         }
+        // No bucket far enough above the high (16 October 2026: the high at
+        // 19 °C, the top bucket 21 °C or higher): the one nearest to it says
+        // why G rests nothing, instead of an empty page.
+        if out.evaluations.is_empty()
+            && let Some((o, lo)) = ctx
+                .market
+                .outcomes
+                .iter()
+                .filter_map(|o| o.bucket.lower.filter(|lo| *lo > high).map(|lo| (o, lo)))
+                .max_by_key(|(_, lo)| *lo)
+        {
+            let mut why = shared;
+            why.push(format!(
+                "{} only {} °C above the high {high} (needs ≥ {})",
+                o.label,
+                lo - high,
+                cfg.min_distance
+            ));
+            let (eval, _) = self.bucket(ctx, o, high, expiry, &why);
+            out.evaluations.push(eval);
+        }
         out
     }
 }

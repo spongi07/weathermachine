@@ -312,6 +312,41 @@ fn g_blockers() {
     );
 }
 
+/// 16 October 2026: with the high at 19 °C and the top bucket 21 °C or
+/// higher, G (three degrees live) evaluated nothing and its page blamed a
+/// missing model. The bucket nearest its distance says why it rests nothing.
+#[test]
+fn g_names_the_top_bucket_when_none_lies_far_enough_above_the_high() {
+    let mut w = World::new(NOW);
+    let m = w.m.clone();
+    let top = m.outcome_for_value(30).unwrap().clone();
+    assert_eq!(top.label, "24°C or higher");
+    w.book(top.no_token.clone(), Some("0.97"), Some("0.98"));
+    let hot = vec![
+        ("2026-07-01T11:00:00Z", 220),
+        ("2026-07-01T12:00:00Z", 230),
+        ("2026-07-01T13:30:00Z", 228),
+    ];
+    let good = Some(dist(&[0.985, 0.012, 0.002, 0.001]));
+    let out = w.run(
+        &mut TailSeller::new(TailSellerConfig::default()),
+        &views(&hot, NOW, good.clone()),
+    );
+    assert!(out.proposals.is_empty());
+    assert_eq!(out.evaluations.len(), 1, "{:?}", out.evaluations);
+    assert_eq!(
+        blockers_of(&out, "24°C or higher", OutcomeSide::No),
+        vec!["24°C or higher only 1 °C above the high 23 (needs ≥ 2)"]
+    );
+    // With the high in the top bucket nothing lies above it.
+    let top_reached = vec![("2026-07-01T12:00:00Z", 240), ("2026-07-01T13:30:00Z", 238)];
+    let out = w.run(
+        &mut TailSeller::new(TailSellerConfig::default()),
+        &views(&top_reached, NOW, good),
+    );
+    assert!(out.evaluations.is_empty() && out.proposals.is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // H — next degree
 // ---------------------------------------------------------------------------
@@ -730,6 +765,30 @@ fn k_blockers() {
         one(&w),
         vec!["KNMI mean 18.7 °C < 18.8 °C (high 18 + 0.5 + 0.3 °C)"]
     );
+    // K's p holds only once KNMI shows the new high: without it the line
+    // has no p and no EV (16 October 2026: p 0.940, EV +0.93 on a NO at
+    // 0.001 while KNMI read 5 °C under the edge).
+    let line = |w: &World| {
+        let out = w.run(&mut KnmiNowcast::new(KnmiNowcastConfig::default()), &v);
+        let e = out.evaluations[0].clone();
+        (e.p_win, e.ev_per_share)
+    };
+    assert_eq!(line(&w), (None, None));
+    let warm = k_world(
+        "0.40",
+        "0.42",
+        Some(reading("2026-07-01T11:40:00Z", 189, 191)),
+    );
+    let (p_win, ev) = line(&warm);
+    assert_eq!(p_win, Some(0.80));
+    assert!(ev.is_some_and(|e| e > 0.3), "{ev:?}");
+    // A warm mean without the maximum at the edge is no signal either.
+    let flat = k_world(
+        "0.40",
+        "0.42",
+        Some(reading("2026-07-01T11:40:00Z", 189, 184)),
+    );
+    assert_eq!(line(&flat), (None, None));
     // The reading ended before the last METAR (11:25): stale.
     let w = k_world(
         "0.40",

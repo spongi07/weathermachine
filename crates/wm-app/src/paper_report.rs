@@ -791,6 +791,14 @@ fn build_day(
         .filter(|d| d.strategy == "evaluation" && !late_checkpoint(d))
         .copied()
         .partition(|d| d.inputs.get("knmi_checkpoint").is_some());
+    // A signal recorded between reports (a maker's quote, a lab rule after
+    // its hold) counts among its strategy's lines, not as an evaluation of
+    // its own, and carries no views to score the model on.
+    let routine: Vec<&ReportDecision> = evaluations
+        .iter()
+        .filter(|d| d.inputs.get("signal").is_none())
+        .copied()
+        .collect();
     let mut strategies = strategy_days(&evaluations, &buckets, high, fee_rate, tz);
     let mut knmi = strategy_days(&checkpoints, &buckets, high, fee_rate, tz);
     if in_progress {
@@ -804,7 +812,7 @@ fn build_day(
     }
     let model_vs_market = won.and_then(|w| {
         let tops = inputs.books.get(&w.yes_token)?;
-        model_vs_market(&evaluations, &w.label, &bucket_of(w), tops, tz)
+        model_vs_market(&routine, &w.label, &bucket_of(w), tops, tz)
     });
     let proposals = decisions
         .iter()
@@ -901,7 +909,7 @@ fn build_day(
         forecast,
         latency,
         market,
-        evaluations: evaluations.len(),
+        evaluations: routine.len(),
         strategies,
         knmi_checkpoints: checkpoints.len(),
         knmi,
@@ -1137,6 +1145,21 @@ fn taker_fee(rate: f64, p: f64) -> f64 {
     rate * p * (1.0 - p)
 }
 
+/// How far K's KNMI mean stayed under its trigger, °C, from its blocker
+/// `KNMI mean 18.4 °C < 18.8 °C (…)`: `Some(0.0)` when the mean reached it,
+/// `None` without a reading.
+fn knmi_shortfall(verdict: &str) -> Option<f64> {
+    if verdict.contains("no KNMI") || verdict.contains("KNMI mean missing") {
+        return None;
+    }
+    let Some((_, rest)) = verdict.split_once("KNMI mean ") else {
+        return Some(0.0);
+    };
+    let (mean, rest) = rest.split_once(" °C < ")?;
+    let (trigger, _) = rest.split_once(" °C")?;
+    Some(trigger.trim().parse::<f64>().ok()? - mean.trim().parse::<f64>().ok()?)
+}
+
 fn call(
     at: DateTime<Utc>,
     l: &EvalLine,
@@ -1154,16 +1177,21 @@ fn call(
         (Some(w), None, Some(a)) => Some(f64::from(u8::from(w)) - a - taker_fee(fee_rate, a)),
         _ => None,
     };
+    // K's p holds only once KNMI shows the new high; its lines until 16
+    // October 2026 carried it (and an EV) without that reading.
+    let unpriced = l.tag == "K"
+        && (knmi_shortfall(&l.verdict).is_none_or(|s| s > 0.0)
+            || l.verdict.contains("KNMI maximum below"));
     Call {
         at: hhmm(at, tz),
         bucket: l.bucket.clone(),
         side: l.side.clone(),
         ask: l.ask,
         maker_bid: l.maker_bid,
-        p: l.p,
+        p: l.p.filter(|_| !unpriced),
         model: l.model,
         market: l.market,
-        ev: l.ev,
+        ev: l.ev.filter(|_| !unpriced),
         verdict: l.verdict.clone(),
         won,
         pnl_per_share,
@@ -1180,7 +1208,8 @@ type Closeness = (f64, f64);
 /// higher ask, since their trigger is the ask rising into a range. The rest
 /// (G–K, the lab) trade on a rule whose probability holds only once its
 /// trigger fires: fewer blockers first, then the EV — by EV alone a NO at
-/// 0.001 would always look closest.
+/// 0.001 would always look closest. K's trigger is a KNMI reading: the one
+/// nearest it first.
 fn closeness(l: &EvalLine) -> Option<Closeness> {
     let blockers = if l.signal {
         0
@@ -1194,6 +1223,11 @@ fn closeness(l: &EvalLine) -> Option<Closeness> {
         // them alone (no EV since 16 October 2026): the dearest NO bid —
         // the cheapest YES it would sell — is the closest.
         "G" | "GL" => Some((-(blockers as f64), l.maker_bid.or(l.ask)?)),
+        // K's p is fixed and holds only once KNMI shows the new high: the
+        // reading nearest its trigger is the closest, whatever the price
+        // (16 October 2026: a NO at 0.09 with KNMI 1.6 °C short ranked
+        // closest by its EV of +0.84).
+        "K" => Some((-knmi_shortfall(&l.verdict)?, -(blockers as f64))),
         _ => Some((-(blockers as f64), l.ev?)),
     }
 }
@@ -2377,6 +2411,13 @@ mod tests {
                 "K 21°C NO · ask 0.74 · p 0.940 · EV +0.1804 — KNMI reading not newer than the last METAR; KNMI reading 154 min old > 12",
             ],
         );
+        // A signal between reports (G's quote at its minute) counts among
+        // its strategy's lines and signals, not as an evaluation.
+        let quote = record(
+            "2026-10-07T11:25:00Z",
+            serde_json::json!({ "signal": true }),
+            &["G 22°C NO · ask 0.95 · bid 0.94 (maker) — SIGNAL"],
+        );
         let inputs = ReportInputs {
             observations: vec![ReportObservation {
                 observed_at: t("2026-10-07T11:55:00Z"),
@@ -2388,7 +2429,7 @@ mod tests {
                 from_failover: false,
             }],
             outcomes: vec![outcome(21), outcome(22)],
-            decisions: vec![checkpoint, routine, history],
+            decisions: vec![checkpoint, routine, history, quote],
             books: HashMap::from([(
                 "y22".to_owned(),
                 vec![ReportBookTop {
@@ -2409,6 +2450,9 @@ mod tests {
         let r = build(&inputs, &plan, t("2026-10-08T08:00:00Z"));
         let d = &r.days[0];
         assert_eq!((d.evaluations, d.knmi_checkpoints), (1, 1));
+        let g = d.strategies.iter().find(|s| s.strategy == "G").unwrap();
+        assert_eq!((g.lines, g.signals.len()), (1, 1));
+        assert_eq!(g.signals[0].won, Some(false), "22 °C was the high");
         let k = |list: &[StrategyDay]| list.iter().find(|s| s.strategy == "K").cloned();
         assert_eq!(k(&d.strategies).unwrap().lines, 1, "the routine line only");
         assert_eq!(
@@ -2560,10 +2604,13 @@ mod tests {
         assert!(by_closeness(f, b).is_gt(), "fewer blockers first");
     }
 
-    /// A rule's EV assumes its trigger fired: K's closest call is the line
-    /// with the fewest blockers, not the cheapest NO with the highest EV.
+    /// A rule's EV assumes its trigger fired: K's closest call is the
+    /// reading nearest its trigger, not the cheapest NO with the highest EV
+    /// (16 October 2026: a NO at 0.09 with KNMI 1.6 °C short ranked closest
+    /// by an EV of +0.84), and its lines show no p or EV without the
+    /// trigger.
     #[test]
-    fn rule_strategies_rank_closest_calls_by_blockers_then_ev() {
+    fn k_ranks_closest_calls_by_the_knmi_reading() {
         let at = |h: u32, m: u32| {
             chrono::NaiveDate::from_ymd_opt(2026, 10, 3)
                 .unwrap()
@@ -2594,6 +2641,12 @@ mod tests {
                     "K 20°C NO · ask 0.001 · p 0.940 · EV +0.9290 — KNMI reading not newer than the last METAR; KNMI mean 17.5 °C < 20.8 °C (high 20 + 0.5 + 0.3 °C); KNMI maximum below 20.5 °C; NO ask 0.001 outside [0.02, 0.75]",
                 ],
             ),
+            rec(
+                at(13, 27),
+                &[
+                    "K 20°C NO · ask 0.09 · p 0.940 · EV +0.8359 — KNMI reading not newer than the last METAR; KNMI mean 20.2 °C < 20.8 °C (high 20 + 0.5 + 0.3 °C); KNMI maximum below 20.5 °C",
+                ],
+            ),
         ];
         let refs: Vec<&ReportDecision> = recs.iter().collect();
         let days = strategy_days(
@@ -2605,8 +2658,20 @@ mod tests {
         );
         let k = days.iter().find(|d| d.strategy == "K").unwrap();
         assert_eq!(k.closest.len(), 1, "one line per bucket and side");
-        assert_eq!(k.closest[0].at, "14:27", "two blockers beat four");
-        assert!(call_text(&k.closest[0]).contains("ask 0.18 · p 0.940 · EV +0.7426"));
+        assert_eq!(k.closest[0].at, "15:27", "0.6 °C short beats 1.0 and 3.3");
+        let text = call_text(&k.closest[0]);
+        assert!(text.contains("20°C NO · ask 0.09 — KNMI"), "{text}");
+        assert!(!text.contains("p 0.940") && !text.contains("EV"), "{text}");
+        assert_eq!(
+            knmi_shortfall("KNMI mean 18.4 °C < 18.8 °C (high 18 + 0.5 + 0.3 °C)")
+                .map(|s| (s * 10.0).round()),
+            Some(4.0)
+        );
+        assert_eq!(
+            knmi_shortfall("NO ask 0.80 outside [0.02, 0.75]"),
+            Some(0.0)
+        );
+        assert_eq!(knmi_shortfall("no KNMI ten-minute reading"), None);
     }
 
     /// 13 and 14 October 2026: the live twin's lines read `G`, after G's in

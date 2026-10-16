@@ -602,7 +602,13 @@ bucket, with an EV of −0.62); the ratio check still holds the cell's bound
 against the YES, and the history ranks G's closest calls by blockers, then
 the dearest NO bid. A day still in progress is judged by its high so far:
 its calls read "winning/losing so far", and the live twin's settled P&L is
-named real money.
+named real money. When no bucket lies `min_distance` above the high, G
+still writes one line, for the bucket nearest that distance, blocked
+"21°C or higher only 2 °C above the high 19 (needs ≥ 3)" (16 October 2026:
+with the high at 19 °C G wrote nothing, and its page blamed a missing
+model); with the high in the top bucket there is none. G quotes at a
+report's minute, before the report reaches it, so its signals fall between
+the reports' records: the engine records them as they fire (below).
 
 **RISK.** A bucket that wins costs the whole NO price (12–100 × the
 premium). The edge is a fraction of a cent per dollar a day: a small, steady
@@ -768,7 +774,12 @@ above the rounding edge:
 
 K's margin (+0.3 °C) sits in the third row, so `p_new_high` is its lower
 bound, 0.94 (it was an assumed 0.80); the NO also wins when a later report
-beats the high, so this is conservative. K made 4 trades, all won, +$81.10
+beats the high, so this is conservative. It is the chance of a new high
+once KNMI shows one, so a line without that reading (the mean under the
+trigger, or the maximum under the edge) carries no `p` and no EV (until
+16 October 2026 it carried 0.94 everywhere: EV +0.93 on a NO at 0.001 with
+KNMI 5 °C short), and the history ranks K's closest calls by how near the
+mean came to its trigger, then by blockers (`knmi_shortfall`). K made 4 trades, all won, +$81.10
 (+$20.28 a trade, 95 % CI +11.62 … +30.73); the variant chosen on
 June–July (the reading known after 2 minutes) won all 4 of its trades in
 August–September (+$56.41). With a 0.1 °C margin K traded 18 times but won
@@ -805,6 +816,16 @@ out those recorded more than ten minutes after their report (a start's
 history, recorded as checkpoints until 10 October 2026); a strategy's log
 and its dashboard page mark them ("KNMI reading before the report").
 
+A strategy that fires between reports — G and J quoting at their minute, a
+lab rule once its minute's hold is over — has its signal lines recorded as
+it fires, in an `evaluation` record of their own ("signal between
+reports", `inputs.signal`, no views): the reports' records show such a
+strategy only quoting or holding (16 October 2026: G_live's history read
+0 signals beside 22 proposals). `report paper` counts them among the
+strategy's lines and signals, not as an evaluation, and scores the model
+on the routine records only; a strategy's page marks them ("signal
+between reports").
+
 **TESTING (G–K).**
 * `wm-strategy/tests/new_strategies.rs`: each strategy's signal, the order
   it proposes (price, size, time in force) and its blockers; H never pays
@@ -814,7 +835,8 @@ and its dashboard page mark them ("KNMI reading before the report").
   passive bid.
 * `wm-backtest/tests/maker_session.rs`: J in the shared session loop —
   quotes, expiry, the daily new exposure given back, quotes again after the
-  report, a maker fill from a trade print, no second bid on a held side.
+  report, a maker fill from a trade print, no second bid on a held side;
+  its quotes on a book update record their signals between reports.
 * `wm-backtest/tests/nowcast_session.rs`: K in the shared session loop — a
   reading older than the last METAR does nothing; one that arrives as the
   next METAR is taken buys the high's NO, which fills; a late, older

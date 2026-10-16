@@ -238,6 +238,25 @@ fn the_morning_maker_quotes_expires_requotes_and_fills() {
     );
     let both = Usd::from_micros(9_840_000 + 9_690_000);
     assert_eq!(s.engine().snapshot().daily_new_exposure, both);
+    // The quotes came on a book update, between reports: their signals are
+    // recorded then (the reports' records show J only quoting; 16 October
+    // 2026: G_live's history read 0 signals beside 22 proposals).
+    let between: Vec<&str> = out
+        .decisions
+        .iter()
+        .filter(|d| {
+            d.strategy.as_str() == "evaluation" && d.summary.starts_with("signal between reports")
+        })
+        .map(|d| d.summary.as_str())
+        .collect();
+    assert_eq!(
+        between,
+        vec![
+            "signal between reports: J 19°C YES · ask 0.44 · bid 0.41 (maker) · p 0.420 (market 0.420) · EV +0.0100 — SIGNAL",
+            "signal between reports: J 19°C NO · ask 0.60 · bid 0.57 (maker) · p 0.580 (market 0.580) · EV +0.0100 — SIGNAL",
+        ],
+        "one on each book's update"
+    );
 
     // Nothing trades; at 06:45 both expire and give their cost back. At
     // 06:46 the report is nine minutes away: J does not quote again.

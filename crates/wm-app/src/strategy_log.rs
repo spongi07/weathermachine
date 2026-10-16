@@ -354,17 +354,28 @@ fn now(s: &mut String, snap: &DashboardSnapshot, l: &LocationDto, strategy: &Str
             .map_or_else(|| "none yet".to_owned(), |a| format!("{} min ago", a / 60))
     );
     if let Some(f) = &l.forecast {
-        let _ = writeln!(
-            s,
-            "- Day-1 forecast: day max {} °C, {} °C above the high still to come ({}).",
-            opt(f.day_max_c, 1),
-            signed(f.headroom_c, 1),
-            if f.in_use {
-                "used by the model"
-            } else {
-                "not used by the model"
-            }
-        );
+        let used = if f.in_use {
+            "used by the model"
+        } else {
+            "not used by the model"
+        };
+        // The rest of the day under the high reads as such, not as a
+        // negative headroom (16 October 2026: "-5.6 °C above the high").
+        let _ = match f.headroom_c {
+            Some(h) if h < 0.0 => writeln!(
+                s,
+                "- Day-1 forecast: day max {} °C; the rest of the day at most {} °C, {:.1} °C under the high ({used}).",
+                opt(f.day_max_c, 1),
+                opt(f.remaining_max_c, 1),
+                -h
+            ),
+            _ => writeln!(
+                s,
+                "- Day-1 forecast: day max {} °C, {} °C above the high still to come ({used}).",
+                opt(f.day_max_c, 1),
+                signed(f.headroom_c, 1)
+            ),
+        };
     }
     let blocking: Vec<String> = snap
         .risk
@@ -398,7 +409,7 @@ fn now(s: &mut String, snap: &DashboardSnapshot, l: &LocationDto, strategy: &Str
         .filter(|e| e.strategy == strategy.id)
         .collect();
     if evals.is_empty() {
-        s.push_str("No evaluation of this strategy right now (disabled, no model, incomplete views, or no report yet since the start).\n\n");
+        s.push_str("No evaluation of this strategy right now (disabled, no model, incomplete views, no report yet since the start, or no bucket it trades today).\n\n");
         return;
     }
     s.push_str("| bucket | side | ask | bid | p used | model | market | EV/share | verdict |\n|---|---|---:|---:|---:|---:|---:|---:|---|\n");
@@ -463,29 +474,31 @@ fn this_run(s: &mut String, snap: &DashboardSnapshot, strategy: &StrategyDto) {
         "\n### Its lines in the evaluations (latest {TRAIL_LINES})\n"
     );
     // A KNMI checkpoint (the last reading before a report, the KNMI
-    // strategies' decisive moment) is marked as such.
-    let trail: Vec<(i64, bool, &String)> = snap
+    // strategies' decisive moment) and a signal between reports (a quote at
+    // its minute, a rule after its hold) are marked as such.
+    let trail: Vec<(i64, &str, &String)> = snap
         .decisions
         .iter()
         .filter(|d| d.strategy == "evaluation")
         .flat_map(|d| {
-            let checkpoint = d.summary.starts_with("KNMI checkpoint");
+            let mark = if d.summary.starts_with("KNMI checkpoint") {
+                "(KNMI reading before the report) "
+            } else if d.summary.starts_with("signal between reports") {
+                "(signal between reports) "
+            } else {
+                ""
+            };
             d.details
                 .iter()
                 .filter(|l| strategy.owns_line(l))
-                .map(move |l| (d.at_ms, checkpoint, l))
+                .map(move |l| (d.at_ms, mark, l))
         })
         .take(TRAIL_LINES)
         .collect();
     if trail.is_empty() {
         s.push_str("None in the dashboard's decision log.\n");
     }
-    for (at, checkpoint, line) in trail {
-        let mark = if checkpoint {
-            "(KNMI reading before the report) "
-        } else {
-            ""
-        };
+    for (at, mark, line) in trail {
         let _ = writeln!(s, "- {} {mark}{line}", stamp(at, tz));
     }
     s.push_str("\n### Orders\n\n");
@@ -925,6 +938,35 @@ mod tests {
         let md = render(&two, &f(), History::Unavailable);
         assert!(md.contains("newest first; UTC time)"), "{md}");
         assert!(md.contains("- 09-21 14:13:20 UTC **REJECTED**"), "{md}");
+    }
+
+    /// 16 October 2026: "day max 18.8 °C, -5.6 °C above the high still to
+    /// come" once the evening was forecast under the high.
+    #[test]
+    fn a_forecast_under_the_high_reads_as_such() {
+        let line = |remaining: f64, headroom: f64| {
+            let mut snap = snapshot();
+            snap.locations[0].forecast = Some(ForecastDto {
+                in_use: true,
+                day_max_c: Some(18.8),
+                remaining_max_c: Some(remaining),
+                headroom_c: Some(headroom),
+                ..ForecastDto::default()
+            });
+            render(&snap, &f(), History::Unavailable)
+                .lines()
+                .find(|l| l.starts_with("- Day-1 forecast"))
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            line(13.4, -5.6),
+            "- Day-1 forecast: day max 18.8 °C; the rest of the day at most 13.4 °C, 5.6 °C under the high (used by the model)."
+        );
+        assert_eq!(
+            line(20.8, 1.8),
+            "- Day-1 forecast: day max 18.8 °C, +1.8 °C above the high still to come (used by the model)."
+        );
     }
 
     #[test]
