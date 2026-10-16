@@ -46,7 +46,7 @@ pub(crate) fn summary(family: u8, variant: bool) -> &'static str {
         }
         (35, true) => "As L35 with the high's NO up ≤ 0.02 since the report.",
         (36, false) => {
-            "Defensive. 08:00–14:00: an airport 60–300 km upwind saw a front pass in the last 3 hours (≥ 2 °C down within 70 minutes, the wind veering 40–180° or QNH up), due at Schiphol before the median peak → NO of the next degree at 0.60–0.95 (p = 0.92)."
+            "Defensive. 08:00–14:00: airports 60–300 km south through west to north of Schiphol saw a front pass in the last 6 hours (≥ 2 °C down within 70 minutes, the wind veering 40–180° or QNH up); the wind behind it gives its path, two passages ≥ 80 km apart along that path its speed, and it is due at Schiphol before the median peak → NO of the next degree at 0.60–0.95 (p = 0.92)."
         }
         (36, true) => "As L36 with a drop of ≥ 3 °C.",
         (37, false) => {

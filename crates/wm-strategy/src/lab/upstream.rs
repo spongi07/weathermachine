@@ -1,8 +1,10 @@
 //! L26, L31 and L36: the air on its way. METARs of airports 60–300 km
 //! upstream show the air that reaches Schiphol hours later — warmer,
-//! clearer, or behind a front. The surface wind carries it at about one
-//! and a half times its own speed (the wind above the ground is faster),
-//! so each rule knows when it arrives and trades only what arrives in time.
+//! clearer, or behind a front. The surface wind carries the air at about
+//! one and a half times its own speed (the wind above the ground is
+//! faster); a front moves with the air behind it, at the pace its passages
+//! upstream show. Each rule knows when it arrives and trades only what
+//! arrives in time.
 
 use super::UpstreamReadings;
 use super::WxReport;
@@ -278,66 +280,243 @@ pub(crate) fn clearing(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutpu
     );
 }
 
-/// A front's passage in an airport's reports of the last 3 hours: two
-/// reports ≤ 70 minutes apart, the temperature down ≥ `drop` tenths, the
-/// wind veered 40–180° or the pressure up ≥ 1 hPa. `(passage, detail)`.
-fn passage(
-    reports: &[&WxReport],
-    now: DateTime<Utc>,
-    drop: i32,
-) -> Option<(DateTime<Utc>, String)> {
+/// How far back L36 looks for a front's passage at an airport.
+const FRONT_LOOKBACK: Duration = Duration::hours(6);
+/// Two passages at least this far apart along a front's path time it: a
+/// passage is known only to the half hour between two reports.
+const FRONT_MIN_SPREAD_KM: f64 = 80.0;
+/// The speeds a front plausibly moves at, km/h.
+const FRONT_KMH: (f64, f64) = (10.0, 80.0);
+/// Three passages or more further than this from a steady front (RMS,
+/// minutes) are not one front.
+const FRONT_MAX_MISS_MIN: f64 = 45.0;
+
+/// A front's passage at an airport.
+struct Passage {
+    /// Halfway between the reports before and after it.
+    at: DateTime<Utc>,
+    /// `18.0 °C down 3.0 °C by 08:20 UTC, wind veered 90°`.
+    detail: String,
+}
+
+/// The latest front's passage in an airport's reports of the last
+/// [`FRONT_LOOKBACK`]: a report `drop` tenths or more under one at most 70
+/// minutes before it (the largest such drop), the wind veered 40–180° or
+/// the pressure up ≥ 1 hPa between the two.
+fn passage(reports: &[&WxReport], now: DateTime<Utc>, drop: i32) -> Option<Passage> {
+    let since = now - FRONT_LOOKBACK;
     reports
-        .windows(2)
+        .iter()
+        .enumerate()
         .rev()
-        .filter(|w| w[1].observed_at >= now - Duration::hours(3))
-        .find_map(|w| {
-            let (a, b) = (w[0], w[1]);
-            if b.observed_at - a.observed_at > Duration::minutes(70) {
-                return None;
-            }
-            let fell = a.temp_tenths? - b.temp_tenths?;
-            if fell < drop {
-                return None;
-            }
-            let veer = match (
-                a.wx.wind().and_then(|x| x.direction),
-                b.wx.wind().and_then(|x| x.direction),
-            ) {
-                (Some(d1), Some(d2)) => Some((i32::from(d2) - i32::from(d1)).rem_euclid(360)),
-                _ => None,
-            };
-            let rise = match (a.wx.qnh_hpa, b.wx.qnh_hpa) {
-                (Some(p1), Some(p2)) => Some(i32::from(p2) - i32::from(p1)),
-                _ => None,
-            };
-            let veered = veer.is_some_and(|v| (40..=180).contains(&v));
-            let pressure = rise.is_some_and(|r| r >= 1);
-            (veered || pressure).then(|| {
-                (
-                    b.observed_at,
-                    format!(
+        .take_while(|(_, b)| b.observed_at >= since)
+        .find_map(|(j, b)| {
+            let after = b.temp_tenths?;
+            reports[..j]
+                .iter()
+                .rev()
+                .take_while(|a| b.observed_at - a.observed_at <= Duration::minutes(70))
+                .filter_map(|a| {
+                    let fell = a.temp_tenths? - after;
+                    if fell < drop {
+                        return None;
+                    }
+                    let veer = match (
+                        a.wx.wind().and_then(|x| x.direction),
+                        b.wx.wind().and_then(|x| x.direction),
+                    ) {
+                        (Some(d1), Some(d2)) => {
+                            Some((i32::from(d2) - i32::from(d1)).rem_euclid(360))
+                        }
+                        _ => None,
+                    };
+                    let rise = match (a.wx.qnh_hpa, b.wx.qnh_hpa) {
+                        (Some(p1), Some(p2)) => Some(i32::from(p2) - i32::from(p1)),
+                        _ => None,
+                    };
+                    let veered = veer.filter(|v| (40..=180).contains(v));
+                    let pressure = rise.filter(|r| *r >= 1);
+                    (veered.is_some() || pressure.is_some()).then_some((*a, fell, veered, pressure))
+                })
+                .max_by_key(|(_, fell, _, _)| *fell)
+                .map(|(a, fell, veered, pressure)| Passage {
+                    at: a.observed_at + (b.observed_at - a.observed_at) / 2,
+                    detail: format!(
                         "{} down {} by {} UTC{}{}",
                         c(a.temp_tenths.unwrap_or(0)),
                         c(fell),
                         b.observed_at.format("%H:%M"),
-                        veer.filter(|_| veered)
+                        veered
                             .map(|v| format!(", wind veered {v}°"))
                             .unwrap_or_default(),
-                        rise.filter(|_| pressure)
+                        pressure
                             .map(|r| format!(", QNH +{r} hPa"))
                             .unwrap_or_default()
                     ),
-                )
-            })
+                })
         })
 }
 
-/// L36 (`variant`: a drop of ≥ 3 °C). A front upstream, due before the
-/// peak: 08:00–14:00, an airport within 45° of the wind (≥ 6 kt) and
-/// 60–300 km away saw a front pass in the last 3 hours (≥ 2 °C down within
-/// 70 minutes, the wind veering 40–180° or QNH up ≥ 1 hPa), due at Schiphol
-/// from now until the season's median peak time → NO of the next degree at
-/// 0.60–0.95 (p = 0.92).
+/// A front on its way to Schiphol.
+struct Front {
+    /// When it reaches Schiphol.
+    eta: DateTime<Utc>,
+    /// Where it passed, its path, its speed and when it is due.
+    line: String,
+}
+
+/// The front on its way: its passages in the last [`FRONT_LOOKBACK`] at
+/// the airports south through west to north of Schiphol (where fronts
+/// come from) 60–300 km away; its path from the wind behind it (a front
+/// moves with the air behind it, not with the wind ahead of it at
+/// Schiphol); its speed from the order of its passages along that path,
+/// two at least [`FRONT_MIN_SPREAD_KM`] apart; and when it reaches
+/// Schiphol on the same line. Or why there is none.
+fn front(day: &Day<'_, '_>, drop: i32) -> Result<Front, String> {
+    let all = day.upstream();
+    if all.is_empty() {
+        return Err("no upstream airport configured or read ([[lab.upstream]])".into());
+    }
+    let west: Vec<&UpstreamReadings<'_>> = all
+        .iter()
+        .filter(|u| angle_between(u.bearing_deg, 270.0) <= 90.0)
+        .filter(|u| (60.0..=300.0).contains(&u.distance_km))
+        .collect();
+    if west.is_empty() {
+        return Err("no airport south through west to north of Schiphol at 60–300 km".into());
+    }
+    let now = day.now();
+    let seen: Vec<(&UpstreamReadings<'_>, Passage, Option<Wind>)> = west
+        .iter()
+        .filter_map(|u| {
+            let reports = known(day, u);
+            let p = passage(&reports, now, drop)?;
+            Some((*u, p, reports.last().and_then(|r| r.wx.wind())))
+        })
+        .collect();
+    if seen.is_empty() {
+        return Err(format!(
+            "no front in the last {} hours at {}",
+            FRONT_LOOKBACK.num_hours(),
+            west.iter().map(|u| u.icao).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let passed = seen
+        .iter()
+        .map(|(u, p, _)| format!("{} ({} UTC: {})", u.icao, p.at.format("%H:%M"), p.detail))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Its path: the winds behind it, turned around and averaged.
+    let (mut x, mut y, mut n) = (0.0_f64, 0.0_f64, 0_u32);
+    for (_, _, w) in &seen {
+        if let Some(Wind {
+            direction: Some(d),
+            speed_kt,
+            ..
+        }) = w
+            && *speed_kt >= 3
+        {
+            let to = (f64::from(*d) + 180.0).to_radians();
+            x += to.sin();
+            y += to.cos();
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return Err(format!(
+            "front through {passed}: no wind behind it to tell its path"
+        ));
+    }
+    let len = x.hypot(y);
+    if len < 0.7 * f64::from(n) {
+        return Err(format!(
+            "front through {passed}: the winds behind it disagree on its path"
+        ));
+    }
+    let (mx, my) = (x / len, y / len);
+    let toward = mx.atan2(my).to_degrees().rem_euclid(360.0);
+    let behind = (toward + 180.0).rem_euclid(360.0);
+    let head = format!(
+        "front through {passed}; the air behind it from {behind:03.0}°, so on its way to {toward:03.0}°"
+    );
+    // Each passage: the distance still to go along the path to Schiphol
+    // (km) and when it was (minutes from now).
+    let points: Vec<(f64, f64)> = seen
+        .iter()
+        .map(|(u, p, _)| {
+            let b = u.bearing_deg.to_radians();
+            let to_go = -(mx * b.sin() + my * b.cos()) * u.distance_km;
+            #[allow(clippy::cast_precision_loss)]
+            let at = (p.at - now).num_seconds() as f64 / 60.0;
+            (to_go, at)
+        })
+        .collect();
+    if points.len() < 2 {
+        return Err(format!(
+            "{head}: its speed needs a second airport along its path"
+        ));
+    }
+    let nearest = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let farthest = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+    if farthest - nearest < FRONT_MIN_SPREAD_KM {
+        return Err(format!(
+            "{head}: its passages {:.0} km apart along that path, < {FRONT_MIN_SPREAD_KM:.0} to time it",
+            farthest - nearest
+        ));
+    }
+    // at = due − pace × to_go, by least squares (pace: minutes a km).
+    #[allow(clippy::cast_precision_loss)]
+    let count = points.len() as f64;
+    let mean_go = points.iter().map(|p| p.0).sum::<f64>() / count;
+    let mean_at = points.iter().map(|p| p.1).sum::<f64>() / count;
+    let spread: f64 = points.iter().map(|p| (p.0 - mean_go).powi(2)).sum();
+    let together: f64 = points
+        .iter()
+        .map(|p| (p.0 - mean_go) * (p.1 - mean_at))
+        .sum();
+    let pace = -together / spread;
+    if pace <= 0.0 {
+        return Err(format!("{head}: its passages out of order along that path"));
+    }
+    let kmh = 60.0 / pace;
+    if !(FRONT_KMH.0..=FRONT_KMH.1).contains(&kmh) {
+        return Err(format!(
+            "{head}: its passages give {kmh:.0} km/h, outside {:.0}–{:.0}",
+            FRONT_KMH.0, FRONT_KMH.1
+        ));
+    }
+    let due = mean_at + pace * mean_go;
+    if points.len() >= 3 {
+        let miss = (points
+            .iter()
+            .map(|p| (p.1 - (due - pace * p.0)).powi(2))
+            .sum::<f64>()
+            / count)
+            .sqrt();
+        if miss > FRONT_MAX_MISS_MIN {
+            return Err(format!(
+                "{head}: its passages miss a steady front by {miss:.0} min"
+            ));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let eta = now + Duration::seconds((due * 60.0).round() as i64);
+    Ok(Front {
+        eta,
+        line: format!(
+            "{head} at {kmh:.0} km/h: due at Schiphol {} UTC",
+            eta.format("%H:%M")
+        ),
+    })
+}
+
+/// L36 (`variant`: a drop of ≥ 3 °C). A front on its way, due before the
+/// peak: 08:00–14:00, airports south through west to north of Schiphol
+/// (60–300 km) saw it pass in the last 6 hours (≥ 2 °C down within 70
+/// minutes, the wind veering 40–180° or QNH up ≥ 1 hPa); the wind behind
+/// it gives its path, two passages ≥ 80 km apart along that path its
+/// speed, and it is due at Schiphol from now until the season's median
+/// peak time → NO of the next degree at 0.60–0.95 (p = 0.92).
 pub(crate) fn front_eta(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutput) {
     let Some(j) = day.next_outcome() else {
         return;
@@ -345,48 +524,20 @@ pub(crate) fn front_eta(day: &Day<'_, '_>, variant: bool, out: &mut StrategyOutp
     let drop = if variant { 30 } else { 20 };
     let mut blockers: Vec<String> = day.outside(8 * 60, 14 * 60).into_iter().collect();
     let mut rationale = Vec::new();
-    match wind(day, 6) {
+    match front(day, drop) {
         Err(why) => blockers.push(why),
-        Ok((dir, kt)) => match upwind(day, dir, 45.0, (60.0, 300.0)) {
-            Err(why) => blockers.push(why),
-            Ok(found) => {
-                let peak = day.local(day.season_median());
-                let mut why = Vec::new();
-                let mut hit = false;
-                for u in found {
-                    let reports = known(day, u);
-                    match passage(&reports, day.now(), drop) {
-                        None => why.push(format!(
-                            "{}: no front in its reports of the last 3 hours",
-                            u.icao
-                        )),
-                        Some((at, detail)) => {
-                            let eta = arrival(at, u.distance_km, kt);
-                            if eta >= day.now() && peak.is_some_and(|p| eta < p) {
-                                hit = true;
-                                rationale.push(format!(
-                                    "front at {} ({:.0} km): {detail}; due at Schiphol {} UTC, before the median peak {}",
-                                    u.icao,
-                                    u.distance_km,
-                                    eta.format("%H:%M"),
-                                    super::day::hm(day.season_median())
-                                ));
-                            } else {
-                                why.push(format!(
-                                    "{}: front due {} UTC, not between now and the median peak {}",
-                                    u.icao,
-                                    eta.format("%H:%M"),
-                                    super::day::hm(day.season_median())
-                                ));
-                            }
-                        }
-                    }
-                }
-                if !hit {
-                    blockers.push(why.join("; "));
-                }
+        Ok(f) => {
+            let median = super::day::hm(day.season_median());
+            let peak = day.local(day.season_median());
+            if f.eta >= day.now() && peak.is_some_and(|p| f.eta < p) {
+                rationale.push(format!("{}, before the median peak {median} local", f.line));
+            } else {
+                blockers.push(format!(
+                    "{}: not between now and the median peak {median} local",
+                    f.line
+                ));
             }
-        },
+        }
     }
     day.taker(
         Buy {

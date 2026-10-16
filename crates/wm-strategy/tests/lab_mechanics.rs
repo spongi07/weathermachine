@@ -714,26 +714,58 @@ fn l31_buys_a_new_high_when_the_clear_sky_upwind_arrives_in_time() {
     assert_blocked(&cloudy.run(31, false), "not clear in its last two reports");
 }
 
-fn front_world(drop_to: i32) -> World {
-    let mut w = World::new("09:00");
+/// A front from the west at 44 km/h (16 October 2026: a cold front over
+/// England while Schiphol's wind blew from the south): through Norwich
+/// (EGSH) at 05:05 and Ostend (EBOS) at 08:35 UTC, the wind behind it from
+/// 290°; a thunderstorm east of Schiphol (EDDL) that is no front from the
+/// west. `drop` is each passage's fall in tenths.
+fn front_world(drop: i32) -> World {
+    let mut w = World::new("09:30");
     mild_morning(&mut w);
     w.metar(
-        "08:55",
+        "09:25",
         180,
         None,
-        "EHAM 010855Z 25025KT 9999 SCT030 18/12 Q1012",
+        "EHAM 010925Z 19008KT 9999 SCT030 18/14 Q1010",
     );
-    let after = format!(
-        "EGSH 010820Z 30018KT 9999 -RA BKN012 {}/13 Q1010",
-        drop_to / 10
+    let egsh = format!(
+        "EGSH 010520Z 29015KT 6000 -RA BKN012 {}/13 Q1010",
+        (180 - drop) / 10
     );
     w.upstream(
         "EGSH",
-        265.0,
-        240.0,
+        281.0,
+        241.0,
         &[
-            ("07:50", 180, "EGSH 010750Z 21012KT 9999 SCT030 18/14 Q1008"),
-            ("08:20", drop_to, &after),
+            ("04:50", 180, "EGSH 010450Z 21012KT 9999 SCT030 18/14 Q1008"),
+            ("05:20", 180 - drop, &egsh),
+            ("08:50", 150, "EGSH 010850Z 29014KT 9999 FEW020 15/10 Q1013"),
+        ],
+    );
+    let ebos = format!(
+        "EBOS 010850Z 29012KT 6000 -RA BKN010 {}/13 Q1011",
+        (190 - drop) / 10
+    );
+    w.upstream(
+        "EBOS",
+        228.0,
+        182.0,
+        &[
+            ("08:20", 190, "EBOS 010820Z 22010KT 9999 SCT035 19/14 Q1009"),
+            ("08:50", 190 - drop, &ebos),
+        ],
+    );
+    w.upstream(
+        "EDDL",
+        129.0,
+        177.0,
+        &[
+            ("08:20", 200, "EDDL 010820Z 16008KT 9999 SCT040 20/14 Q1012"),
+            (
+                "08:50",
+                170,
+                "EDDL 010850Z 25015G25KT 4000 TSRA BKN025CB 17/15 Q1013",
+            ),
         ],
     );
     w.no_book(19, "0.70", "0.72");
@@ -741,16 +773,157 @@ fn front_world(drop_to: i32) -> World {
 }
 
 #[test]
-fn l36_sells_the_next_degree_when_a_front_upstream_is_due_before_the_peak() {
-    let w = front_world(150);
+fn l36_sells_the_next_degree_when_a_front_from_the_west_is_due_before_the_peak() {
+    let w = front_world(30);
     let out = w.run(36, false);
     let pr = proposal(&out);
     assert_buy(pr, &w.no(19), "0.72");
     assert_eq!(pr.shares, Shares::from_whole(34), "$25 (defensive) at 0.73");
-    assert!(pr.rationale[0].contains("front at EGSH"));
+    let why = &pr.rationale[0];
+    assert!(
+        why.starts_with(
+            "front through EGSH (05:05 UTC: 18.0 °C down 3.0 °C by 05:20 UTC, wind veered 80°, QNH +2 hPa), EBOS (08:35 UTC: 19.0 °C down 3.0 °C by 08:50 UTC, wind veered 70°, QNH +2 hPa)"
+        ),
+        "{why}"
+    );
+    assert!(
+        why.ends_with(
+            "the air behind it from 290°, so on its way to 110° at 44 km/h: due at Schiphol 10:32 UTC, before the median peak 14:00 local"
+        ),
+        "{why}"
+    );
+    assert!(
+        !why.contains("EDDL"),
+        "a storm east of Schiphol is no front from the west"
+    );
     assert_eq!(proposal(&w.run(36, true)).token, w.no(19), "3 °C down");
-    assert_blocked(&front_world(160).run(36, true), "no front");
-    assert_eq!(proposal(&front_world(160).run(36, false)).token, w.no(19));
+    assert_blocked(
+        &front_world(25).run(36, true),
+        "no front in the last 6 hours at EGSH, EBOS",
+    );
+    assert_eq!(proposal(&front_world(25).run(36, false)).token, w.no(19));
+
+    // A fall in two half-hour steps is a passage too, halfway across it.
+    let mut steps = front_world(30);
+    steps.upstream.retain(|u| u.0 != "EBOS");
+    steps.upstream(
+        "EBOS",
+        228.0,
+        182.0,
+        &[
+            ("07:50", 190, "EBOS 010750Z 22010KT 9999 SCT035 19/14 Q1009"),
+            ("08:20", 175, "EBOS 010820Z 25010KT 9999 BKN020 18/14 Q1010"),
+            (
+                "08:50",
+                160,
+                "EBOS 010850Z 29012KT 6000 -RA BKN010 16/13 Q1011",
+            ),
+        ],
+    );
+    let why = proposal(&steps.run(36, false)).rationale[0].clone();
+    assert!(
+        why.contains("EBOS (08:20 UTC: 19.0 °C down 3.0 °C by 08:50 UTC, wind veered 70°"),
+        "{why}"
+    );
+}
+
+#[test]
+fn l36_times_a_front_only_by_passages_apart_along_its_path() {
+    // One passage gives a path but no speed.
+    let mut one = front_world(30);
+    one.upstream.retain(|u| u.0 != "EBOS");
+    assert_blocked(
+        &one.run(36, false),
+        "front through EGSH (05:05 UTC: 18.0 °C down 3.0 °C by 05:20 UTC, wind veered 80°, QNH +2 hPa); the air behind it from 290°, so on its way to 110°: its speed needs a second airport along its path",
+    );
+    // Norwich and Southend lie level along a path to 110° (as on 16
+    // October): their passages cannot time it.
+    let mut level = one;
+    level.upstream(
+        "EGMC",
+        255.0,
+        293.0,
+        &[
+            ("05:20", 180, "EGMC 010520Z 21012KT 9999 SCT030 18/14 Q1008"),
+            (
+                "05:50",
+                150,
+                "EGMC 010550Z 29014KT 6000 -RADZ BKN008 15/13 Q1010",
+            ),
+        ],
+    );
+    assert_blocked(
+        &level.run(36, false),
+        "its passages 2 km apart along that path, < 80 to time it",
+    );
+    // Ostend before Norwich: no front moving this way.
+    let mut reversed = front_world(30);
+    reversed.upstream.retain(|u| u.0 != "EBOS");
+    reversed.upstream(
+        "EBOS",
+        228.0,
+        182.0,
+        &[
+            ("04:20", 190, "EBOS 010420Z 22010KT 9999 SCT035 19/14 Q1009"),
+            (
+                "04:50",
+                160,
+                "EBOS 010450Z 29012KT 6000 -RA BKN010 16/13 Q1011",
+            ),
+        ],
+    );
+    reversed.upstream.retain(|u| u.0 != "EGSH");
+    reversed.upstream(
+        "EGSH",
+        281.0,
+        241.0,
+        &[
+            ("08:20", 180, "EGSH 010820Z 21012KT 9999 SCT030 18/14 Q1008"),
+            (
+                "08:50",
+                150,
+                "EGSH 010850Z 29015KT 6000 -RA BKN012 15/13 Q1010",
+            ),
+        ],
+    );
+    assert_blocked(
+        &reversed.run(36, false),
+        "its passages out of order along that path",
+    );
+    // A slow front, due after the median peak.
+    let mut slow = front_world(30);
+    slow.upstream.retain(|u| u.0 != "EGSH");
+    slow.upstream(
+        "EGSH",
+        281.0,
+        241.0,
+        &[
+            ("03:20", 180, "EGSH 010320Z 21012KT 9999 SCT030 18/14 Q1008"),
+            (
+                "03:50",
+                150,
+                "EGSH 010350Z 29015KT 6000 -RA BKN012 15/13 Q1010",
+            ),
+        ],
+    );
+    slow.upstream.retain(|u| u.0 != "EBOS");
+    slow.upstream(
+        "EBOS",
+        228.0,
+        182.0,
+        &[
+            ("08:50", 190, "EBOS 010850Z 22010KT 9999 SCT035 19/14 Q1009"),
+            (
+                "09:20",
+                160,
+                "EBOS 010920Z 29012KT 6000 -RA BKN010 16/13 Q1011",
+            ),
+        ],
+    );
+    assert_blocked(
+        &slow.run(36, false),
+        "at 28 km/h: due at Schiphol 12:09 UTC: not between now and the median peak 14:00 local",
+    );
 }
 
 // --------------------------------------------------------------- air ---

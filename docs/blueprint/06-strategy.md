@@ -901,6 +901,15 @@ moment it came in (`WxReport::known_at`), holding while it is still out
 reads a round bucket's fair share off `curve_share`, a parabola in log
 share through its neighbours within 2 °C, and never judges the ladder's
 peak ([first day](../research/strategy-lab.md#85-the-first-day-15-october-2026-and-what-it-changed)).
+L36 (`upstream::front`) looks for a front's passage (`upstream::passage`,
+the latest fall of ≥ 2 °C within 70 minutes with a veer or a pressure
+rise, halfway between its two reports) at the airports south through west
+to north of Schiphol in the last six hours (`FRONT_LOOKBACK`; the runtime
+reads six hours of upstream METARs), takes its path from the wind behind
+it and its speed from a least-squares line through its passages along
+that path (two at least `FRONT_MIN_SPREAD_KM`, 80, apart; 10–80 km/h;
+three or more within 45 minutes of the line), and trades when that line
+reaches Schiphol before the median peak.
 
 **INPUTS.** `StrategyContext::lab` (`LabInputs`): the station's KNMI
 readings of the last 48 hours, the neighbours' readings with their
@@ -956,7 +965,9 @@ data age, prices) gate every book.
   stop from the bid at entry, its profit after the sale's fee, its entry
   and pre-report exit on one clock; L58's curve
   exact on a normal ladder and never on its peak; the rise rules on the
-  high's NO and its band.
+  high's NO and its band; L36's front from the west with the wind from the
+  south at Schiphol, its passages along its path (one, level, out of
+  order, too slow), a fall in two steps.
 * `wm-engine/tests/engine_scenarios.rs`: a neighbour's KNMI reading
   evaluates the location around it (`a_neighbour_s_reading_evaluates_the_location_around_it`).
 * `wm-app`: `[strategies.lab]` and `[lab]` validation

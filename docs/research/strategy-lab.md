@@ -534,7 +534,7 @@ inconsistencies, who trades and when, and how traders react — or fail to.
 
 | input | source | read by |
 |---|---|---|
-| METARs of twelve airports 60–300 km around Schiphol (`[[lab.upstream]]`), three hours back | one AWC request at :10 and :40, away from Schiphol's report windows | L26, L31, L36 |
+| METARs of twelve airports 60–300 km around Schiphol (`[[lab.upstream]]`), six hours back | one AWC request at :10 and :40, away from Schiphol's report windows | L26, L31, L36 |
 | KNMI's dew point, humidity, wind, gust, direction, pressure and sunshine at Schiphol (`[lab].knmi_extra_parameters`) | one KNMI request after each new reading (four hours at start); a name KNMI refuses is dropped with one alert | L27, L29, L32, L37, L42, L43 |
 | the price ladder: today's YES books, a sample a minute, three hours | the engine, from the live books | L33, L34, L35, L50–L52, L57, L63, L64 |
 | yesterday's METARs (the engine keeps 48 hours) | the reports | L30, L41 |
@@ -568,7 +568,7 @@ rules out.**
 
 | | family | signal | trade | variant |
 |---|---|---|---|---|
-| L36 | front ETA | 08:00–14:00, an airport upwind saw a front pass in three hours (≥ 2 °C down in ≤ 70 min with a veer or rising pressure), due before the median peak | NO next degree 0.60–0.95 (p 0.92) | ≥ 3 °C |
+| L36 | front ETA | 08:00–14:00, airports S through W to N saw a front pass in six hours (≥ 2 °C down in ≤ 70 min with a veer or rising pressure); its path from the wind behind it, its speed from two passages ≥ 80 km apart along that path; due before the median peak | NO next degree 0.60–0.95 (p 0.92) | ≥ 3 °C |
 | L37 | pressure fall | 10:00–16:00, KNMI pressure down ≥ 2 hPa in three hours, ≥ 0.8 °C under the edge | NO next degree 0.55–0.92 (p 0.90) | ≥ 3 hPa |
 | L38 | calm-tape tails | 09:00–21:00, ≤ 1500 shares in 30 min, two-sided, no trade ≥ 200 in 15 | NO bids two and three above the favourite (YES 0.02–0.12) | three and four |
 | L39 | pair lock | from the 75 % peak time to 22:00, everything above the next degree ≤ 0.015 | YES of the high's bucket and the next degree, same shares, ≤ 0.99 a pair at the limits — both or neither | ≤ 0.98 |
@@ -673,6 +673,21 @@ exactly (more than 10 minutes: allowed), its exit in whole minutes (10:
 sell). It now enters only with 16 minutes left — ten to hold before it
 sells 6 minutes ahead of the report, where L18's window for informed flow
 opens — and both read the same exact clock.
+
+L36 did not see the cold front over England that morning (Southend and
+Norwich, 255° and 281°, in rain at 11–12 °C with the wind from 320–330°):
+it read only the airports within 45° of Schiphol's own wind, from 190°,
+and timed a front by that wind's speed. Ahead of a cold front the wind
+blows from the south while the front comes from the west, so the rule
+looked the wrong way in the very weather it was made for. It now reads
+the airports south through west to north of Schiphol for a passage in
+the last six hours, takes the front's path from the wind behind it (a
+front moves with the air behind it) and its speed from the order of its
+passages along that path, two at least 80 km apart (a passage is known
+only to the half hour between two reports; three or more must line up
+within 45 minutes). On the 16th, with the path to 145°, Norwich and
+Southend lay 72 km apart along it, so the rule would have waited for De
+Kooy, 56 km up the path, to see the front pass.
 
 ### 8.6 What would refute them
 

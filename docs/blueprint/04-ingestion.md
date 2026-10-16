@@ -112,7 +112,7 @@ and every taker's record on the last `[lab].wallet_history_days` (60)
 settled days, scored at start and at 07:00 local from the cache under
 `research/polymarket/<STATION>/`, for L19, L20 and L44. A third reads the
 METARs of the airports upstream (`[[lab.upstream]]`, twelve 60–300 km
-around Schiphol) in one AWC request (`ids=EHKD,EHLW,…`, three hours) at
+around Schiphol) in one AWC request (`ids=EHKD,EHLW,…`, six hours) at
 :10 and :40 past the hour — away from Schiphol's report windows, and never
 in the first two minutes after a start, so the station's own backfill goes
 first through the shared AWC gate — and hands the new ones on as an

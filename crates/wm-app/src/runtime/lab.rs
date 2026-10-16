@@ -295,8 +295,9 @@ pub(super) async fn wallet_loop(
 /// from Schiphol's report windows (:25 and :55, published minutes later),
 /// so the shared AWC gate is free when the market station's report is due.
 const UPSTREAM_MINUTES: [i64; 2] = [10, 40];
-/// History read at each poll: the front rule looks back three hours.
-const UPSTREAM_HOURS: u32 = 3;
+/// History read at each poll: the front rule (L36) looks back six hours,
+/// also right after a start.
+const UPSTREAM_HOURS: u32 = 6;
 
 /// The next upstream poll strictly after `now`.
 pub(super) fn next_upstream_poll(now: DateTime<Utc>) -> DateTime<Utc> {
