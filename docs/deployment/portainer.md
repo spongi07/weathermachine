@@ -528,6 +528,11 @@ usual. As root on the host:
    du -sh "$R"/volumes/*/_data | sort -h | tail -5
    ```
 
+   Other stacks' volumes share the disk. On 17 October 2026 the largest was
+   dailyprofit's: its journal held 42 GB of the 97 GB disk (only its offline
+   replay tools read it; its `JOURNAL_MAX_GB` caps it), this database 12.6
+   GB, and the dumps had been ~600 MB each.
+
 2. Free what can go without loss:
 
    ```sh
