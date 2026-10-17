@@ -146,11 +146,11 @@ services:
       PGDATABASE: weather_machine
       PGPASSWORD: ${WM_DB_PASSWORD:?WM_DB_PASSWORD must be set}
       BACKUP_KEEP_DAYS: ${WM_BACKUP_KEEP_DAYS:-14}
-      # The replay journal (every engine input, mostly order-book updates) and
-      # the recorded market history (the sampled books, a few hundred MB a
-      # day) are most of the database and are recorded anew every day; until
-      # 17 October 2026 every dump held the whole market history (that day
-      # the disk was full). The audit trail (observations, raw payloads,
+      # The replay journal (every engine input, mostly order-book updates: 11
+      # GB at 7 days) and the recorded market history (the sampled books,
+      # about 75 MB a day) are 98 % of the database (17 October 2026) and are
+      # recorded anew every day; until then every dump held the whole market
+      # history (that day the disk was full). The audit trail (observations, raw payloads,
       # decisions, orders, fills, markets) is always backed up. true includes
       # the journal or the books anyway.
       BACKUP_JOURNAL: ${WM_BACKUP_JOURNAL:-false}

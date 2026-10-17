@@ -64,8 +64,9 @@ pub struct AppSection {
     /// are kept.
     #[serde(default = "default_journal_book_retention_days")]
     pub journal_book_retention_days: u32,
-    /// The recorded market history (`orderbook_snapshots`, a few hundred MB
-    /// a day) is deleted after this many days (0 = keep).
+    /// The recorded market history (`orderbook_snapshots`, about 75 MB a
+    /// day: 1.6 GB after three weeks, 17 October 2026) is deleted after this
+    /// many days (0 = keep).
     #[serde(default = "default_book_history_retention_days")]
     pub book_history_retention_days: u32,
     /// Free space on the disk of the data directory (in Docker, that of the
