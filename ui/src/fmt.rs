@@ -118,9 +118,15 @@ pub fn micros(us: u64) -> String {
     }
 }
 
-/// Bytes in GB of 1024³, as `df -h` counts them.
+/// Bytes in GB of 1024³, as `df -h` counts them; in MB under one GB.
 pub fn gb(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    let b = bytes as f64;
+    let g = 1024.0 * 1024.0 * 1024.0;
+    if b < g {
+        format!("{:.0} MB", b / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", b / g)
+    }
 }
 
 #[cfg(test)]

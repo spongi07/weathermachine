@@ -1708,7 +1708,9 @@ async fn disk_watch_loop(mut w: DiskWatch) {
                     metrics::gauge!("wm_database_bytes").set(db as f64);
                 }
                 if minute % 60 == 0 {
-                    tracing::info!(path = %path.display(), level = level.as_str(), "disk: {}", disk::summary(&r, database));
+                    // (not `level`: the JSON log's events are flattened, and
+                    // a field of that name took the place of INFO)
+                    tracing::info!(path = %path.display(), state = level.as_str(), "disk: {}", disk::summary(&r, database));
                 }
                 *w.status
                     .lock()

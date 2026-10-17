@@ -532,6 +532,7 @@ usual. As root on the host:
 
    ```sh
    docker image prune -af            # images no container uses: every deploy leaves one
+   docker builder prune -af          # build cache, if images were ever built on this host
    B=$(docker volume inspect -f '{{.Mountpoint}}' $(docker volume ls -q | grep _backups))
    ls -lht "$B"                       # the dumps, newest first
    ls -1t "$B"/weather_machine-*.dump | tail -n +3 | xargs -r rm -f   # all but the newest two

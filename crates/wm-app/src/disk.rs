@@ -111,8 +111,14 @@ pub fn level(prev: Level, free: u64, t: Thresholds) -> Level {
     }
 }
 
+/// Bytes in GB, or in MB under one GB ("0.0 GB" said nothing).
 pub fn gb(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / GB)
+    let b = bytes as f64;
+    if b < GB {
+        format!("{:.0} MB", b / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", b / GB)
+    }
 }
 
 /// "4.2 GB free of 40.0 GB (90 % used), the database 21.3 GB".
@@ -242,6 +248,8 @@ mod tests {
             summary(&r, Some(21 * G + G / 3)),
             "4.2 GB free of 40.0 GB (90 % used), the database 21.3 GB"
         );
+        assert_eq!(gb(9 * 1024 * 1024), "9 MB", "a small database in MB");
+        assert_eq!(gb(G), "1.0 GB");
         assert!(change(Level::Low, Level::Low, &r, None, t).is_none());
         let (level, text, title) = change(Level::Ok, Level::Low, &r, None, t).unwrap();
         assert_eq!(level, "critical");
