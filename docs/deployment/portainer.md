@@ -76,7 +76,7 @@ What the stack contains:
 |---|---|---|
 | `postgres` | `postgres:18-alpine` | Volume `pgdata` at `/var/lib/postgresql` (PG 18 layout). Not published on the host. |
 | `weather-machine` | GHCR image | `run` = paper-trading service; waits for a healthy database, applies migrations automatically, read-only root filesystem, non-root (uid 65532), all capabilities dropped, `no-new-privileges`, CPU/memory limits, log rotation. |
-| `db-backup` | `postgres:18-alpine` | `pg_dump --format=custom` every 24 h into volume `backups`, keeps `WM_BACKUP_KEEP_DAYS` (14). The replay journal is excluded unless `WM_BACKUP_JOURNAL=true`. |
+| `db-backup` | `postgres:18-alpine` | `pg_dump --format=custom` once a day into volume `backups`: the newest `WM_BACKUP_KEEP_DAYS` (14) dumps stay, a restart (every redeploy) adds none, and a dump the disk has no room for (twice the last one and 1 GB) is skipped with `backup SKIPPED` in its log. The replay journal and the recorded market history are left out unless `WM_BACKUP_JOURNAL=true` / `WM_BACKUP_BOOKS=true`. |
 
 Health: the image has a built-in probe (`weather-machine healthcheck`) — no
 shell or curl needed. Portainer shows *healthy* once the engine loop publishes
@@ -466,8 +466,8 @@ docker run --rm -e WM_CONTACT=you@example.org ghcr.io/spongi07/weathermachine:la
 | Restart safety | Crash-only design: the process state is rebuilt from PostgreSQL (observations, journal) on start. A second instance cannot poll the same station (PostgreSQL advisory lease). |
 | Backups | Volume `backups`. Restore (stop `weather-machine` first): `docker run --rm -it --network weather-machine_default -e PGPASSWORD=… -v weather-machine_backups:/b postgres:18-alpine pg_restore -h postgres -U wm -d weather_machine --clean --if-exists /b/<file>.dump` |
 | Logs | JSON lines (Portainer → container → Logs): besides the providers and the restore, every paper fill, settlement and engine alert. Change verbosity with `RUST_LOG`. |
-| Metrics | Scrape `/metrics` (Basic auth applies if configured). Key series: `nws_requests_total`, `nws_429_total`, `nws_failures_total`, `nws_cache_hits`, `nws_new_observations_total`, `wm_engine_events_total`, `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`, `wm_persist_backlog_episodes_total`, `wm_journal_shed_total`. |
-| Disk | The market stream delivers ~1.5 million order-book updates a day. They are journaled with 5 levels per side and deleted from the journal after 7 days (`WM_JOURNAL_RETENTION_DAYS`), so the database levels off at a few GB plus the recorded market history (books stored on change, ≤ 1 per 10 s per token), which grows by roughly 100–300 MB a day. Check with *Volumes* in Portainer or `docker system df -v`. |
+| Metrics | Scrape `/metrics` (Basic auth applies if configured). Key series: `nws_requests_total`, `nws_429_total`, `nws_failures_total`, `nws_cache_hits`, `nws_new_observations_total`, `wm_engine_events_total`, `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`, `wm_persist_backlog_episodes_total`, `wm_journal_shed_total`, `wm_disk_free_bytes`, `wm_disk_total_bytes`, `wm_database_bytes`, `wm_books_unrecorded_total`. |
+| Disk | On a default install the database, the dumps and the images share one disk. The market stream delivers 1.4–1.9 million order-book updates a day (9–16 October 2026). The replay journal keeps them `WM_JOURNAL_RETENTION_DAYS` (7) days: an estimated 11–13 GB at ~0.9 KB a row. The recorded market history (a token's book when it changed, ≤ 1 per 10 s) grows an estimated 300–450 MB a day and is kept `WM_BOOK_HISTORY_DAYS` (14) days: 4–6 GB. Until 17 October 2026 it was kept for ever and every nightly dump held all of it; that day the disk was full and PostgreSQL stopped. Plan 30 GB free for the stack. The dashboard's **DISK** pill shows the use (hover: free space, the database's size); under `WM_DISK_WARN_FREE_GB` (5) free an alert and a Pushover message say the disk is filling, and under `WM_DISK_BRAKE_FREE_GB` (2) order books are not written until there is room (decisions, orders and fills always are). Every deploy leaves the previous image behind: `docker image prune -af` now and then (or Portainer → *Images* → *Remove unused*). |
 
 ## 6. Exposing the dashboard safely
 
@@ -502,8 +502,56 @@ path prefix.
 | Alert "the strategy lab's flow rules (L18–L21) need the Data API …" | `[providers.polymarket_data]` is switched off: L18–L21 stay idle. Switch it on, or disable those families. |
 | Alert "takers' records incomplete: settled days would not download …" | Three settled days in a row would not download for the takers' scores; L19 and L20 use the days that loaded, and the next morning tries again. |
 | Report says "not evaluated: …" | The forecast history could not be downloaded (e.g. `previous-runs-api.open-meteo.com` blocked); training is retried after 6 h. A "rejected by Open-Meteo" reason naming the model means `WM_FORECAST_MODEL` is not a valid model id. |
+| `postgres` restarts every minute: `could not write lock file "postmaster.pid": No space left on device` | The disk is full: free space as in [Disk full](#disk-full). PostgreSQL starts by itself within a minute of there being room. |
+| Alert "disk nearly full: … GB free" (**DISK** pill amber) | Under `WM_DISK_WARN_FREE_GB` free: free space before it fills, [Disk full](#disk-full). |
+| Alert "disk almost full: … Order books … are not written" (**DISK … BOOKS OFF**) | Under `WM_DISK_BRAKE_FREE_GB` free the journal's book updates and the market history are not written (exact replay and the history have a gap); trading records are. They are written again 0.5 GB above the threshold ("order books are written again"). Free space: [Disk full](#disk-full). |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
 | Providers *throttled* / *unavailable* | The rate limiter backs off (Retry-After honoured, circuit breaker); trading of that station stays blocked until data is healthy and fresh. Do not lower the polling floors. |
 | `collector lease held by another instance` | Another Weather Machine is running against the same database; stop it. |
 | Blank page, `/lite` works | Browser without WebAssembly, or a proxy stripping `application/wasm`; use `/lite`. |
+
+### Disk full
+
+With the disk full PostgreSQL stops and cannot start again (17 October
+2026, from 02:32 UTC). Without its database the app blocks new positions,
+and a restarted app cannot start; once the app is down the venue cancels
+G_live's resting bids within ten seconds, and its positions settle as
+usual. As root on the host:
+
+1. What fills it:
+
+   ```sh
+   R=$(docker info -f '{{.DockerRootDir}}')
+   df -h "$R"
+   docker system df
+   du -sh "$R"/volumes/*/_data | sort -h | tail -5
+   ```
+
+2. Free what can go without loss:
+
+   ```sh
+   docker image prune -af            # images no container uses: every deploy leaves one
+   B=$(docker volume inspect -f '{{.Mountpoint}}' $(docker volume ls -q | grep _backups))
+   ls -lht "$B"                       # the dumps, newest first
+   ls -1t "$B"/weather_machine-*.dump | tail -n +3 | xargs -r rm -f   # all but the newest two
+   rm -f "$B"/*.partial
+   ```
+
+3. **Never** delete files in the `pgdata` volume (`pg_wal` above all), and
+   never run `docker volume prune` or `docker system prune --volumes`: that
+   is the database.
+4. PostgreSQL retries every minute and starts once there is room
+   ("database system is ready to accept connections" in its log). Then check
+   that `weather-machine` is *healthy*; start it in Portainer if not.
+5. What the database holds (in the `postgres` container's console):
+
+   ```sh
+   psql -U wm -d weather_machine -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) FROM pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 8;"
+   ```
+
+   `event_journal` and `orderbook_snapshots` are nearly all of it. Rows past
+   their retention are deleted every hour (at most 200,000 a table a pass,
+   so a backlog goes over several hours without a burst of WAL) and new
+   rows reuse their room, so the files stop growing but do not shrink. Lower
+   `WM_JOURNAL_RETENTION_DAYS` or `WM_BOOK_HISTORY_DAYS` to keep less.

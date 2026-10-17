@@ -132,8 +132,20 @@ container (restart policy) instead of limping on.
   the run can be replayed exactly or backtested with new parameters
   (`backtest --journal <run-id>`). Order-book updates in it are kept for 7
   days (`WM_JOURNAL_RETENTION_DAYS`), which bounds disk use; exact replay
-  covers that window. The audit trail itself (observations, decisions,
-  orders, fills, recorded books) is kept.
+  covers that window. The recorded market history (`orderbook_snapshots`)
+  is kept 14 days (`WM_BOOK_HISTORY_DAYS`); both are deleted hourly in
+  5,000-row statements, at most 200,000 rows a table a pass: a backlog (a
+  lowered retention, the first pass after the history got one) goes over
+  several hours rather than in one burst of WAL on a disk short of room.
+  The audit trail itself (observations, decisions, orders, fills) is kept.
+* **Disk:** the free space of the data directory's disk (on a default
+  install the database's too) is read every minute and the database's size
+  every ten, shown as the dashboard's DISK pill. Under 5 GB free an alert
+  and a Pushover message say the disk is filling; under 2 GB the order books
+  (the journal's updates, the market history) are not written until there is
+  room again, so the database does not fill the disk itself, while
+  decisions, orders and fills always are. On 17 October 2026 the disk filled
+  and PostgreSQL could not start for hours with nothing having warned.
 * **Persistence backlog:** engine records are written in coalesced
   transactions and retried on failure; a full queue holds them instead of
   dropping them. New positions stay blocked until the backlog is written.

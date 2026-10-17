@@ -83,16 +83,23 @@ services:
       # Free KNMI Data Platform key: ten-minute readings for strategy K. Empty =
       # K does nothing. Sent only in the Authorization header, never logged.
       WM_KNMI_API_KEY: ${WM_KNMI_API_KEY:-}
-      # Days of order-book updates kept in the replay journal (bounds disk use).
+      # Days of order-book updates kept in the replay journal, and of the
+      # recorded market history (the sampled books); both bound disk use.
       WM_JOURNAL_RETENTION_DAYS: ${WM_JOURNAL_RETENTION_DAYS:-7}
+      WM_BOOK_HISTORY_DAYS: ${WM_BOOK_HISTORY_DAYS:-14}
+      # Free disk (GB) under which an alert and a Pushover message say the
+      # disk is filling, and under which order books stop being written.
+      WM_DISK_WARN_FREE_GB: ${WM_DISK_WARN_FREE_GB:-5}
+      WM_DISK_BRAKE_FREE_GB: ${WM_DISK_BRAKE_FREE_GB:-2}
       # Strategy G's live twin: REAL orders on Polymarket (off by default).
       # Guide: docs/deployment/live.md. The key is read once, never logged.
       WM_LIVE_G: ${WM_LIVE_G:-false}
       WM_POLY_PRIVATE_KEY: ${WM_POLY_PRIVATE_KEY:-}
       WM_POLY_FUNDER: ${WM_POLY_FUNDER:-}
       WM_POLY_SIG_TYPE: ${WM_POLY_SIG_TYPE:-1}
-      # A Pushover message for every settled market of the live twin, and for
-      # every live order that bought shares: the application's API token and
+      # A Pushover message for every settled market of the live twin, for
+      # every live order that bought shares, and when the disk is filling
+      # up: the application's API token and
       # your user key (both secret). WM_PUSHOVER_STRATEGIES: live (the
       # default) | all | strategy ids or letters, e.g. GL,G.
       WM_PUSHOVER_TOKEN: ${WM_PUSHOVER_TOKEN:-}
@@ -122,8 +129,11 @@ services:
           cpus: "1.0"
           memory: 768m
 
-  # Nightly logical backup of the audit database (14 days kept) into the
-  # `backups` volume. Restore: pg_restore -d weather_machine <file>.
+  # A daily logical backup of the audit database into the `backups` volume:
+  # the newest WM_BACKUP_KEEP_DAYS dumps are kept (one a day; a restart, as
+  # every redeploy is one, adds none), and a dump the disk has no room for
+  # (twice the last one and 1 GB) is skipped and says so. The volume shares
+  # the database's disk. Restore: pg_restore -d weather_machine <file>.
   db-backup:
     <<: *hardening
     image: postgres:18-alpine
@@ -136,27 +146,48 @@ services:
       PGDATABASE: weather_machine
       PGPASSWORD: ${WM_DB_PASSWORD:?WM_DB_PASSWORD must be set}
       BACKUP_KEEP_DAYS: ${WM_BACKUP_KEEP_DAYS:-14}
-      # The replay journal (every engine input, mostly order-book updates) is
-      # large and only needed for exact replay of recent runs; the audit trail
-      # (observations, raw payloads, decisions, orders, fills, market history)
-      # is always backed up. Set WM_BACKUP_JOURNAL=true to include it anyway.
+      # The replay journal (every engine input, mostly order-book updates) and
+      # the recorded market history (the sampled books, a few hundred MB a
+      # day) are most of the database and are recorded anew every day; until
+      # 17 October 2026 every dump held the whole market history (that day
+      # the disk was full). The audit trail (observations, raw payloads,
+      # decisions, orders, fills, markets) is always backed up. true includes
+      # the journal or the books anyway.
       BACKUP_JOURNAL: ${WM_BACKUP_JOURNAL:-false}
+      BACKUP_BOOKS: ${WM_BACKUP_BOOKS:-false}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
+        keep="$${BACKUP_KEEP_DAYS}"
         while true; do
-          f="/backups/weather_machine-$$(date -u +%Y%m%dT%H%M%SZ).dump"
-          skip=""
-          [ "$${BACKUP_JOURNAL}" = "true" ] || skip="--exclude-table-data=event_journal"
-          if pg_dump --format=custom $${skip} --file="$$f.partial" && mv "$$f.partial" "$$f"; then
-            echo "backup written: $$f"
+          # a dump cut off by a restart: nothing writes one now
+          rm -f /backups/weather_machine-*.dump.partial
+          newest="$$(ls -1t /backups/weather_machine-*.dump 2>/dev/null | head -n 1 || true)"
+          if [ -n "$$newest" ] && [ -n "$$(find "$$newest" -mmin -1410)" ]; then
+            : # the day's dump exists
           else
-            echo "backup FAILED" >&2
-            rm -f "$$f.partial"
+            skip=""
+            [ "$${BACKUP_JOURNAL}" = "true" ] || skip="--exclude-table-data=event_journal"
+            [ "$${BACKUP_BOOKS}" = "true" ] || skip="$$skip --exclude-table-data=orderbook_snapshots"
+            last_kb=0
+            [ -z "$$newest" ] || last_kb=$$(( $$(stat -c %s "$$newest") / 1024 ))
+            need_kb=$$(( 2 * last_kb + 1048576 ))
+            free_kb=$$(df -Pk /backups | awk 'NR == 2 { print $$4 }')
+            if [ "$$free_kb" -lt "$$need_kb" ]; then
+              echo "backup SKIPPED: $$(( free_kb / 1024 )) MB free on the disk, $$(( need_kb / 1024 )) MB wanted" >&2
+            else
+              f="/backups/weather_machine-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+              if pg_dump --format=custom $${skip} --file="$$f.partial" && mv "$$f.partial" "$$f"; then
+                echo "backup written: $$f ($$(( $$(stat -c %s "$$f") / 1048576 )) MB)"
+              else
+                echo "backup FAILED" >&2
+                rm -f "$$f.partial"
+              fi
+            fi
           fi
-          find /backups -name 'weather_machine-*.dump' -mtime +"$${BACKUP_KEEP_DAYS}" -delete
-          sleep 86400
+          ls -1t /backups/weather_machine-*.dump 2>/dev/null | tail -n +$$(( keep + 1 )) | xargs -r rm -f
+          sleep 3600
         done
     volumes:
       - backups:/backups

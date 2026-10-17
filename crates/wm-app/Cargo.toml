@@ -36,6 +36,7 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

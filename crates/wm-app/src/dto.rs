@@ -863,6 +863,8 @@ pub fn build(
         strategies,
         lab: lab_dto(snap),
         live: live_dto(snap, inp.live, generated_at),
+        // Set by the runtime, which watches the disk.
+        disk: None,
     }
 }
 

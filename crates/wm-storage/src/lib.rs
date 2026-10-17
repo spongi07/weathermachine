@@ -40,6 +40,20 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations"
 /// that many or more; 5,000 take about 0.4 s.
 pub const JOURNAL_PRUNE_CHUNK: i64 = 5_000;
 
+/// Rows one retention pass deletes from a table at most; the rest goes in
+/// the next hourly passes. A pass after a retention was lowered, or the
+/// first one after the market history got one (17 October 2026: about a
+/// week of books), would otherwise delete millions of rows at once, and
+/// every page it touches is written to the WAL again until a checkpoint
+/// recycles it: gigabytes, on a disk that may be short of room. 200,000 is
+/// more than two hours of order-book updates (1.4–1.9 million a day).
+pub const PRUNE_PASS_MAX_ROWS: u64 = 200_000;
+
+/// The next statement's limit: a chunk, or what is left of `max_rows`.
+fn prune_limit(total: u64, max_rows: u64) -> i64 {
+    JOURNAL_PRUNE_CHUNK.min(i64::try_from(max_rows.saturating_sub(total)).unwrap_or(i64::MAX))
+}
+
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -430,12 +444,14 @@ impl PgStore {
     }
 
     /// Delete journal order-book updates and market-stream heartbeats older
-    /// than `before`, in chunks of [`JOURNAL_PRUNE_CHUNK`] rows.
-    /// Recent runs stay exactly replayable; older market history lives on in
-    /// the sampled `orderbook_snapshots`. Returns the number of rows deleted.
-    pub async fn prune_journal_books(&self, before: DateTime<Utc>) -> Result<u64> {
+    /// than `before`, in chunks of [`JOURNAL_PRUNE_CHUNK`] rows, at most
+    /// `max_rows` ([`PRUNE_PASS_MAX_ROWS`] a pass). Recent runs stay exactly
+    /// replayable; older market history lives on in the sampled
+    /// `orderbook_snapshots`. Returns the number of rows deleted.
+    pub async fn prune_journal_books(&self, before: DateTime<Utc>, max_rows: u64) -> Result<u64> {
         let mut total = 0;
-        loop {
+        while total < max_rows {
+            let limit = prune_limit(total, max_rows);
             let n = sqlx::query(
                 "DELETE FROM event_journal WHERE ctid IN (
                    SELECT ctid FROM event_journal
@@ -444,15 +460,91 @@ impl PgStore {
                    LIMIT $2)",
             )
             .bind(before)
-            .bind(JOURNAL_PRUNE_CHUNK)
+            .bind(limit)
             .execute(&self.pool)
             .await?
             .rows_affected();
             total += n;
-            if n < JOURNAL_PRUNE_CHUNK.unsigned_abs() {
-                return Ok(total);
+            if n < limit.unsigned_abs() {
+                break;
             }
         }
+        Ok(total)
+    }
+
+    /// Delete the recorded market history (`orderbook_snapshots`) captured
+    /// before `before`, oldest first, in chunks of [`JOURNAL_PRUNE_CHUNK`]
+    /// rows, at most `max_rows` ([`PRUNE_PASS_MAX_ROWS`] a pass). The table
+    /// has no index on time but its ids grow with it, so the rows go by id,
+    /// below the first one captured at or after `before`
+    /// ([`Self::book_history_bound`]); a row there that is somehow newer
+    /// stays. Returns the number of rows deleted.
+    pub async fn prune_book_history(&self, before: DateTime<Utc>, max_rows: u64) -> Result<u64> {
+        let Some(bound) = self.book_history_bound(before).await? else {
+            return Ok(0);
+        };
+        let mut total = 0;
+        while total < max_rows {
+            let limit = prune_limit(total, max_rows);
+            let n = sqlx::query(
+                "DELETE FROM orderbook_snapshots WHERE id IN (
+                   SELECT id FROM orderbook_snapshots
+                   WHERE id < $1 AND captured_at < $2
+                   ORDER BY id LIMIT $3)",
+            )
+            .bind(bound)
+            .bind(before)
+            .bind(limit)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            total += n;
+            if n < limit.unsigned_abs() {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    /// The smallest id from which the recorded books are captured at or
+    /// after `before` (`None`: the oldest already is, or there are none).
+    /// A binary search on the primary key: a few dozen one-row lookups
+    /// however large the table, where a scan for it would read every older
+    /// row (millions on the first pass).
+    async fn book_history_bound(&self, before: DateTime<Utc>) -> Result<Option<i64>> {
+        let (min, max): (Option<i64>, Option<i64>) =
+            sqlx::query_as("SELECT min(id), max(id) FROM orderbook_snapshots")
+                .fetch_one(&self.pool)
+                .await?;
+        let (Some(min), Some(max)) = (min, max) else {
+            return Ok(None);
+        };
+        // The first id whose next row (by id) is captured at or after
+        // `before`; past the last row there is none, which counts as after.
+        let (mut lo, mut hi) = (min, max.saturating_add(1));
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let next: Option<(i64, DateTime<Utc>)> = sqlx::query_as(
+                "SELECT id, captured_at FROM orderbook_snapshots WHERE id >= $1 ORDER BY id LIMIT 1",
+            )
+            .bind(mid)
+            .fetch_optional(&self.pool)
+            .await?;
+            match next {
+                Some((id, at)) if at < before => lo = id.saturating_add(1),
+                _ => hi = mid,
+            }
+        }
+        Ok((lo > min).then_some(lo))
+    }
+
+    /// The database's size on disk, in bytes.
+    pub async fn database_size(&self) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT pg_database_size(current_database())")
+                .fetch_one(&self.pool)
+                .await?,
+        )
     }
 
     /// Load a run's journal in sequence order (exact replay / recovery).

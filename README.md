@@ -117,6 +117,14 @@ Schiphol (EHAM); nothing in the strategy code is Amsterdam-specific.
   day's series, recent corrections, stale books, unverified resolution rules,
   no model, storage down, or the kill switch each block new weather-dependent
   positions.
+* **Watches its disk.** The journal's order-book updates (7 days) and the
+  recorded market history (14 days) are deleted hourly, and the daily dumps
+  leave both out. The dashboard's DISK pill shows the free space and the
+  database's size; under 5 GB free an alert and a Pushover message say so,
+  and under 2 GB the order books stop being written until there is room, so
+  the database never fills the disk itself (it did on 17 October 2026:
+  PostgreSQL down for hours,
+  [Disk full](docs/deployment/portainer.md#disk-full)).
 * **Shows it all.** A dashboard with live SSE updates shows the intraday
   chart, peak state and model distribution, market ladder (implied vs model,
   edge, EV, break-even), gates, provider rate limits, blotter, decision audit
@@ -185,10 +193,12 @@ file per city). Deployment-specific values come only from the environment:
 | `WM_KNMI_API_KEY` | Free KNMI Data Platform key ([developer portal](https://developer.dataplatform.knmi.nl/)) for the ten-minute readings; sent only in the `Authorization` header. Without it strategy K and the lab's KNMI rules do nothing |
 | `WM_DATA_DIR` | Writable data directory for the model and history cache (default `/data`) |
 | `WM_JOURNAL_RETENTION_DAYS` | Days of order-book updates kept in the replay journal (default 7; 0 = keep) |
+| `WM_BOOK_HISTORY_DAYS` | Days of recorded market history (the sampled books) kept (default 14; 0 = keep) |
+| `WM_DISK_WARN_FREE_GB`, `WM_DISK_BRAKE_FREE_GB` | Free disk under which an alert (and a Pushover message) says the disk is filling (default 5), and under which order books are not written until there is room (default 2) |
 | `WM_LIVE_G`, `WM_POLY_PRIVATE_KEY`, `WM_POLY_FUNDER`, `WM_POLY_SIG_TYPE` | Strategy G's live twin and its wallet (real money; [docs/deployment/live.md](docs/deployment/live.md)) |
-| `WM_PUSHOVER_TOKEN`, `WM_PUSHOVER_USER` | Pushover keys: a message for every settled market of the live twin and every live order that bought (`weather-machine notify-test` checks them) |
+| `WM_PUSHOVER_TOKEN`, `WM_PUSHOVER_USER` | Pushover keys: a message for every settled market of the live twin, every live order that bought, and the disk filling up (`weather-machine notify-test` checks them) |
 | `WM_PUSHOVER_STRATEGIES` | Whose results are pushed: `live` (default), `all`, or strategy ids or letters (`GL,G`) |
-| `WM_BACKUP_JOURNAL` | Stack only: include the replay journal in nightly backups (default `false`) |
+| `WM_BACKUP_JOURNAL`, `WM_BACKUP_BOOKS` | Stack only: include the replay journal, or the recorded market history, in the daily dumps (default `false`) |
 | `WM_MODE`, `WM_HTTP_BIND`, `WM_UI_DIR`, `WM_LOG_FORMAT`, `WM_CONFIG` | Overrides |
 
 ## Development

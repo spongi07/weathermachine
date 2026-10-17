@@ -118,6 +118,11 @@ pub fn micros(us: u64) -> String {
     }
 }
 
+/// Bytes in GB of 1024³, as `df -h` counts them.
+pub fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

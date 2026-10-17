@@ -63,6 +63,27 @@ pub struct DashboardSnapshot {
     /// Strategy G's live twin (`G_live`): real money. `None`: it is off.
     #[serde(default)]
     pub live: Option<LiveDto>,
+    /// The disk under the data directory. `None`: not read (the demo).
+    #[serde(default)]
+    pub disk: Option<DiskDto>,
+}
+
+/// The disk under the data directory: on a default Docker install the
+/// database's and the backups' too.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiskDto {
+    /// The directory read (`/data` in Docker).
+    pub path: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    /// The database's size (`None`: not read yet, or no database).
+    pub database_bytes: Option<u64>,
+    /// `ok`, `low` (under the alert's threshold) or `brake` (order books
+    /// are not written until there is room).
+    pub level: String,
+    /// The alert's and the brake's thresholds, in bytes free (0 = off).
+    pub warn_bytes: u64,
+    pub brake_bytes: u64,
 }
 
 /// The live twin at a glance: the venue's checks and the live book.

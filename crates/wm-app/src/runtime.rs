@@ -15,6 +15,7 @@
 //! positions (fail closed). Live order placement does not exist in this build.
 
 use crate::config::AppConfig;
+use crate::disk;
 use crate::dto::{self, DtoInputs};
 use crate::http::Publisher;
 use crate::notify;
@@ -43,7 +44,7 @@ use wm_core::resolution::{ObservationFilter, SpecReviewStatus};
 use wm_core::time::{Clock, SystemClock, local_date};
 use wm_core::trading::{DecisionRecord, Fill, RunMode};
 use wm_core::weather::DedupClass;
-use wm_dashboard_api::{AlertDto, ModelDto};
+use wm_dashboard_api::{AlertDto, DiskDto, ModelDto};
 use wm_execution::OrderRecord;
 use wm_net::ProviderGate;
 use wm_polymarket::{
@@ -141,6 +142,13 @@ impl PersistBatch {
         if self.events.len() <= cap {
             return 0;
         }
+        self.drop_books()
+    }
+
+    /// Drop the order books: the journal's book updates and the sampled
+    /// books (the disk's brake, a stalled store's last resort). Everything
+    /// else stays. Returns how many rows that leaves unwritten.
+    fn drop_books(&mut self) -> usize {
         let before = self.events.len() + self.books.len();
         self.events
             .retain(|e| !matches!(e.event, WeatherMachineEvent::OrderBookUpdate(_)));
@@ -186,6 +194,7 @@ async fn persistence_loop(
     ok: Arc<AtomicBool>,
     journal: bool,
     side: SharedSide,
+    disk_brake: Arc<AtomicBool>,
 ) {
     let mut pending = PersistBatch::default();
     let mut backoff = std::time::Duration::from_secs(1);
@@ -207,6 +216,14 @@ async fn persistence_loop(
                     closed = true;
                     break;
                 }
+            }
+        }
+        // The disk is almost full: the order books, nearly every row, are
+        // not written (the disk watch says so); the rest is.
+        if disk_brake.load(Ordering::Acquire) {
+            let dropped = pending.drop_books();
+            if dropped > 0 {
+                metrics::counter!("wm_books_unrecorded_total").increment(dropped as u64);
             }
         }
         let batch = wm_storage::EngineBatch {
@@ -1232,6 +1249,7 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
 
     // -- Persistence task ------------------------------------------------------------
     let storage_ok = Arc::new(AtomicBool::new(store.is_some()));
+    let disk_brake = Arc::new(AtomicBool::new(false));
     let persist_tx = store.clone().map(|s| {
         let (tx, rx) = mpsc::channel::<PersistBatch>(1_024);
         tasks.push(tokio::spawn(persistence_loop(
@@ -1241,21 +1259,43 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
             Arc::clone(&storage_ok),
             cfg.file.app.journal,
             Arc::clone(&side),
+            Arc::clone(&disk_brake),
         )));
         tx
     });
 
-    // -- Journal retention (bounded disk use) ----------------------------------------------
+    // -- Retention (bounded disk use) ------------------------------------------------------
+    let keep = Retention {
+        journal_days: cfg.file.app.journal_book_retention_days,
+        history_days: cfg.file.app.book_history_retention_days,
+    };
     if let Some(s) = store.clone()
-        && cfg.file.app.journal_book_retention_days > 0
+        && (keep.journal_days > 0 || keep.history_days > 0)
     {
-        tasks.push(tokio::spawn(journal_retention_loop(
+        tasks.push(tokio::spawn(retention_loop(
             s,
-            cfg.file.app.journal_book_retention_days,
+            keep,
             Arc::clone(&clock),
             shutdown.clone(),
         )));
     }
+
+    // -- The disk: alerts before it fills, the books' brake ------------------------------------
+    let disk_status: Arc<Mutex<Option<DiskDto>>> = Arc::new(Mutex::new(None));
+    tasks.push(tokio::spawn(disk_watch_loop(DiskWatch {
+        path: std::path::PathBuf::from(&cfg.file.model.auto_train.data_dir),
+        thresholds: disk::Thresholds::from_gb(
+            cfg.file.app.disk_warn_free_gb,
+            cfg.file.app.disk_brake_free_gb,
+        ),
+        store: store.clone(),
+        status: Arc::clone(&disk_status),
+        brake: Arc::clone(&disk_brake),
+        side: Arc::clone(&side),
+        notifier: outbox.as_ref().map(|o| o.notifier.clone()),
+        clock: Arc::clone(&clock),
+        shutdown: shutdown.clone(),
+    })));
 
     // -- Engine loop ---------------------------------------------------------------------
     // The strategy pages: the catalog, and strategy F's slots from the
@@ -1487,7 +1527,12 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
                 live: live_status.as_ref(),
                 notifications: notify_state.as_ref(),
             };
-            publisher.publish(dto::build(&snap, &inputs, now));
+            let mut dash = dto::build(&snap, &inputs, now);
+            dash.disk = disk_status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            publisher.publish(dash);
         }
     }
 
@@ -1534,10 +1579,20 @@ pub async fn run(cfg: AppConfig, ctx: RuntimeContext) -> Result<()> {
     Ok(())
 }
 
-/// Hourly: delete journal order-book updates older than the retention.
-async fn journal_retention_loop(
+/// Days kept of the journal's order-book updates and of the recorded market
+/// history (0 = keep).
+#[derive(Debug, Clone, Copy)]
+struct Retention {
+    journal_days: u32,
+    history_days: u32,
+}
+
+/// Hourly: delete the journal's order-book updates and the recorded market
+/// history past their retention, at most `PRUNE_PASS_MAX_ROWS` of each a
+/// pass.
+async fn retention_loop(
     store: PgStore,
-    days: u32,
+    keep: Retention,
     clock: Arc<dyn Clock>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -1549,17 +1604,134 @@ async fn journal_retention_loop(
             r = shutdown.changed() => if r.is_err() || *shutdown.borrow() { return; },
         }
         wait = std::time::Duration::from_secs(3600);
-        let before = clock.now() - Duration::days(i64::from(days));
-        match store.prune_journal_books(before).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(
-                deleted = n,
-                days,
-                "journal order-book updates past retention deleted"
-            ),
-            Err(e) => {
-                tracing::warn!(error = %e, "journal retention pass failed; retrying in an hour")
+        let now = clock.now();
+        if keep.journal_days > 0 {
+            let before = now - Duration::days(i64::from(keep.journal_days));
+            match store
+                .prune_journal_books(before, wm_storage::PRUNE_PASS_MAX_ROWS)
+                .await
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    deleted = n,
+                    days = keep.journal_days,
+                    more = n >= wm_storage::PRUNE_PASS_MAX_ROWS,
+                    "journal order-book updates past retention deleted"
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "journal retention pass failed; retrying in an hour")
+                }
             }
+        }
+        if keep.history_days > 0 {
+            let before = now - Duration::days(i64::from(keep.history_days));
+            match store
+                .prune_book_history(before, wm_storage::PRUNE_PASS_MAX_ROWS)
+                .await
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    deleted = n,
+                    days = keep.history_days,
+                    more = n >= wm_storage::PRUNE_PASS_MAX_ROWS,
+                    "recorded order books past retention deleted"
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "market history retention pass failed; retrying in an hour")
+                }
+            }
+        }
+    }
+}
+
+/// What the disk watch reads and tells.
+struct DiskWatch {
+    /// The data directory (`/data` in Docker).
+    path: std::path::PathBuf,
+    thresholds: disk::Thresholds,
+    store: Option<PgStore>,
+    /// For the dashboard.
+    status: Arc<Mutex<Option<DiskDto>>>,
+    /// On: the persistence task does not write order books.
+    brake: Arc<AtomicBool>,
+    side: SharedSide,
+    notifier: Option<notify::Notifier>,
+    clock: Arc<dyn Clock>,
+    shutdown: watch::Receiver<bool>,
+}
+
+/// The disk every minute, the database's size every ten; a change of level
+/// is an alert, a log line and a push message, and the brake follows it.
+async fn disk_watch_loop(mut w: DiskWatch) {
+    // Outside Docker the data directory may not exist: the working
+    // directory's disk then.
+    let path = if disk::read(&w.path).is_ok() {
+        w.path.clone()
+    } else {
+        std::path::PathBuf::from(".")
+    };
+    let mut level = disk::Level::Ok;
+    let mut database: Option<u64> = None;
+    let mut failing = false;
+    for minute in 0u64.. {
+        match disk::read(&path) {
+            Ok(r) => {
+                failing = false;
+                if minute % 10 == 0
+                    && let Some(s) = &w.store
+                {
+                    match s.database_size().await {
+                        Ok(b) => database = u64::try_from(b).ok(),
+                        Err(e) => tracing::debug!(error = %e, "database size not read"),
+                    }
+                }
+                let next = disk::level(level, r.free, w.thresholds);
+                if let Some((alert, text, title)) =
+                    disk::change(level, next, &r, database, w.thresholds)
+                {
+                    match alert {
+                        "critical" => tracing::error!("{text}"),
+                        "warning" => tracing::warn!("{text}"),
+                        _ => tracing::info!("{text}"),
+                    }
+                    with_side(&w.side, |st| st.alert(alert, text.clone()));
+                    if let Some(n) = &w.notifier {
+                        n.push(notify::system_note(title, text, w.clock.now()));
+                    }
+                }
+                level = next;
+                w.brake
+                    .store(level == disk::Level::Brake, Ordering::Release);
+                metrics::gauge!("wm_disk_free_bytes").set(r.free as f64);
+                metrics::gauge!("wm_disk_total_bytes").set(r.total as f64);
+                if let Some(db) = database {
+                    metrics::gauge!("wm_database_bytes").set(db as f64);
+                }
+                if minute % 60 == 0 {
+                    tracing::info!(path = %path.display(), level = level.as_str(), "disk: {}", disk::summary(&r, database));
+                }
+                *w.status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(DiskDto {
+                    path: path.display().to_string(),
+                    free_bytes: r.free,
+                    total_bytes: r.total,
+                    database_bytes: database,
+                    level: level.as_str().to_owned(),
+                    warn_bytes: w.thresholds.warn,
+                    brake_bytes: w.thresholds.brake,
+                });
+            }
+            Err(e) => {
+                if !failing {
+                    tracing::warn!(path = %path.display(), error = %e, "the disk could not be read; trying again every minute");
+                    failing = true;
+                }
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+            r = w.shutdown.changed() => if r.is_err() || *w.shutdown.borrow() { return; },
         }
     }
 }
@@ -2881,6 +3053,56 @@ mod tests {
         assert_eq!(b.events.len(), 1);
         assert!(matches!(b.events[0].event, WeatherMachineEvent::Timer(_)));
         assert!(b.books.is_empty());
+    }
+
+    /// The disk's brake drops the books of any batch, sampled books without
+    /// journal entries too, and keeps every other record.
+    #[test]
+    fn the_disk_brake_drops_only_the_books() {
+        let at = t("2026-10-17T02:30:00Z");
+        let decision = DecisionRecord {
+            decision_id: wm_core::ids::DecisionId(1),
+            strategy: wm_core::ids::StrategyId::from_static("evaluation"),
+            at,
+            location: wm_core::ids::LocationId::new("amsterdam").unwrap(),
+            event_slug: None,
+            summary: "evaluated".into(),
+            inputs: serde_json::json!({}),
+            outputs: serde_json::json!({}),
+            approved: false,
+            reasons: Vec::new(),
+        };
+        let mut b = PersistBatch {
+            books: vec![book("a", "0.40", "2026-10-17T02:30:00Z")],
+            decisions: vec![decision.clone()],
+            ..PersistBatch::default()
+        };
+        assert_eq!(b.drop_books(), 1, "books alone, no journal entries");
+        assert!(b.books.is_empty());
+        assert_eq!(b.decisions, vec![decision]);
+        let mut b = PersistBatch {
+            events: vec![
+                book_env(book("a", "0.40", "2026-10-17T02:30:00Z")),
+                EventEnvelope::new(
+                    at,
+                    EventSource::Operator,
+                    WeatherMachineEvent::Timer(TimerEvent {
+                        due_at: at,
+                        kind: TimerKind::Heartbeat,
+                    }),
+                ),
+            ],
+            ..PersistBatch::default()
+        };
+        assert_eq!(b.drop_books(), 1);
+        assert!(matches!(
+            b.events[..],
+            [EventEnvelope {
+                event: WeatherMachineEvent::Timer(_),
+                ..
+            }]
+        ));
+        assert_eq!(b.drop_books(), 0, "nothing left to drop");
     }
 
     #[test]

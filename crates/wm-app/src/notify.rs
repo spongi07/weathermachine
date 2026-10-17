@@ -1,5 +1,6 @@
 //! Push messages through Pushover: a settled market's result for each
-//! strategy that held it, and a live order that ended having bought shares.
+//! strategy that held it, a live order that ended having bought shares, and
+//! the disk filling up (whatever strategies the messages follow).
 //!
 //! `WM_PUSHOVER_TOKEN` (the API token of an application created at
 //! pushover.net) and `WM_PUSHOVER_USER` (the user key) switch it on. Both
@@ -384,6 +385,12 @@ fn note(title: String, message: String, at: DateTime<Utc>) -> Note {
         message: clip(message, MESSAGE_MAX),
         at_s: at.timestamp(),
     }
+}
+
+/// A message about the machine rather than a strategy (the disk filling up):
+/// sent whoever's results the messages follow.
+pub fn system_note(title: String, message: String, at: DateTime<Utc>) -> Note {
+    note(title, message, at)
 }
 
 fn day_text(d: NaiveDate) -> String {

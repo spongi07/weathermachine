@@ -3711,6 +3711,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "reqwest",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",

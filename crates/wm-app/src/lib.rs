@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod config;
 pub mod demo;
+pub mod disk;
 pub mod dto;
 pub mod healthcheck;
 pub mod http;

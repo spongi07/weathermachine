@@ -280,6 +280,27 @@ fn StatusBar(
                     pill(s.execution_ok, "EXECUTION".into(), "Simulated paper venue".into()).into_any(),
                     model.into_any(),
                 ];
+                // The disk under the data directory: on a default install
+                // the database's too (17 October 2026: full, PostgreSQL down).
+                if let Some(d) = &s.disk {
+                    let used = if d.total_bytes > 0 { 100.0 * (1.0 - d.free_bytes as f64 / d.total_bytes as f64) } else { 0.0 };
+                    let (class, label) = match d.level.as_str() {
+                        "brake" => ("pill bad", format!("DISK {used:.0}% · BOOKS OFF")),
+                        "low" => ("pill warn", format!("DISK {used:.0}%")),
+                        _ => ("pill good", format!("DISK {used:.0}%")),
+                    };
+                    let mut title = format!("{} free of {} on {}", fmt::gb(d.free_bytes), fmt::gb(d.total_bytes), d.path);
+                    if let Some(db) = d.database_bytes {
+                        title.push_str(&format!(" · the database {}", fmt::gb(db)));
+                    }
+                    if d.warn_bytes > 0 {
+                        title.push_str(&format!(" · an alert under {} free", fmt::gb(d.warn_bytes)));
+                    }
+                    if d.brake_bytes > 0 {
+                        title.push_str(&format!(" · under {} order books are not written", fmt::gb(d.brake_bytes)));
+                    }
+                    v.insert(1, view! { <span class=class title=title>{label}</span> }.into_any());
+                }
                 v.extend(forecast);
                 v.push(pill(s.market_stream.as_ref().is_none_or(|m| m.connected), "MARKET DATA".into(), "Polymarket market stream".into()).into_any());
                 v

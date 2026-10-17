@@ -17,6 +17,8 @@
 //! | `WM_MODEL_AUTO_TRAIN` | `false` disables training from IEM history       |
 //! | `WM_DATA_DIR`       | writable data directory (models, history cache)    |
 //! | `WM_JOURNAL_RETENTION_DAYS` | days of order-book updates kept in the journal |
+//! | `WM_BOOK_HISTORY_DAYS` | days of recorded market history (books) kept    |
+//! | `WM_DISK_WARN_FREE_GB` / `WM_DISK_BRAKE_FREE_GB` | free-space alert and book brake |
 //! | `WM_FORECAST`       | `false` disables the day-1 forecast (fetch + training) |
 //! | `WM_FORECAST_MODEL` | Open-Meteo model id, e.g. `gfs_global`             |
 //! | `WM_OPEN_METEO_API_KEY` | Open-Meteo subscription key (commercial host)  |
@@ -62,6 +64,21 @@ pub struct AppSection {
     /// are kept.
     #[serde(default = "default_journal_book_retention_days")]
     pub journal_book_retention_days: u32,
+    /// The recorded market history (`orderbook_snapshots`, a few hundred MB
+    /// a day) is deleted after this many days (0 = keep).
+    #[serde(default = "default_book_history_retention_days")]
+    pub book_history_retention_days: u32,
+    /// Free space on the disk of the data directory (in Docker, that of the
+    /// volumes, the database's too on a default install) under which an
+    /// alert is raised and pushed, in GB (0 = never).
+    #[serde(default = "default_disk_warn_free_gb")]
+    pub disk_warn_free_gb: f64,
+    /// Under this many GB free, order books are not written (the journal's
+    /// book updates, the market history) until there is room again, so the
+    /// database does not fill the disk; decisions, orders and fills always
+    /// are (0 = never).
+    #[serde(default = "default_disk_brake_free_gb")]
+    pub disk_brake_free_gb: f64,
 }
 
 fn default_book_record_interval_secs() -> u64 {
@@ -70,6 +87,18 @@ fn default_book_record_interval_secs() -> u64 {
 
 fn default_journal_book_retention_days() -> u32 {
     7
+}
+
+fn default_book_history_retention_days() -> u32 {
+    14
+}
+
+fn default_disk_warn_free_gb() -> f64 {
+    5.0
+}
+
+fn default_disk_brake_free_gb() -> f64 {
+    2.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1067,6 +1096,21 @@ impl AppConfig {
                 format!("WM_JOURNAL_RETENTION_DAYS must be a whole number of days, got '{v}'")
             })?;
         }
+        if let Some(v) = env_nonempty("WM_BOOK_HISTORY_DAYS") {
+            file.app.book_history_retention_days = v.parse().with_context(|| {
+                format!("WM_BOOK_HISTORY_DAYS must be a whole number of days, got '{v}'")
+            })?;
+        }
+        if let Some(v) = env_nonempty("WM_DISK_WARN_FREE_GB") {
+            file.app.disk_warn_free_gb = v.parse().with_context(|| {
+                format!("WM_DISK_WARN_FREE_GB must be a number of GB, got '{v}'")
+            })?;
+        }
+        if let Some(v) = env_nonempty("WM_DISK_BRAKE_FREE_GB") {
+            file.app.disk_brake_free_gb = v.parse().with_context(|| {
+                format!("WM_DISK_BRAKE_FREE_GB must be a number of GB, got '{v}'")
+            })?;
+        }
         if let Some(v) = env_nonempty("WM_DATA_DIR") {
             file.model.auto_train.data_dir = v;
         }
@@ -1152,6 +1196,22 @@ impl AppConfig {
 
     /// Structural validation (fail closed at startup).
     pub fn validate(&self) -> Result<()> {
+        let a = &self.file.app;
+        for (name, gb) in [
+            ("disk_warn_free_gb", a.disk_warn_free_gb),
+            ("disk_brake_free_gb", a.disk_brake_free_gb),
+        ] {
+            if !gb.is_finite() || gb < 0.0 {
+                bail!("app.{name} must be a number of GB ≥ 0 (0 = off), got {gb}");
+            }
+        }
+        if a.disk_warn_free_gb > 0.0 && a.disk_brake_free_gb >= a.disk_warn_free_gb {
+            bail!(
+                "app.disk_brake_free_gb ({}) must be under app.disk_warn_free_gb ({}): the alert comes before the brake",
+                a.disk_brake_free_gb,
+                a.disk_warn_free_gb
+            );
+        }
         let p = &self.file.providers;
         for (name, s) in [
             ("awc", &p.awc),
@@ -2153,7 +2213,14 @@ mod tests {
                 "lab",
                 "lab.neighbours",
             ],
-            &["market_weight", "max_market_spread", "exempt_strategies"],
+            &[
+                "market_weight",
+                "max_market_spread",
+                "exempt_strategies",
+                "book_history_retention_days",
+                "disk_warn_free_gb",
+                "disk_brake_free_gb",
+            ],
         );
         assert!(
             text.lines()
@@ -2206,6 +2273,39 @@ mod tests {
         assert_eq!(data.base_url, "https://data-api.polymarket.com");
         assert!(data.policy.min_interval >= std::time::Duration::from_millis(500));
         assert!(data.policy.validate().is_ok());
+        // The market history is bounded and the disk watched, older file or not.
+        assert_eq!(file.app.book_history_retention_days, 14);
+        assert!((file.app.disk_warn_free_gb - 5.0).abs() < 1e-12);
+        assert!((file.app.disk_brake_free_gb - 2.0).abs() < 1e-12);
+    }
+
+    /// The market history ships bounded and the disk watched; the brake must
+    /// come after the alert, and either may be off.
+    #[test]
+    fn retention_and_disk_watch_ship_bounded() {
+        let cfg = AppConfig::load(Some(&repo_root().join("configs/weather-machine.toml"))).unwrap();
+        let a = &cfg.file.app;
+        assert_eq!(a.journal_book_retention_days, 7);
+        assert_eq!(a.book_history_retention_days, 14);
+        assert!((a.disk_warn_free_gb - 5.0).abs() < 1e-12);
+        assert!((a.disk_brake_free_gb - 2.0).abs() < 1e-12);
+        cfg.validate().unwrap();
+        let refused = |f: &dyn Fn(&mut AppSection)| {
+            let mut c = cfg.clone();
+            f(&mut c.file.app);
+            c.validate().is_err()
+        };
+        assert!(
+            refused(&|a| a.disk_brake_free_gb = 5.0),
+            "the brake before the alert"
+        );
+        assert!(refused(&|a| a.disk_warn_free_gb = -1.0));
+        assert!(refused(&|a| a.disk_brake_free_gb = f64::NAN));
+        assert!(!refused(&|a| a.disk_warn_free_gb = 0.0), "the brake alone");
+        assert!(!refused(&|a| {
+            a.disk_warn_free_gb = 0.0;
+            a.disk_brake_free_gb = 0.0;
+        }));
     }
 
     #[test]

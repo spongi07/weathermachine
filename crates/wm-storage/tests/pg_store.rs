@@ -609,7 +609,7 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
     // Retention: old order-book updates and stream heartbeats go, everything
     // else stays.
     let deleted = s
-        .prune_journal_books(now - Duration::days(7))
+        .prune_journal_books(now - Duration::days(7), u64::MAX)
         .await
         .unwrap();
     assert_eq!(deleted, 1501);
@@ -649,8 +649,9 @@ async fn insert_books(
 }
 
 /// Retention deletes in statements of `JOURNAL_PRUNE_CHUNK` rows until none
-/// is left: an exact multiple of the chunk and one row over both go whole,
-/// and recent rows stay.
+/// is left, or a pass's maximum is reached: an exact multiple of the chunk
+/// and one row over both go whole, a capped pass stops at its maximum (mid
+/// chunk too) and the next takes the rest, and recent rows stay.
 #[tokio::test]
 async fn journal_retention_deletes_in_chunks_until_done() {
     let Some(db) = fresh().await else { return };
@@ -666,12 +667,95 @@ async fn journal_retention_deletes_in_chunks_until_done() {
 
     insert_books(s, &run, 1..=2 * chunk, old).await;
     insert_books(s, &run, 2 * chunk + 1..=2 * chunk + 3, now).await;
-    assert_eq!(s.prune_journal_books(cutoff).await.unwrap(), 2 * chunk);
+    assert_eq!(
+        s.prune_journal_books(cutoff, u64::MAX).await.unwrap(),
+        2 * chunk
+    );
     assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 3);
 
     insert_books(s, &run, 2 * chunk + 4..=3 * chunk + 4, old).await;
-    assert_eq!(s.prune_journal_books(cutoff).await.unwrap(), chunk + 1);
+    assert_eq!(
+        s.prune_journal_books(cutoff, chunk / 2).await.unwrap(),
+        chunk / 2
+    );
+    assert_eq!(
+        s.prune_journal_books(cutoff, u64::MAX).await.unwrap(),
+        chunk + 1 - chunk / 2
+    );
     assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 3);
-    assert_eq!(s.prune_journal_books(cutoff).await.unwrap(), 0);
+    assert_eq!(s.prune_journal_books(cutoff, u64::MAX).await.unwrap(), 0);
+    db.drop_db().await;
+}
+
+async fn insert_history(s: &PgStore, run: &RunId, n: u64, at: DateTime<Utc>) {
+    let books: Vec<wm_core::market::OrderBook> = (0..n)
+        .map(
+            |i| match book_event(i + 1, at + Duration::milliseconds(i as i64), "tok-a").event {
+                WeatherMachineEvent::OrderBookUpdate(b) => b.book,
+                _ => unreachable!("book_event makes book updates"),
+            },
+        )
+        .collect();
+    s.persist_engine_batch(
+        run,
+        wm_storage::EngineBatch {
+            events: &[],
+            decisions: &[],
+            orders: &[],
+            fills: &[],
+            books: &books,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// The recorded market history goes by age, oldest first, in statements of
+/// `JOURNAL_PRUNE_CHUNK` rows: more than a chunk of old books go whole, the
+/// recent ones stay, a second pass deletes nothing, and an old book stored
+/// after newer ones (by id) is left alone rather than searched for.
+#[tokio::test]
+async fn book_history_retention_deletes_old_books_in_chunks() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let run = RunId::deterministic(23);
+    let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+    s.record_run(&run, RunMode::Paper, "m", &serde_json::json!({}), now)
+        .await
+        .unwrap();
+    let old = now - Duration::days(20);
+    let cutoff = now - Duration::days(14);
+    let chunk = u64::try_from(wm_storage::JOURNAL_PRUNE_CHUNK).unwrap();
+    let history = "SELECT count(*) FROM orderbook_snapshots";
+
+    assert_eq!(
+        s.prune_book_history(cutoff, u64::MAX).await.unwrap(),
+        0,
+        "empty table"
+    );
+    insert_history(s, &run, chunk + 7, old).await;
+    insert_history(s, &run, 3, now).await;
+    // A capped pass stops at its maximum, past a chunk too; the next takes the rest.
+    assert_eq!(
+        s.prune_book_history(cutoff, chunk + 2).await.unwrap(),
+        chunk + 2
+    );
+    assert_eq!(s.prune_book_history(cutoff, u64::MAX).await.unwrap(), 5);
+    assert_eq!(count(s, history).await, 3);
+    assert_eq!(s.prune_book_history(cutoff, u64::MAX).await.unwrap(), 0);
+
+    insert_history(s, &run, 1, old).await;
+    assert_eq!(s.prune_book_history(cutoff, u64::MAX).await.unwrap(), 0);
+    assert_eq!(count(s, history).await, 4);
+
+    // Every row old: all of them go.
+    assert_eq!(
+        s.prune_book_history(now + Duration::days(1), u64::MAX)
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(count(s, history).await, 0);
+    assert!(s.database_size().await.unwrap() > 0);
     db.drop_db().await;
 }
