@@ -272,14 +272,25 @@ fn ui_index(state: &Shared) -> Option<PathBuf> {
         .filter(|p| p.is_file())
 }
 
+/// How long a request may take before it is answered 503.
+const REQUEST_LIMIT: Duration = Duration::from_secs(10);
+/// The paper report's and the strategy logs' limit: they read up to
+/// [`ReportService::MAX_DAYS`] days of decisions, all of them on the first
+/// request after a start (6 November 2026: 1.9 million rows, past
+/// [`REQUEST_LIMIT`] in the query alone).
+const SLOW_REQUEST_LIMIT: Duration = Duration::from_secs(120);
+
 /// Build the router.
 pub fn router(state: AppState) -> Router {
+    let timeout = |limit| TimeoutLayer::with_status_code(StatusCode::SERVICE_UNAVAILABLE, limit);
+    let slow = Router::new()
+        .route("/api/v1/report/paper", get(paper_report_page))
+        .route("/api/v1/strategies/{id}/log", get(strategy_log_page))
+        .layer(timeout(SLOW_REQUEST_LIMIT));
     let protected = Router::new()
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/kill-switch", post(kill_switch))
-        .route("/api/v1/report/paper", get(paper_report_page))
-        .route("/api/v1/strategies/{id}/log", get(strategy_log_page))
         .route("/api/v1/research", get(research_list))
         .route("/api/v1/research/{name}", get(research_file))
         .route("/api/{*rest}", any(api_not_found))
@@ -293,20 +304,21 @@ pub fn router(state: AppState) -> Router {
         ),
         _ => protected.fallback(|| async { Redirect::temporary("/lite") }),
     };
-    let protected = protected.layer(middleware::from_fn_with_state(
-        Arc::clone(&state),
-        require_basic_auth,
-    ));
+    let protected =
+        protected
+            .layer(timeout(REQUEST_LIMIT))
+            .merge(slow)
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&state),
+                require_basic_auth,
+            ));
     let probes = Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz));
+        .route("/readyz", get(readyz))
+        .layer(timeout(REQUEST_LIMIT));
     probes
         .merge(protected)
         .with_state(state)
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::SERVICE_UNAVAILABLE,
-            Duration::from_secs(10),
-        ))
         .layer(CompressionLayer::new())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
@@ -546,7 +558,7 @@ async fn strategy_log_page(
         .unwrap_or(7)
         .clamp(1, usize::try_from(ReportService::MAX_DAYS).unwrap_or(31));
     let report = match &state.paper_report {
-        Some(service) => Some(service.latest().await),
+        Some(service) => Some(service.recent(i64::try_from(days).unwrap_or(1)).await),
         None => None,
     };
     let history = match &report {

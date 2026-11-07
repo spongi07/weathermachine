@@ -411,8 +411,9 @@ read-only and changes nothing.
   `the_lab_reads_knmi_radiation_and_neighbours_and_gives_up_on_a_refused_station`
   runs the downloads end to end against a mock KNMI server.
 
-Data API paging, the offset cap, window splitting, dedup and the request
-budget are tested against a mock server. An end-to-end run against mock
+Data API v2 paging along the cursor (past v1's offset cap of 10,000), the
+request's filters (none of v1's), groups of 20 conditions, dedup and the
+request budget are tested against a mock server. An end-to-end run against mock
 Gamma, Data API and IEM servers checks the cache and a rerun that makes no
 new requests.
 

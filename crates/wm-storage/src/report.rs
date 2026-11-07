@@ -223,7 +223,10 @@ impl PgStore {
         Ok(out)
     }
 
-    /// Decision records of a location in `[from, to)`, oldest first.
+    /// Decision records of a location in `[from, to)`, oldest first. Only
+    /// the evaluations (strategy `evaluation`) come with their inputs and
+    /// outputs; the report reads a proposal's summary, verdict and reasons,
+    /// and the rest of each would be read for nothing (JSON null instead).
     pub async fn report_decisions(
         &self,
         location: &str,
@@ -231,7 +234,10 @@ impl PgStore {
         to: DateTime<Utc>,
     ) -> Result<Vec<ReportDecision>> {
         let rows = sqlx::query(
-            "SELECT at, strategy, event_slug, summary, inputs, outputs, approved, reasons
+            "SELECT at, strategy, event_slug, summary,
+                    CASE WHEN strategy = 'evaluation' THEN inputs END AS inputs,
+                    CASE WHEN strategy = 'evaluation' THEN outputs END AS outputs,
+                    approved, reasons
              FROM decision_snapshots
              WHERE location_id = $1 AND at >= $2 AND at < $3
              ORDER BY at, decision_id",
@@ -243,15 +249,17 @@ impl PgStore {
         .await?;
         rows.into_iter()
             .map(|r| {
-                let inputs: sqlx::types::Json<serde_json::Value> = r.try_get("inputs")?;
-                let outputs: sqlx::types::Json<serde_json::Value> = r.try_get("outputs")?;
+                let json = |c: &str| -> Result<serde_json::Value> {
+                    let v: Option<sqlx::types::Json<serde_json::Value>> = r.try_get(c)?;
+                    Ok(v.map_or(serde_json::Value::Null, |j| j.0))
+                };
                 Ok(ReportDecision {
                     at: r.try_get("at")?,
                     strategy: r.try_get("strategy")?,
                     event_slug: r.try_get("event_slug")?,
                     summary: r.try_get("summary")?,
-                    inputs: inputs.0,
-                    outputs: outputs.0,
+                    inputs: json("inputs")?,
+                    outputs: json("outputs")?,
                     approved: r.try_get("approved")?,
                     reasons: r.try_get("reasons")?,
                 })

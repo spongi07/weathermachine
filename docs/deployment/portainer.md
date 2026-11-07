@@ -366,9 +366,11 @@ beyond the KNMI key:
   refuses is dropped with one alert.
 * **AWC** (no key): the METARs of twelve airports upstream in one request
   at :10 and :40, away from Schiphol's report windows — 48 a day.
-* **Polymarket Data API** (public, no key): today's taker trades every
-  20 s for L18–L21, and once a day the settled markets on which every taker
-  is scored for L19 and L20. The first scoring after a start downloads up
+* **Polymarket Data API** (public, no key; v2, `/v2/trades`, since Data
+  API v1 was retired on 2 November 2026 — an older image reads nothing
+  from it after that day): today's taker trades every 20 s for L18–L21,
+  L38, L44, L47 and L63, and once a day the settled markets on which every
+  taker is scored for L19 and L20. The first scoring after a start downloads up
   to 60 settled days into `/data/research/polymarket/EHAM/` — the cache
   `research market` uses, so a host that ran the study already has most of
   it — and takes a few minutes; until then L19 and L20 show "no taker
@@ -426,7 +428,12 @@ provisional. It only reads.
 (the dashboard's address; Basic auth applies if you set it). It covers the
 days since the service first ran, at most the last 31. Choose days with
 `?from=2026-09-26&to=2026-09-29`; add `&format=json` for JSON. Select all,
-copy, paste.
+copy, paste. The decisions are nearly all of what it reads (1.9 million
+in 31 days in November 2026, most of them the lab's), a day at a time: the
+first report of many days after a start can take a minute (the route waits
+up to two, the others ten seconds). A day two days old can no longer change
+and is kept, so later reports, and the strategy pages' history, read only
+the newest days again.
 
 **As a one-off container** (any range; the report is also saved as
 `/data/reports/amsterdam-paper.md` and `.json` when the data volume is
@@ -498,7 +505,8 @@ path prefix.
 | Alert "strategy K needs KNMI's ten-minute readings: set WM_KNMI_API_KEY …" (or "strategy K and the lab's KNMI rules …", "the lab's KNMI rules …") | K or the lab is switched on without a key. Request a free key at the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/) (*EDR API*), set `WM_KNMI_API_KEY` and redeploy — or set `enabled = false` in `[strategies.knmi_nowcast]` and `[strategies.lab]`. |
 | Alert "KNMI ten-minute readings unavailable (…); strategy K and the lab's KNMI rules wait" | The KNMI API refused or did not answer (HTTP 401/403: wrong or expired key; otherwise an outage). K and the lab's KNMI rules do nothing meanwhile; "KNMI ten-minute readings available again" follows on recovery. |
 | Alert "KNMI readings of neighbour 06215 unavailable (…); the lab's L24 reads the others" | KNMI did not serve one neighbouring station; only L24 is affected. It is retried after every new Schiphol reading. |
-| Alert "taker trades (Data API) unavailable (…); the lab's flow rules L18–L21 wait" | The Data API refused or did not answer; the service backs off and says "available again" on recovery. Nothing else waits for it. |
+| Alert "taker trades (Data API) unavailable (…); the lab's flow rules L18–L21 wait" | The Data API refused or did not answer; the service backs off and says "available again" on recovery. Nothing else waits for it. "HTTP status 410 … Data API v1 has been retired" is an image from before the v2 change: update it. |
+| Alert "the venue's positions cannot be read (http …): live stays closed, asked again every 30 minutes" | G_live's positions check reads the Data API v2 and got a client error (an older image: 410, v1 retired on 2 November 2026). G_live places nothing until the list is read; the LIVE panel says so. |
 | Alert "the strategy lab's flow rules (L18–L21) need the Data API …" | `[providers.polymarket_data]` is switched off: L18–L21 stay idle. Switch it on, or disable those families. |
 | Alert "takers' records incomplete: settled days would not download …" | Three settled days in a row would not download for the takers' scores; L19 and L20 use the days that loaded, and the next morning tries again. |
 | Report says "not evaluated: …" | The forecast history could not be downloaded (e.g. `previous-runs-api.open-meteo.com` blocked); training is retried after 6 h. A "rejected by Open-Meteo" reason naming the model means `WM_FORECAST_MODEL` is not a valid model id. |
@@ -559,5 +567,11 @@ usual. As root on the host:
    `event_journal` and `orderbook_snapshots` are nearly all of it. Rows past
    their retention are deleted every hour (at most 200,000 a table a pass,
    so a backlog goes over several hours without a burst of WAL) and new
-   rows reuse their room, so the files stop growing but do not shrink. Lower
+   rows reuse their room, so the files stop growing but do not shrink. A
+   journal pass searches on from where the last one stopped (the first
+   after a start and one a day from the journal's beginning: one slow
+   statement). Until November 2026 every statement of a pass searched from
+   the beginning, through every row kept since the service first ran: 26 s
+   for each 5,000 rows deleted on 6 November, a "slow statement" warning
+   each. Lower
    `WM_JOURNAL_RETENTION_DAYS` or `WM_BOOK_HISTORY_DAYS` to keep less.

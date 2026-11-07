@@ -133,11 +133,11 @@ fn trades_json(date: NaiveDate, high: i32) -> Vec<(i64, String)> {
             for m in [0, 30] {
                 let ts = at(date, h, m).timestamp();
                 out.push((ts, format!(
-                    r#"{{"proxyWallet":"0xa{i}","side":"BUY","asset":"{yes}","conditionId":"{cond}","size":10,"price":{:.3},"timestamp":{ts},"outcome":"Yes","transactionHash":"0xy{i}{ts}"}}"#,
+                    r#"{{"proxy_wallet":"0xa{i}","side":"BUY","token_id":"{yes}","condition_id":"{cond}","size":10,"price":{:.3},"timestamp":{ts},"outcome":"Yes","transaction_hash":"0xy{i}{ts}"}}"#,
                     p + 0.01
                 )));
                 out.push((ts, format!(
-                    r#"{{"proxyWallet":"0xb{i}","side":"BUY","asset":"{no}","conditionId":"{cond}","size":10,"price":{:.3},"timestamp":{ts},"outcome":"No","transactionHash":"0xn{i}{ts}"}}"#,
+                    r#"{{"proxy_wallet":"0xb{i}","side":"BUY","token_id":"{no}","condition_id":"{cond}","size":10,"price":{:.3},"timestamp":{ts},"outcome":"No","transaction_hash":"0xn{i}{ts}"}}"#,
                     1.0 - p + 0.01
                 )));
             }
@@ -192,15 +192,17 @@ async fn servers(highs: &BTreeMap<NaiveDate, i32>, csv: &BTreeMap<i32, String>) 
         .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
         .mount(&gamma)
         .await;
+    // Data API v2: the rows in `data`, newest first, page by page along
+    // `pagination.next_cursor`.
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(move |req: &Request| {
             let q: BTreeMap<String, String> = req.url.query_pairs().into_owned().collect();
             let num = |k: &str| q[k].parse::<i64>().unwrap();
-            let (start, end, offset, limit) =
-                (num("start"), num("end"), num("offset"), num("limit"));
+            let (start, end, limit) = (num("start"), num("end"), num("limit"));
+            let skip: usize = q.get("cursor").map_or(0, |c| c.parse().unwrap());
             let mut rows: Vec<&(i64, String)> = by_market
-                .get(&q["market"])
+                .get(&q["condition"])
                 .map(|v| {
                     v.iter()
                         .filter(|(ts, _)| *ts >= start && *ts <= end)
@@ -208,13 +210,24 @@ async fn servers(highs: &BTreeMap<NaiveDate, i32>, csv: &BTreeMap<i32, String>) 
                 })
                 .unwrap_or_default();
             rows.reverse();
+            let total = rows.len();
+            let take = usize::try_from(limit).unwrap();
             let page: Vec<&str> = rows
                 .into_iter()
-                .skip(usize::try_from(offset).unwrap())
-                .take(usize::try_from(limit).unwrap())
+                .skip(skip)
+                .take(take)
                 .map(|(_, r)| r.as_str())
                 .collect();
-            ResponseTemplate::new(200).set_body_string(format!("[{}]", page.join(",")))
+            let next = if skip + take < total {
+                format!("\"{}\"", skip + take)
+            } else {
+                "null".to_owned()
+            };
+            ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"data":[{}],"pagination":{{"limit":{take},"has_more":{},"next_cursor":{next}}}}}"#,
+                page.join(","),
+                skip + take < total
+            ))
         })
         .mount(&data)
         .await;
@@ -436,8 +449,8 @@ async fn a_day_whose_trades_keep_failing_is_skipped_and_the_rest_studied() {
     let bad = d(2025, 4, 11);
     let conds: Vec<String> = buckets(bad, highs[&bad]).into_iter().map(|b| b.2).collect();
     Mock::given(method("GET"))
-        .and(path("/trades"))
-        .and(query_param("market", conds.join(",").as_str()))
+        .and(path("/v2/trades"))
+        .and(query_param("condition", conds.join(",").as_str()))
         .respond_with(ResponseTemplate::new(503))
         .with_priority(1)
         .expect(u64::from(wm_polymarket::data::PAGE_ATTEMPTS))
@@ -484,7 +497,7 @@ async fn downloads_stop_after_three_failed_days_in_a_row() {
     let (csv, highs) = history();
     let s = servers(&highs, &csv).await;
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(ResponseTemplate::new(503))
         .with_priority(1)
         .mount(&s.data)

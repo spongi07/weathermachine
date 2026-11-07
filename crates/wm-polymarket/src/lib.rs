@@ -18,7 +18,7 @@ pub mod rules;
 pub mod ws;
 
 pub use clob::{ClobClient, ClobError, parse_book};
-pub use data::{DataApiClient, DataApiError, DataTrade, TradeHistory, parse_trades};
+pub use data::{DataApiClient, DataApiError, DataTrade, TradeHistory, TradesPage, parse_trades};
 pub use gamma::{
     GammaClient, GammaClobReward, GammaError, GammaEvent, LocationMarketSpec, MappingError,
     build_market, event_slug, parse_events,

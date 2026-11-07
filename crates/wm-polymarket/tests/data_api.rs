@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Data API trade history against a local server: paging, the offset cap,
-//! window splitting, filtering and de-duplication.
+//! Data API v2 trade history against a local server: paging along the
+//! cursor, the request's filters, groups of conditions, filtering and
+//! de-duplication.
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -36,9 +37,19 @@ fn client(server: &MockServer) -> DataApiClient {
 
 fn record(i: usize, ts: i64) -> String {
     format!(
-        r#"{{"proxyWallet":"0xw{}","side":"{}","asset":"1018","conditionId":"0xc1","size":2,"price":0.5,"timestamp":{ts},"outcome":"Yes","transactionHash":"0xh{i}"}}"#,
+        r#"{{"proxy_wallet":"0xw{}","side":"{}","token_id":"1018","condition_id":"0xc1","size":2,"price":0.5,"timestamp":{ts},"outcome":"Yes","transaction_hash":"0xh{i}"}}"#,
         i % 7,
         if i.is_multiple_of(2) { "BUY" } else { "SELL" }
+    )
+}
+
+/// A v2 page: the rows in `data`, the next page's cursor in `pagination`.
+fn page(rows: &[String], next: Option<&str>) -> String {
+    format!(
+        r#"{{"data":[{}],"pagination":{{"limit":500,"has_more":{},"next_cursor":{}}}}}"#,
+        rows.join(","),
+        next.is_some(),
+        next.map_or_else(|| "null".to_owned(), |c| format!("\"{c}\""))
     )
 }
 
@@ -51,39 +62,46 @@ fn num(q: &HashMap<String, String>, k: &str) -> i64 {
 }
 
 /// A server holding `n` trades seven seconds apart that honours the
-/// window, pages newest first and rejects offsets above 10,000 like the API.
+/// window and pages newest first along an opaque cursor (base64's `+`, `/`
+/// and `=` in it), and answers 400 to v1's parameters like the API.
 async fn honest_server(n: usize) -> (MockServer, Arc<AtomicU32>) {
     let server = MockServer::start().await;
     let calls = Arc::new(AtomicU32::new(0));
     let c = Arc::clone(&calls);
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(move |req: &Request| {
             c.fetch_add(1, Ordering::SeqCst);
             let q = query(req);
-            assert_eq!(q.get("takerOnly").map(String::as_str), Some("true"));
-            assert_eq!(q.get("market").map(String::as_str), Some("0xc1,0xc2"));
-            let (start, end, offset, limit) = (
-                num(&q, "start"),
-                num(&q, "end"),
-                num(&q, "offset"),
-                num(&q, "limit"),
-            );
-            if offset > 10_000 || limit > 10_000 {
-                return ResponseTemplate::new(400).set_body_string("offset too large");
+            if ["market", "offset", "takerOnly"]
+                .iter()
+                .any(|k| q.contains_key(*k))
+            {
+                return ResponseTemplate::new(400).set_body_string("obsolete parameter");
             }
+            assert_eq!(q.get("condition").map(String::as_str), Some("0xc1,0xc2"));
+            let (start, end, limit) = (num(&q, "start"), num(&q, "end"), num(&q, "limit"));
+            let skip: usize = q.get("cursor").map_or(0, |c| {
+                c.strip_prefix("p+")
+                    .and_then(|c| c.strip_suffix("/=="))
+                    .and_then(|c| c.parse().ok())
+                    .expect("a cursor this server made")
+            });
             let mut rows: Vec<(usize, i64)> = (0..n)
                 .map(|i| (i, S0 + 7 * i as i64))
                 .filter(|(_, ts)| *ts >= start && *ts <= end)
                 .collect();
             rows.reverse(); // newest first
-            let page: Vec<String> = rows
+            let total = rows.len();
+            let take = usize::try_from(limit).unwrap();
+            let rows: Vec<String> = rows
                 .into_iter()
-                .skip(usize::try_from(offset).unwrap())
-                .take(usize::try_from(limit).unwrap())
+                .skip(skip)
+                .take(take)
                 .map(|(i, ts)| record(i, ts))
                 .collect();
-            ResponseTemplate::new(200).set_body_string(format!("[{}]", page.join(",")))
+            let next = (skip + take < total).then(|| format!("p+{}/==", skip + take));
+            ResponseTemplate::new(200).set_body_string(page(&rows, next.as_deref()))
         })
         .mount(&server)
         .await;
@@ -102,7 +120,7 @@ fn markets() -> Vec<ConditionId> {
 }
 
 #[tokio::test]
-async fn pages_until_a_short_page() {
+async fn pages_along_the_cursor_until_the_last() {
     let (server, calls) = honest_server(503).await;
     let h = client(&server)
         .trades(&markets(), at(S0), at(E0), Duration::from_secs(5))
@@ -121,8 +139,9 @@ async fn pages_until_a_short_page() {
     assert_eq!(h.trades[0].taker.as_deref(), Some("0xw0"));
 }
 
+/// v1 stopped at an offset of 10,000; a cursor reads on.
 #[tokio::test]
-async fn splits_the_window_at_the_offset_cap_and_misses_nothing() {
+async fn reads_past_ten_thousand_along_the_cursor_and_misses_nothing() {
     let (server, _) = honest_server(12_000).await;
     let h = client(&server)
         .trades(&markets(), at(S0), at(E0), Duration::from_secs(5))
@@ -130,11 +149,39 @@ async fn splits_the_window_at_the_offset_cap_and_misses_nothing() {
         .unwrap();
     assert_eq!(h.trades.len(), 12_000, "requests {}", h.requests);
     assert!(!h.truncated);
-    // 21 pages hit the cap, then the two halves are read.
-    assert!(h.requests > 21 && h.requests < 60, "{}", h.requests);
+    assert_eq!(h.requests, 24);
     let mut ts: Vec<i64> = h.trades.iter().map(|t| t.at.timestamp()).collect();
     ts.dedup();
     assert_eq!(ts.len(), 12_000);
+}
+
+/// At most 20 condition ids a request: more are asked for in groups, each
+/// group along its own cursor.
+#[tokio::test]
+async fn more_than_twenty_markets_are_asked_for_in_groups() {
+    let server = MockServer::start().await;
+    let groups = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let g = Arc::clone(&groups);
+    Mock::given(method("GET"))
+        .and(path("/v2/trades"))
+        .respond_with(move |req: &Request| {
+            let q = query(req);
+            let ids: Vec<String> = q["condition"].split(',').map(str::to_owned).collect();
+            g.lock().unwrap().push(ids.len());
+            let row = record(ids.len(), S0 + i64::try_from(ids.len()).unwrap());
+            ResponseTemplate::new(200).set_body_string(page(&[row], None))
+        })
+        .mount(&server)
+        .await;
+    let many: Vec<ConditionId> = (0..25)
+        .map(|i| ConditionId::new(format!("0xc{i}")).unwrap())
+        .collect();
+    let h = client(&server)
+        .trades(&many, at(S0), at(E0), Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(*groups.lock().unwrap(), vec![20, 5]);
+    assert_eq!((h.requests, h.trades.len()), (2, 2));
 }
 
 #[tokio::test]
@@ -143,9 +190,10 @@ async fn keeps_only_the_window_and_drops_duplicates() {
     let inside = record(1, S0 + 10);
     let outside = record(2, E0 + 100);
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_string(format!("[{inside},{inside},{outside}]")),
+            ResponseTemplate::new(200)
+                .set_body_string(page(&[inside.clone(), inside, outside], None)),
         )
         .mount(&server)
         .await;
@@ -159,12 +207,12 @@ async fn keeps_only_the_window_and_drops_duplicates() {
 }
 
 #[tokio::test]
-async fn an_api_ignoring_the_window_ends_truncated_within_budget() {
+async fn a_cursor_that_never_ends_ends_truncated_within_budget() {
     let server = MockServer::start().await;
-    let page: Vec<String> = (0..500).map(|i| record(i, S0 + 5)).collect();
-    let body = format!("[{}]", page.join(","));
+    let rows: Vec<String> = (0..500).map(|i| record(i, S0 + 5)).collect();
+    let body = page(&rows, Some("again"));
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(ResponseTemplate::new(200).set_body_string(body))
         .mount(&server)
         .await;
@@ -197,7 +245,7 @@ async fn a_throttled_page_is_waited_out_and_read_again() {
     // 8 June 2026: a single 429 with Retry-After 1 s ended a whole study.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
         .up_to_n_times(1)
         .expect(1)
@@ -205,8 +253,8 @@ async fn a_throttled_page_is_waited_out_and_read_again() {
         .await;
     let row = record(3, S0 + 60);
     Mock::given(method("GET"))
-        .and(path("/trades"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(format!("[{row}]")))
+        .and(path("/v2/trades"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(page(&[row], None)))
         .expect(1)
         .mount(&server)
         .await;
@@ -231,7 +279,7 @@ async fn a_throttled_page_is_waited_out_and_read_again() {
 async fn a_page_that_keeps_failing_gives_up_after_its_attempts() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/trades"))
+        .and(path("/v2/trades"))
         .respond_with(ResponseTemplate::new(502))
         .expect(u64::from(wm_polymarket::data::PAGE_ATTEMPTS))
         .mount(&server)

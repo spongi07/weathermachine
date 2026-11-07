@@ -49,6 +49,9 @@ pub const HEARTBEAT_FRESH_S: i64 = 12;
 /// An order of unknown fate without a record this long after it was sent
 /// was never placed.
 pub const ABSENT_AFTER_S: i64 = 10;
+/// Minutes until the venue's positions are asked for again after an answer
+/// that asking soon does not change ([`rest::PositionsError::permanent`]).
+pub const POSITIONS_RETRY_PERMANENT_MIN: i64 = 30;
 
 /// What the operator configured.
 #[derive(Debug, Clone)]
@@ -226,6 +229,10 @@ struct Exec {
     /// The venue's list short of the books, as last said.
     positions_short: Option<String>,
     next_positions: DateTime<Utc>,
+    /// Why the last read of the venue's positions failed (`None`: it did
+    /// not); a failure that asking again soon does not change is alerted
+    /// once.
+    positions_failure: Option<rest::PositionsError>,
     orders: BTreeMap<String, Tracked>,
     was_ready: bool,
     events: mpsc::Sender<EventEnvelope>,
@@ -276,6 +283,7 @@ pub async fn run(
         positions: None,
         positions_short: None,
         next_positions: now,
+        positions_failure: None,
         orders: BTreeMap::new(),
         was_ready: false,
         events: ch.events.clone(),
@@ -410,7 +418,10 @@ impl Exec {
             b.push("orders of an earlier run still open at the venue".into());
         }
         match &self.positions {
-            None if self.book.is_some() => b.push("positions not compared yet".into()),
+            None if self.book.is_some() => b.push(match &self.positions_failure {
+                Some(e) => format!("positions not compared: the venue's list failed ({e})"),
+                None => "positions not compared yet".into(),
+            }),
             Some(Err(e)) => b.push(e.clone()),
             _ => {}
         }
@@ -667,10 +678,36 @@ impl Exec {
         };
         let venue = match rest::positions(self.clob.http(), &self.s.data_url, &self.s.funder).await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                self.positions_failure = None;
+                v
+            }
             Err(e) => {
-                self.next_positions = Utc::now() + Duration::seconds(30);
-                tracing::warn!("positions: {e}");
+                // A retired route or a refused query answers the same in
+                // 30 s: ask again in half an hour, not 60 times (6 November
+                // 2026: a 410 every 31 s once Data API v1 was retired).
+                let permanent = e.permanent();
+                self.next_positions = Utc::now()
+                    + if permanent {
+                        Duration::minutes(POSITIONS_RETRY_PERMANENT_MIN)
+                    } else {
+                        Duration::seconds(30)
+                    };
+                tracing::warn!("venue positions unread: {e}");
+                let new = self
+                    .positions_failure
+                    .as_ref()
+                    .is_none_or(|last| last.status != e.status);
+                if permanent && new {
+                    self.alert(
+                        "warning",
+                        format!(
+                            "the venue's positions cannot be read ({e}): live stays closed, asked again every {POSITIONS_RETRY_PERMANENT_MIN} minutes"
+                        ),
+                    )
+                    .await;
+                }
+                self.positions_failure = Some(e);
                 return;
             }
         };

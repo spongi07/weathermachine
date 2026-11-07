@@ -1598,6 +1598,11 @@ async fn retention_loop(
 ) {
     // First pass shortly after start, then hourly.
     let mut wait = std::time::Duration::from_secs(120);
+    // Up to where the journal holds no deletable row (each pass searches on
+    // from there), and when a pass last searched it from the beginning: the
+    // first pass does, and one a day, for a row that came in late below.
+    let mut cleared: Option<DateTime<Utc>> = None;
+    let mut swept: Option<DateTime<Utc>> = None;
     loop {
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
@@ -1607,17 +1612,30 @@ async fn retention_loop(
         let now = clock.now();
         if keep.journal_days > 0 {
             let before = now - Duration::days(i64::from(keep.journal_days));
+            let full = swept.is_none_or(|t| now - t >= Duration::days(1));
             match store
-                .prune_journal_books(before, wm_storage::PRUNE_PASS_MAX_ROWS)
+                .prune_journal_books(
+                    if full { None } else { cleared },
+                    before,
+                    wm_storage::PRUNE_PASS_MAX_ROWS,
+                )
                 .await
             {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    deleted = n,
-                    days = keep.journal_days,
-                    more = n >= wm_storage::PRUNE_PASS_MAX_ROWS,
-                    "journal order-book updates past retention deleted"
-                ),
+                Ok(p) => {
+                    cleared = Some(p.cleared);
+                    if full {
+                        swept = Some(now);
+                    }
+                    if p.deleted > 0 {
+                        tracing::info!(
+                            deleted = p.deleted,
+                            days = keep.journal_days,
+                            more = p.deleted >= wm_storage::PRUNE_PASS_MAX_ROWS,
+                            from_start = full,
+                            "journal order-book updates past retention deleted"
+                        );
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "journal retention pass failed; retrying in an hour")
                 }

@@ -38,6 +38,13 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations"
 /// cached: 20,000 took 1.7 s on the production host (October 2026), past
 /// SQLx's one-second slow-statement warning, and an hourly pass deletes
 /// that many or more; 5,000 take about 0.4 s.
+///
+/// That is when the search starts where the deletable rows do. Searched
+/// from the journal's beginning, a statement walks the time index through
+/// every row kept since then (the weather, the KNMI readings, the lab's
+/// tape) before it reaches one to delete: 26 s for each 5,000 on 6
+/// November 2026, about 12 minutes of every hour. So each statement goes on
+/// from the latest row the one before deleted.
 pub const JOURNAL_PRUNE_CHUNK: i64 = 5_000;
 
 /// Rows one retention pass deletes from a table at most; the rest goes in
@@ -52,6 +59,16 @@ pub const PRUNE_PASS_MAX_ROWS: u64 = 200_000;
 /// The next statement's limit: a chunk, or what is left of `max_rows`.
 fn prune_limit(total: u64, max_rows: u64) -> i64 {
     JOURNAL_PRUNE_CHUNK.min(i64::try_from(max_rows.saturating_sub(total)).unwrap_or(i64::MAX))
+}
+
+/// What one journal retention pass did ([`PgStore::prune_journal_books`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalPrune {
+    /// Rows deleted.
+    pub deleted: u64,
+    /// No order-book update or stream heartbeat is left from where the pass
+    /// searched up to here: the next pass can search from it.
+    pub cleared: DateTime<Utc>,
 }
 
 /// Storage errors.
@@ -444,32 +461,58 @@ impl PgStore {
     }
 
     /// Delete journal order-book updates and market-stream heartbeats older
-    /// than `before`, in chunks of [`JOURNAL_PRUNE_CHUNK`] rows, at most
-    /// `max_rows` ([`PRUNE_PASS_MAX_ROWS`] a pass). Recent runs stay exactly
-    /// replayable; older market history lives on in the sampled
-    /// `orderbook_snapshots`. Returns the number of rows deleted.
-    pub async fn prune_journal_books(&self, before: DateTime<Utc>, max_rows: u64) -> Result<u64> {
+    /// than `before`, oldest first, in chunks of [`JOURNAL_PRUNE_CHUNK`]
+    /// rows, at most `max_rows` ([`PRUNE_PASS_MAX_ROWS`] a pass). Recent runs
+    /// stay exactly replayable; older market history lives on in the sampled
+    /// `orderbook_snapshots`.
+    ///
+    /// The search starts at `after` (`None`: the journal's beginning), the
+    /// `cleared` of an earlier pass: a row older than that is not looked
+    /// for. Each chunk goes on from the latest row the one before deleted
+    /// (see [`JOURNAL_PRUNE_CHUNK`]).
+    pub async fn prune_journal_books(
+        &self,
+        after: Option<DateTime<Utc>>,
+        before: DateTime<Utc>,
+        max_rows: u64,
+    ) -> Result<JournalPrune> {
+        let mut from = after.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
         let mut total = 0;
         while total < max_rows {
             let limit = prune_limit(total, max_rows);
-            let n = sqlx::query(
-                "DELETE FROM event_journal WHERE ctid IN (
-                   SELECT ctid FROM event_journal
-                   WHERE kind IN ('order_book_update', 'market_stream_heartbeat')
-                     AND available_at < $1
-                   LIMIT $2)",
+            let (n, latest): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+                "WITH gone AS (
+                   DELETE FROM event_journal WHERE ctid IN (
+                     SELECT ctid FROM event_journal
+                     WHERE kind IN ('order_book_update', 'market_stream_heartbeat')
+                       AND available_at >= $1 AND available_at < $2
+                     ORDER BY available_at
+                     LIMIT $3)
+                   RETURNING available_at)
+                 SELECT count(*), max(available_at) FROM gone",
             )
+            .bind(from)
             .bind(before)
             .bind(limit)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-            total += n;
-            if n < limit.unsigned_abs() {
-                break;
+            .fetch_one(&self.pool)
+            .await?;
+            total += n.unsigned_abs();
+            if n < limit {
+                return Ok(JournalPrune {
+                    deleted: total,
+                    cleared: before,
+                });
+            }
+            // Rows at that very instant may be left: the next chunk starts
+            // at it, not after it.
+            if let Some(t) = latest {
+                from = t;
             }
         }
-        Ok(total)
+        Ok(JournalPrune {
+            deleted: total,
+            cleared: from,
+        })
     }
 
     /// Delete the recorded market history (`orderbook_snapshots`) captured

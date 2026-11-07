@@ -382,61 +382,147 @@ pub async fn geoblock(
     geo::parse(&body, close_only_override)
 }
 
-/// The account's positions (Data API): token id → shares.
+/// Why the positions could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionsError {
+    /// The HTTP status, when the API answered one other than success.
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+impl PositionsError {
+    fn other(message: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            message: message.into(),
+        }
+    }
+
+    /// An answer that asking again soon does not change: a client error
+    /// other than 429 (Data API v1's routes have answered 410 since 2
+    /// November 2026).
+    pub fn permanent(&self) -> bool {
+        self.status
+            .is_some_and(|s| (400..500).contains(&s) && s != 429)
+    }
+}
+
+impl std::fmt::Display for PositionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The account's positions (Data API v2, `GET /v2/positions`): token id →
+/// shares. A page names the next one's cursor; a walk that does not end
+/// within [`POSITION_PAGES`] pages fails rather than leaving the rest out.
 pub async fn positions(
     http: &reqwest::Client,
     data_base: &str,
     funder: &str,
-) -> Result<Vec<(String, Shares)>, String> {
-    // the Data API pages by 500 at most, the most shares first: an account
-    // of many markets (other bots' too) takes several pages
-    const PAGE: usize = 500;
-    const MAX_PAGES: usize = 10;
+) -> Result<Vec<(String, Shares)>, PositionsError> {
+    const PAGE: &str = "100";
+    let url = format!("{}/v2/positions", data_base.trim_end_matches('/'));
     let mut all = Vec::new();
-    for page in 0..MAX_PAGES {
-        let url = format!(
-            "{}/positions?user={funder}&sizeThreshold=0&limit={PAGE}&offset={}",
-            data_base.trim_end_matches('/'),
-            page * PAGE
-        );
+    let mut cursor: Option<String> = None;
+    for _ in 0..POSITION_PAGES {
+        let mut query = vec![("user", funder), ("limit", PAGE)];
+        if let Some(c) = &cursor {
+            query.push(("cursor", c));
+        }
         let r = http
-            .get(url)
+            .get(&url)
+            .query(&query)
             .send()
             .await
-            .map_err(|e| e.without_url().to_string())?;
-        if !r.status().is_success() {
-            return Err(format!("positions: http {}", r.status().as_u16()));
+            .map_err(|e| PositionsError::other(e.without_url().to_string()))?;
+        let status = r.status();
+        if !status.is_success() {
+            let body = r.text().await.unwrap_or_default();
+            return Err(PositionsError {
+                status: Some(status.as_u16()),
+                message: format!(
+                    "http {}: {}",
+                    status.as_u16(),
+                    body.chars().take(200).collect::<String>()
+                ),
+            });
         }
-        let v: serde_json::Value = r.json().await.map_err(|e| e.without_url().to_string())?;
-        let listed = v.as_array().map_or(0, Vec::len);
-        all.extend(parse_positions(&v)?);
-        if listed < PAGE {
-            break;
+        let v: serde_json::Value = r
+            .json()
+            .await
+            .map_err(|e| PositionsError::other(e.without_url().to_string()))?;
+        let page = parse_positions(&v).map_err(PositionsError::other)?;
+        all.extend(page.rows);
+        match page.next {
+            Some(c) => cursor = Some(c),
+            None => return Ok(all),
         }
     }
-    Ok(all)
+    Err(PositionsError::other(format!(
+        "more than {POSITION_PAGES} pages of positions: not all read"
+    )))
 }
 
-pub fn parse_positions(v: &serde_json::Value) -> Result<Vec<(String, Shares)>, String> {
-    let list = v.as_array().ok_or("positions: an answer without a list")?;
-    Ok(list
-        .iter()
-        .filter_map(|p| {
-            let token = p["asset"].as_str()?.to_owned();
-            let size = match &p["size"] {
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::String(s) => s.clone(),
-                _ => return None,
-            };
-            // the Data API writes floats: round to the micro-share
-            let shares = size
-                .parse::<f64>()
-                .ok()
-                .filter(|x| x.is_finite())
-                .map(|x| Shares::from_micros((x * 1e6).round() as i64))?;
-            Some((token, shares))
-        })
-        .collect())
+/// Pages of [`positions`] read at most (100 positions each).
+pub const POSITION_PAGES: usize = 50;
+
+/// One page of `/v2/positions` ([`parse_positions`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PositionsPage {
+    /// Token id → shares.
+    pub rows: Vec<(String, Shares)>,
+    /// The next page's cursor (`None`: the last page).
+    pub next: Option<String>,
+}
+
+/// One page of `/v2/positions`: its rows (token id → shares) and the next
+/// page's cursor (`None`: the last page). The rows are in `data`; a page's
+/// `pagination.next_cursor` names the next (null on the last), and its
+/// `has_more`, not its length, says whether there is one. A row without a
+/// token or a size fails the page: the check that reads it must not take
+/// an answer it cannot read for an account without positions.
+pub fn parse_positions(v: &serde_json::Value) -> Result<PositionsPage, String> {
+    let list = v
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("an answer without a data list")?;
+    let mut rows = Vec::with_capacity(list.len());
+    for p in list {
+        let token = p.get("token_id").and_then(serde_json::Value::as_str);
+        let size = match p.get("current_size") {
+            Some(serde_json::Value::Number(n)) => n.as_f64(),
+            Some(serde_json::Value::String(s)) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+        .filter(|x| x.is_finite());
+        let (Some(token), Some(size)) = (token, size) else {
+            return Err(format!(
+                "a position without token_id and current_size: {}",
+                p.to_string().chars().take(200).collect::<String>()
+            ));
+        };
+        // the Data API writes floats: round to the micro-share
+        rows.push((
+            token.to_owned(),
+            Shares::from_micros((size * 1e6).round() as i64),
+        ));
+    }
+    let pagination = v.get("pagination");
+    let next = pagination
+        .and_then(|p| p.get("next_cursor"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|c| !c.is_empty())
+        .map(str::to_owned);
+    let more = pagination
+        .and_then(|p| p.get("has_more"))
+        .and_then(serde_json::Value::as_bool);
+    let next = match (more, next) {
+        (Some(false), _) => None,
+        (Some(true), None) => return Err("has_more without a next_cursor".into()),
+        (_, next) => next,
+    };
+    Ok(PositionsPage { rows, next })
 }
 
 #[cfg(test)]
@@ -486,18 +572,63 @@ mod tests {
 
     #[test]
     fn positions_are_read_by_token() {
-        let v = serde_json::json!([
-            {"asset": "123", "size": 10.0, "avgPrice": 0.92, "redeemable": false},
-            {"asset": "456", "size": "5.5"},
-            {"size": 3}
-        ]);
+        let v = serde_json::json!({
+            "data": [
+                {"token_id": "123", "current_size": 10.0, "condition_id": "0xc",
+                 "status": "OPEN", "redeemable": false, "mergeable": false},
+                {"token_id": "456", "current_size": "5.5"}
+            ],
+            "pagination": {"limit": 100, "has_more": true, "next_cursor": "eyJrIjoxfQ=="}
+        });
         assert_eq!(
             parse_positions(&v).unwrap(),
-            vec![
-                ("123".to_owned(), Shares::from_whole(10)),
-                ("456".to_owned(), Shares::from_micros(5_500_000)),
-            ]
+            PositionsPage {
+                rows: vec![
+                    ("123".to_owned(), Shares::from_whole(10)),
+                    ("456".to_owned(), Shares::from_micros(5_500_000)),
+                ],
+                next: Some("eyJrIjoxfQ==".to_owned()),
+            }
         );
-        assert!(parse_positions(&serde_json::json!({})).is_err());
+        // The last page: a null cursor, or has_more false whatever the
+        // cursor says.
+        let last = serde_json::json!({
+            "data": [], "pagination": {"has_more": false, "next_cursor": null}
+        });
+        assert_eq!(parse_positions(&last).unwrap(), PositionsPage::default());
+        let done = serde_json::json!({
+            "data": [], "pagination": {"has_more": false, "next_cursor": "x"}
+        });
+        assert_eq!(parse_positions(&done).unwrap().next, None);
+    }
+
+    /// Nothing the check cannot read passes for an account without
+    /// positions: v1's bare list, a row it cannot read, more pages without
+    /// a cursor to them.
+    #[test]
+    fn positions_it_cannot_read_fail() {
+        for v in [
+            serde_json::json!([{"asset": "123", "size": 10.0}]),
+            serde_json::json!({}),
+            serde_json::json!({"data": [{"asset": "123", "size": 10.0}]}),
+            serde_json::json!({"data": [{"token_id": "123"}]}),
+            serde_json::json!({"data": [{"token_id": "123", "current_size": "ten"}]}),
+            serde_json::json!({"data": [], "pagination": {"has_more": true}}),
+        ] {
+            assert!(parse_positions(&v).is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn client_errors_but_429_are_permanent() {
+        let e = |status| PositionsError {
+            status,
+            message: String::new(),
+        };
+        assert!(e(Some(410)).permanent());
+        assert!(e(Some(400)).permanent());
+        assert!(!e(Some(429)).permanent());
+        assert!(!e(Some(503)).permanent());
+        assert!(!e(None).permanent());
     }
 }

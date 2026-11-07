@@ -442,6 +442,15 @@ async fn paper_report_reads_a_day_back_from_the_database() {
     assert_eq!(plan.from, date, "starts on the first day the service ran");
     let inputs = paper_report::collect(s, &plan).await.unwrap();
     let r = paper_report::build(&inputs, &plan, now);
+    // Read a day at a time (the service's and the CLI's way), the same.
+    let streamed =
+        paper_report::build_from_store(s, &plan, now, &paper_report::DayCache::default())
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&streamed).unwrap(),
+        serde_json::to_value(&r).unwrap()
+    );
     assert_eq!(r.days.len(), 1);
     let d = &r.days[0];
     assert!(!d.in_progress);
@@ -611,5 +620,51 @@ async fn paper_report_reads_a_day_back_from_the_database() {
     assert!(r.days[1].in_progress);
     assert_eq!(r.days[1].weather.reports, 0);
     assert!(paper_report::markdown(&r).contains("## 2026-09-30 Wed — in progress"));
+
+    // A built day is kept once final (two days after it): a decision
+    // recorded later leaves the kept copy as it was, and a fresh build reads
+    // it. The day after, the day is not final yet and is read again.
+    let late = evaluation(
+        6,
+        "2026-09-29T17:58:00Z",
+        &slug,
+        25,
+        &[0.99, 0.01, 0.0, 0.0],
+        &[
+            "A 25°C YES · ask 0.99 · p 0.990 (market 0.985) · EV +0.0000 — ask 0.99 outside [0.90, 0.98]",
+        ],
+    );
+    let day_after = paper_report::DayCache::default();
+    let early = paper_report::build_from_store(s, &plan, now, &day_after)
+        .await
+        .unwrap();
+    let final_at = utc("2026-10-01T08:00:00Z");
+    let one = target
+        .plan(s, Some(date), Some(date), None, final_at)
+        .await
+        .unwrap();
+    let kept = paper_report::DayCache::default();
+    let first = paper_report::build_from_store(s, &one, final_at, &kept)
+        .await
+        .unwrap();
+    s.record_decisions(&run, std::slice::from_ref(&late))
+        .await
+        .unwrap();
+    let again = paper_report::build_from_store(s, &one, final_at, &kept)
+        .await
+        .unwrap();
+    assert_eq!(again.days[0].evaluations, first.days[0].evaluations);
+    let rebuilt =
+        paper_report::build_from_store(s, &one, final_at, &paper_report::DayCache::default())
+            .await
+            .unwrap();
+    assert_eq!(rebuilt.days[0].evaluations, first.days[0].evaluations + 1);
+    let next_morning = paper_report::build_from_store(s, &plan, now, &day_after)
+        .await
+        .unwrap();
+    assert_eq!(
+        next_morning.days[0].evaluations,
+        early.days[0].evaluations + 1
+    );
     db.drop_db().await;
 }

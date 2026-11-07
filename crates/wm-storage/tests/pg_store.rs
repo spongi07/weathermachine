@@ -608,11 +608,12 @@ async fn engine_batch_is_atomic_and_old_book_updates_are_pruned() {
 
     // Retention: old order-book updates and stream heartbeats go, everything
     // else stays.
-    let deleted = s
-        .prune_journal_books(now - Duration::days(7), u64::MAX)
+    let pruned = s
+        .prune_journal_books(None, now - Duration::days(7), u64::MAX)
         .await
         .unwrap();
-    assert_eq!(deleted, 1501);
+    assert_eq!(pruned.deleted, 1501);
+    assert_eq!(pruned.cleared, now - Duration::days(7));
     assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 4);
     assert_eq!(
         count(
@@ -665,25 +666,94 @@ async fn journal_retention_deletes_in_chunks_until_done() {
     let cutoff = now - Duration::days(7);
     let chunk = u64::try_from(wm_storage::JOURNAL_PRUNE_CHUNK).unwrap();
 
+    let deleted = |p: wm_storage::JournalPrune| p.deleted;
     insert_books(s, &run, 1..=2 * chunk, old).await;
     insert_books(s, &run, 2 * chunk + 1..=2 * chunk + 3, now).await;
     assert_eq!(
-        s.prune_journal_books(cutoff, u64::MAX).await.unwrap(),
+        deleted(s.prune_journal_books(None, cutoff, u64::MAX).await.unwrap()),
         2 * chunk
     );
     assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 3);
 
     insert_books(s, &run, 2 * chunk + 4..=3 * chunk + 4, old).await;
     assert_eq!(
-        s.prune_journal_books(cutoff, chunk / 2).await.unwrap(),
+        deleted(
+            s.prune_journal_books(None, cutoff, chunk / 2)
+                .await
+                .unwrap()
+        ),
         chunk / 2
     );
     assert_eq!(
-        s.prune_journal_books(cutoff, u64::MAX).await.unwrap(),
+        deleted(s.prune_journal_books(None, cutoff, u64::MAX).await.unwrap()),
         chunk + 1 - chunk / 2
     );
     assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 3);
-    assert_eq!(s.prune_journal_books(cutoff, u64::MAX).await.unwrap(), 0);
+    assert_eq!(
+        deleted(s.prune_journal_books(None, cutoff, u64::MAX).await.unwrap()),
+        0
+    );
+    db.drop_db().await;
+}
+
+/// A pass deletes the oldest rows first and says up to where none is left:
+/// its cutoff when it finished, its latest deleted row when it stopped at
+/// its maximum (rows of that very instant may be left, so the next pass
+/// searches from it, not after it). A pass searching from there leaves an
+/// older row that came in late; one from the beginning deletes it.
+#[tokio::test]
+async fn journal_retention_searches_on_from_where_the_last_pass_stopped() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let run = RunId::deterministic(23);
+    let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+    s.record_run(&run, RunMode::Paper, "m", &serde_json::json!({}), now)
+        .await
+        .unwrap();
+    let old = now - Duration::days(10);
+    let cutoff = now - Duration::days(7);
+    let chunk = u64::try_from(wm_storage::JOURNAL_PRUNE_CHUNK).unwrap();
+
+    // 1.5 chunks of old rows, one millisecond apart from `old` on.
+    insert_books(s, &run, 1..=chunk + chunk / 2, old).await;
+    insert_books(s, &run, chunk + chunk / 2 + 1..=chunk + chunk / 2 + 2, now).await;
+    // Capped mid chunk: the oldest go, the pass stops at the latest deleted.
+    let capped = s
+        .prune_journal_books(None, cutoff, chunk + 10)
+        .await
+        .unwrap();
+    assert_eq!(capped.deleted, chunk + 10);
+    let i = i64::try_from(chunk + 10).unwrap();
+    assert_eq!(capped.cleared, old + Duration::milliseconds(i));
+    assert_eq!(
+        count(
+            s,
+            "SELECT count(*) FROM event_journal WHERE kind = 'order_book_update'"
+        )
+        .await,
+        i64::try_from(chunk / 2 - 10 + 2).unwrap()
+    );
+    // Going on from there takes the rest and clears up to the cutoff.
+    let rest = s
+        .prune_journal_books(Some(capped.cleared), cutoff, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(rest.deleted, chunk / 2 - 10);
+    assert_eq!(rest.cleared, cutoff);
+
+    // A row older than the bound, written after it was cleared, stays for a
+    // pass from the bound and goes with one from the beginning.
+    let late_seq = chunk + chunk / 2 + 3;
+    insert_books(s, &run, late_seq..=late_seq, old).await;
+    let bounded = s
+        .prune_journal_books(Some(rest.cleared), cutoff, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!((bounded.deleted, bounded.cleared), (0, cutoff));
+    let full = s.prune_journal_books(None, cutoff, u64::MAX).await.unwrap();
+    assert_eq!((full.deleted, full.cleared), (1, cutoff));
+    // Recent rows stay.
+    assert_eq!(count(s, "SELECT count(*) FROM event_journal").await, 2);
     db.drop_db().await;
 }
 

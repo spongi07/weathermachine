@@ -8,7 +8,7 @@
 use chrono::{Duration, Utc};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, watch};
-use wiremock::matchers::{method, path, path_regex, query_param};
+use wiremock::matchers::{method, path, path_regex, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use wm_core::event::{EventEnvelope, WeatherMachineEvent};
 use wm_core::ids::{ClientOrderId, TokenId};
@@ -72,6 +72,14 @@ async fn venue(country: &str) -> MockServer {
     s
 }
 
+/// A last page of the Data API v2's `/v2/positions`.
+fn positions_page(rows: serde_json::Value) -> ResponseTemplate {
+    json(serde_json::json!({
+        "data": rows,
+        "pagination": { "limit": 100, "has_more": false, "next_cursor": null }
+    }))
+}
+
 async fn no_orders_or_positions(s: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/data/orders"))
@@ -79,8 +87,8 @@ async fn no_orders_or_positions(s: &MockServer) {
         .mount(s)
         .await;
     Mock::given(method("GET"))
-        .and(path("/positions"))
-        .respond_with(json(serde_json::json!([])))
+        .and(path("/v2/positions"))
+        .respond_with(positions_page(serde_json::json!([])))
         .mount(s)
         .await;
 }
@@ -322,8 +330,8 @@ async fn an_earlier_runs_leftover_on_a_weather_market_is_cancelled() {
         .mount(&s)
         .await;
     Mock::given(method("GET"))
-        .and(path("/positions"))
-        .respond_with(json(serde_json::json!([])))
+        .and(path("/v2/positions"))
+        .respond_with(positions_page(serde_json::json!([])))
         .mount(&s)
         .await;
     let mut h = start(&s);
@@ -351,10 +359,10 @@ async fn shares_the_venue_holds_beyond_the_books_keep_the_venue_closed() {
         .mount(&s)
         .await;
     Mock::given(method("GET"))
-        .and(path("/positions"))
-        .respond_with(json(serde_json::json!([
-            { "asset": TOKEN, "size": 10.0 },
-            { "asset": "a-btc-token", "size": 5.0 }
+        .and(path("/v2/positions"))
+        .respond_with(positions_page(serde_json::json!([
+            { "token_id": TOKEN, "current_size": 10.0, "status": "OPEN" },
+            { "token_id": "a-btc-token", "current_size": 5.0, "status": "OPEN" }
         ])))
         .mount(&s)
         .await;
@@ -410,8 +418,59 @@ async fn a_venue_list_short_of_the_books_warns_without_blocking() {
     stop(h).await;
 }
 
-/// The Data API lists 500 positions a page, the most shares first: a live
-/// position of ten shares on an account of many markets is on a later page.
+/// 2 November 2026: Data API v1 was retired and its routes answer 410. The
+/// venue stays closed and says why, the operator hears it once, and the
+/// positions are not asked for again every 30 seconds.
+#[tokio::test]
+async fn positions_that_cannot_be_read_keep_the_venue_closed_and_back_off() {
+    let s = venue("NL").await;
+    Mock::given(method("GET"))
+        .and(path("/data/orders"))
+        .respond_with(json(serde_json::json!([])))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/positions"))
+        .respond_with(ResponseTemplate::new(410).set_body_json(serde_json::json!({
+            "error": "Data API v1 has been retired"
+        })))
+        .mount(&s)
+        .await;
+    let mut h = start(&s);
+    h.commands.send(Command::Book(book(&[]))).await.unwrap();
+    let st = wait_status(&mut h, "closed for the positions", |st| {
+        st.blockers
+            .iter()
+            .any(|b| b.contains("positions not compared: the venue's list failed (http 410"))
+    })
+    .await;
+    assert!(!st.ready);
+    // Long enough for several 30-second retries were they 30 ms apart:
+    // the loop ticks often, a retry waits for its time.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let asked = s
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v2/positions")
+        .count();
+    assert_eq!(asked, 1, "asked again within half an hour");
+    let mut warned = Vec::new();
+    while let Ok((level, text)) = h._alerts.try_recv() {
+        if text.contains("positions cannot be read") {
+            warned.push((level, text));
+        }
+    }
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert_eq!(warned[0].0, "warning");
+    assert!(warned[0].1.contains("live stays closed"), "{}", warned[0].1);
+    stop(h).await;
+}
+
+/// The Data API lists positions a page at a time, the most shares first,
+/// each page naming the next one's cursor: a live position of ten shares on
+/// an account of many markets is on a later page.
 #[tokio::test]
 async fn the_venue_positions_are_read_page_by_page() {
     let s = venue("NL").await;
@@ -420,19 +479,25 @@ async fn the_venue_positions_are_read_page_by_page() {
         .respond_with(json(serde_json::json!([])))
         .mount(&s)
         .await;
-    let first: Vec<serde_json::Value> = (0..500)
-        .map(|i| serde_json::json!({ "asset": format!("other-{i}"), "size": 100.0 }))
+    let first: Vec<serde_json::Value> = (0..100)
+        .map(|i| serde_json::json!({ "token_id": format!("other-{i}"), "current_size": 100.0 }))
         .collect();
     Mock::given(method("GET"))
-        .and(path("/positions"))
-        .and(query_param("offset", "0"))
-        .respond_with(json(serde_json::Value::Array(first)))
+        .and(path("/v2/positions"))
+        .and(query_param("user", PROXY))
+        .and(query_param_is_missing("cursor"))
+        .respond_with(json(serde_json::json!({
+            "data": first,
+            "pagination": { "limit": 100, "has_more": true, "next_cursor": "c2/+=" }
+        })))
         .mount(&s)
         .await;
     Mock::given(method("GET"))
-        .and(path("/positions"))
-        .and(query_param("offset", "500"))
-        .respond_with(json(serde_json::json!([{ "asset": TOKEN, "size": 10.0 }])))
+        .and(path("/v2/positions"))
+        .and(query_param("cursor", "c2/+="))
+        .respond_with(positions_page(serde_json::json!([
+            { "token_id": TOKEN, "current_size": 10.0 }
+        ])))
         .mount(&s)
         .await;
     let mut h = start(&s);

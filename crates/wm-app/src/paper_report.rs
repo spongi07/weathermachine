@@ -120,17 +120,19 @@ impl ReportTarget {
 
 /// Serves the report from the running service (the dashboard's
 /// `/api/v1/report/paper`): one report at a time, the latest reused for a
-/// minute, at most [`ReportService::MAX_DAYS`] days.
+/// minute, at most [`ReportService::MAX_DAYS`] days, the days that can no
+/// longer change kept ([`DayCache`]).
 pub struct ReportService {
     store: PgStore,
     target: ReportTarget,
     clock: Arc<dyn Clock>,
     last: tokio::sync::Mutex<Option<CachedReport>>,
+    days: DayCache,
 }
 
 struct CachedReport {
     made: std::time::Instant,
-    key: (Option<NaiveDate>, Option<NaiveDate>),
+    key: (Option<NaiveDate>, Option<NaiveDate>, i64),
     report: Arc<PaperReport>,
 }
 
@@ -144,6 +146,7 @@ impl ReportService {
             target,
             clock,
             last: tokio::sync::Mutex::new(None),
+            days: DayCache::default(),
         }
     }
 
@@ -153,14 +156,30 @@ impl ReportService {
         self.report(None, None).await
     }
 
+    /// The latest `days` days of [`Self::latest`] (a strategy's log shows
+    /// no more).
+    pub async fn recent(&self, days: i64) -> Result<Arc<PaperReport>> {
+        self.capped(None, None, days.clamp(1, Self::MAX_DAYS)).await
+    }
+
     pub async fn report(
         &self,
         from: Option<NaiveDate>,
         to: Option<NaiveDate>,
     ) -> Result<Arc<PaperReport>> {
+        self.capped(from, to, Self::MAX_DAYS).await
+    }
+
+    async fn capped(
+        &self,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+        max_days: i64,
+    ) -> Result<Arc<PaperReport>> {
+        let key = (from, to, max_days);
         let mut last = self.last.lock().await;
         if let Some(c) = last.as_ref()
-            && c.key == (from, to)
+            && c.key == key
             && c.made.elapsed() < Self::REUSE
         {
             return Ok(Arc::clone(&c.report));
@@ -168,16 +187,54 @@ impl ReportService {
         let now = self.clock.now();
         let plan = self
             .target
-            .plan(&self.store, from, to, Some(Self::MAX_DAYS), now)
+            .plan(&self.store, from, to, Some(max_days), now)
             .await?;
-        let inputs = collect(&self.store, &plan).await?;
-        let report = Arc::new(build(&inputs, &plan, now));
+        let report = Arc::new(build_from_store(&self.store, &plan, now, &self.days).await?);
         *last = Some(CachedReport {
             made: std::time::Instant::now(),
-            key: (from, to),
+            key,
             report: Arc::clone(&report),
         });
         Ok(report)
+    }
+}
+
+/// The days of reports already built that can no longer change: a day is
+/// final [`DayCache::FINAL_AFTER_DAYS`] days after it (its orders have
+/// ended, as the next day's market closes the day after, and its last
+/// reports and settlement are in). Built from the same rows, a final day
+/// reads the same in every report that holds it ([`collect`] reads fills
+/// and orders [`SETTLEMENT_MARGIN_DAYS`] before the first day).
+#[derive(Default)]
+pub struct DayCache(std::sync::Mutex<BTreeMap<NaiveDate, DayReport>>);
+
+impl DayCache {
+    pub const FINAL_AFTER_DAYS: i64 = 2;
+    /// Days kept, the oldest dropped first: two reports of the longest
+    /// span.
+    const MAX_DAYS: usize = 2 * ReportService::MAX_DAYS as usize;
+
+    fn get(&self, date: NaiveDate) -> Option<DayReport> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&date)
+            .cloned()
+    }
+
+    /// Keep `day` if it is final by `today`.
+    fn put(&self, day: &DayReport, today: NaiveDate) {
+        if day.date + Duration::days(Self::FINAL_AFTER_DAYS) > today {
+            return;
+        }
+        let mut days = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        days.insert(day.date, day.clone());
+        while days.len() > Self::MAX_DAYS {
+            days.pop_first();
+        }
     }
 }
 
@@ -198,10 +255,28 @@ pub struct ReportInputs {
     pub system: Vec<ReportSystemEvent>,
 }
 
+/// Fills and orders are read from this many days before the first day: a
+/// bid can rest from the evening before on the next day's market, and its
+/// fill settles on that market's day, which then reads the same whichever
+/// day the report starts on.
+const SETTLEMENT_MARGIN_DAYS: i64 = 2;
+
 /// Read everything the plan's days need.
 pub async fn collect(store: &PgStore, plan: &PaperReportPlan) -> Result<ReportInputs> {
+    let mut inputs = collect_shared(store, plan).await?;
     let (start, _) = local_day_bounds(plan.from, plan.tz);
     let (_, end) = local_day_bounds(plan.to, plan.tz);
+    inputs.decisions = store.report_decisions(&plan.location, start, end).await?;
+    Ok(inputs)
+}
+
+/// Everything but the decisions, which are nearly all of a report's rows
+/// (1.9 million in 31 days in November 2026, most of the lab's):
+/// [`build_from_store`] reads those a day at a time.
+async fn collect_shared(store: &PgStore, plan: &PaperReportPlan) -> Result<ReportInputs> {
+    let (start, _) = local_day_bounds(plan.from, plan.tz);
+    let (_, end) = local_day_bounds(plan.to, plan.tz);
+    let settled_from = start - Duration::days(SETTLEMENT_MARGIN_DAYS);
     let observations = store.report_observations(&plan.station, start, end).await?;
     let outcomes = store
         .report_outcomes(&plan.location, plan.from, plan.to)
@@ -221,11 +296,15 @@ pub async fn collect(store: &PgStore, plan: &PaperReportPlan) -> Result<ReportIn
         forecasts: store
             .report_forecasts(start - Duration::days(1), end)
             .await?,
-        decisions: store.report_decisions(&plan.location, start, end).await?,
+        decisions: Vec::new(),
         outcomes,
         books,
-        orders: store.report_orders(&plan.location, start, end).await?,
-        fills: store.report_fills(&plan.location, start, end).await?,
+        orders: store
+            .report_orders(&plan.location, settled_from, end)
+            .await?,
+        fills: store
+            .report_fills(&plan.location, settled_from, end)
+            .await?,
         requests: store.report_requests(plan.tz.name(), start, end).await?,
         health: store.report_health_changes(start, end).await?,
         system: store.report_system_events(start, end).await?,
@@ -518,6 +597,56 @@ pub struct Totals {
 
 /// Build the report from its inputs (pure).
 pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) -> PaperReport {
+    let settled = settled(inputs, plan, now);
+    let days = dates(plan)
+        .map(|date| day_report(inputs, plan, date, &settled))
+        .collect();
+    assemble(days, inputs, plan, now)
+}
+
+/// [`build`] from the database, reading the decisions a day at a time (a
+/// day's are dropped before the next day's are read) and taking the days
+/// `cache` holds from it.
+pub async fn build_from_store(
+    store: &PgStore,
+    plan: &PaperReportPlan,
+    now: DateTime<Utc>,
+    cache: &DayCache,
+) -> Result<PaperReport> {
+    let mut inputs = collect_shared(store, plan).await?;
+    let settled = settled(&inputs, plan, now);
+    let mut days = Vec::new();
+    for date in dates(plan) {
+        if let Some(day) = cache.get(date) {
+            days.push(day);
+            continue;
+        }
+        let (start, end) = local_day_bounds(date, plan.tz);
+        inputs.decisions = store.report_decisions(&plan.location, start, end).await?;
+        let day = day_report(&inputs, plan, date, &settled);
+        inputs.decisions = Vec::new();
+        cache.put(&day, settled.today);
+        days.push(day);
+    }
+    Ok(assemble(days, &inputs, plan, now))
+}
+
+/// The plan's local dates, oldest first.
+fn dates(plan: &PaperReportPlan) -> impl Iterator<Item = NaiveDate> + '_ {
+    std::iter::successors(Some(plan.from), |d| d.succ_opt()).take_while(|d| *d <= plan.to)
+}
+
+/// What every day of a report reads beside its own rows: the tokens of the
+/// markets and the settled P&L per market day.
+struct Settled {
+    today: NaiveDate,
+    tokens: HashMap<String, TokenInfo>,
+    /// The main book's.
+    pnl: HashMap<NaiveDate, f64>,
+    by_strategy: HashMap<NaiveDate, BTreeMap<String, f64>>,
+}
+
+fn settled(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) -> Settled {
     let today = local_date(now, plan.tz);
     let tokens = token_index(&inputs.outcomes);
     let highs: HashMap<NaiveDate, i32> = daily_highs(&inputs.observations, plan.tz)
@@ -542,28 +671,50 @@ pub fn build(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) 
         .collect();
     let pnl = settle(&main_fills, &tokens, &highs, today);
     let by_strategy = settle_by_strategy(&inputs.fills, &inputs.orders, &tokens, &highs, today);
-    let mut days = Vec::new();
-    let mut date = plan.from;
-    while date <= plan.to {
-        let mut day = build_day(inputs, plan, date, date >= today, &tokens, &pnl);
-        day.strategy_pnl = by_strategy.get(&date).cloned().unwrap_or_default();
-        let lab: Vec<f64> = day
-            .strategy_pnl
-            .iter()
-            .filter(|(k, _)| wm_strategy::lab::is_lab_id(k))
-            .map(|(_, v)| *v)
-            .collect();
-        day.lab_pnl_usd = (!lab.is_empty()).then(|| lab.iter().sum());
-        day.live_pnl_usd = day
-            .strategy_pnl
-            .get(wm_strategy::tail_seller::LIVE_ID)
-            .copied();
-        days.push(day);
-        match date.succ_opt() {
-            Some(d) => date = d,
-            None => break,
-        }
+    Settled {
+        today,
+        tokens,
+        pnl,
+        by_strategy,
     }
+}
+
+/// One day of the report; `inputs` holds (at least) that day's decisions.
+fn day_report(
+    inputs: &ReportInputs,
+    plan: &PaperReportPlan,
+    date: NaiveDate,
+    settled: &Settled,
+) -> DayReport {
+    let mut day = build_day(
+        inputs,
+        plan,
+        date,
+        date >= settled.today,
+        &settled.tokens,
+        &settled.pnl,
+    );
+    day.strategy_pnl = settled.by_strategy.get(&date).cloned().unwrap_or_default();
+    let lab: Vec<f64> = day
+        .strategy_pnl
+        .iter()
+        .filter(|(k, _)| wm_strategy::lab::is_lab_id(k))
+        .map(|(_, v)| *v)
+        .collect();
+    day.lab_pnl_usd = (!lab.is_empty()).then(|| lab.iter().sum());
+    day.live_pnl_usd = day
+        .strategy_pnl
+        .get(wm_strategy::tail_seller::LIVE_ID)
+        .copied();
+    day
+}
+
+fn assemble(
+    days: Vec<DayReport>,
+    inputs: &ReportInputs,
+    plan: &PaperReportPlan,
+    now: DateTime<Utc>,
+) -> PaperReport {
     let totals = totals(&days, inputs, plan);
     PaperReport {
         generated_at: now,

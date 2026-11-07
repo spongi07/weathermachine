@@ -56,7 +56,15 @@ hold; the dashboard's LIVE panel lists the ones that do not:
    block; an alert names what is short. On 13 October, after a restart at
    23:38 UTC, the list held neither live position, most likely because it
    was read as one page of 500, the most shares first, on an account of
-   many markets; it is read page by page now;
+   many markets; it is read page by page now. The list comes from the Data
+   API v2 (`GET /v2/positions`, 100 positions a page along its cursor).
+   Until it is read the venue stays closed: an answer it cannot read (a row
+   without `token_id` and `current_size`, more than 50 pages) never passes
+   for an account without positions. A client error is asked again every
+   30 minutes, not every 30 seconds, with one alert ("the venue's positions
+   cannot be read …: live stays closed"): Data API v1 was retired on
+   2 November 2026 and its `/positions` answered 410 every 31 seconds,
+   which kept G_live closed until this build;
 8. no order of unknown fate (an answer that proves nothing waits for the
    order's record; one without a record ten seconds after it was sent was
    never placed);

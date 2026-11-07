@@ -845,8 +845,9 @@ async fn report_paper(
         "paper run of {} ({}) from {} to {}",
         plan.location, plan.station, plan.from, plan.to
     );
-    let inputs = paper_report::collect(&store, &plan).await?;
-    let report = paper_report::build(&inputs, &plan, now);
+    let report =
+        paper_report::build_from_store(&store, &plan, now, &paper_report::DayCache::default())
+            .await?;
     let md = paper_report::markdown(&report);
     let md_path = out.unwrap_or_else(|| {
         PathBuf::from(&cfg.file.model.auto_train.data_dir)
