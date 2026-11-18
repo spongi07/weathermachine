@@ -12,7 +12,7 @@ use wm_core::forecast::ForecastProduct;
 use wm_core::health::{ProviderHealthSnapshot, ProviderHealthState};
 use wm_core::ids::{LocationId, ProviderId, RunId, StationId};
 use wm_core::market::{BookLevel, DailyTemperatureMarket, OrderBook, OutcomeSide, Side};
-use wm_core::resolution::ObservationFilter;
+use wm_core::resolution::{ObservationFilter, ResolutionSourceKind};
 use wm_core::synthetic::{synthetic_book, synthetic_temperature_market};
 use wm_core::trading::RunMode;
 use wm_core::units::{Price, Shares, TempC, Usd};
@@ -371,6 +371,83 @@ fn paper_lifecycle_signal_risk_fill_settle() {
         "a forgotten market's closed positions leave the snapshot"
     );
     assert_eq!(snap.stats.fills_total, 3);
+}
+
+/// A special report (SPECI) at `t` (available three minutes later).
+fn speci_event(t: &str, whole: i32) -> EventEnvelope {
+    let mut e = obs_event(t, whole);
+    if let WeatherMachineEvent::WeatherObservation(o) = &mut e.event {
+        o.observation.key.report_type = ReportType::Speci;
+        o.observation.raw_text = format!("SPECI {}", o.observation.raw_text);
+        o.observation.content_hash = format!("speci {t}");
+    }
+    e
+}
+
+/// Polymarket's AWC METAR rules (Amsterdam's from the market of 23
+/// October 2026 on) count routine reports only: a SPECI warmer than every
+/// routine report moves neither the trades nor the settlement there, as it
+/// does where every report counts. The market trades: until the parser
+/// knew these rules, the risk check refused every order on them.
+#[test]
+fn a_warm_special_report_counts_for_nothing_on_the_routine_only_rules() {
+    let awc = |filters: Vec<ObservationFilter>| {
+        let mut m = market(filters);
+        m.resolution.source = ResolutionSourceKind::AwcMetar {
+            station: "EHAM".into(),
+            url: "https://aviationweather.gov/api/data/metar?ids=EHAM&format=raw".into(),
+        };
+        m
+    };
+    let with_speci = |m: &DailyTemperatureMarket| {
+        let mut events = scenario(m, Some(ProviderHealthState::Healthy));
+        // 14:10 local, 20 °C, between the 18 °C routine reports.
+        let at = events
+            .iter()
+            .position(|e| e.available_at == utc("2026-07-01T12:28:00Z"))
+            .unwrap();
+        events.insert(at, speci_event("2026-07-01T12:10:00Z", 20));
+        events
+    };
+    let model = || Arc::new(FixedModel(vec![0.985, 0.012, 0.002, 0.001]));
+    let routine = awc(vec![ObservationFilter::RoutineOnly]);
+    assert!(routine.resolution.is_machine_tradable());
+    let mut base = Engine::new(config(RunMode::Paper), model());
+    let base_out = run(
+        &mut base,
+        scenario(&routine, Some(ProviderHealthState::Healthy)),
+        routine.fees,
+    );
+    let mut engine = Engine::new(config(RunMode::Paper), model());
+    let out = run(&mut engine, with_speci(&routine), routine.fees);
+    // The trades without their order ids: the SPECI's own evaluation takes
+    // a decision id.
+    let trades = |outs: &[EngineOutput]| -> Vec<String> {
+        approvals(outs)
+            .iter()
+            .map(|a| a.rsplit_once(' ').map_or(a.clone(), |(t, _)| t.to_owned()))
+            .collect()
+    };
+    assert_eq!(trades(&out), ["18°C Yes", "19°C No", "20°C No"]);
+    assert_eq!(
+        trades(&out),
+        trades(&base_out),
+        "the SPECI changes no trade"
+    );
+    assert_eq!(engine.final_value(&routine.event_slug), Some(18));
+    // A filter the configuration confirms for the NOAA table's rows does not
+    // replace the one these rules state.
+    let mut cfg = config(RunMode::Paper);
+    cfg.locations[0].confirmed_filter = Some(ObservationFilter::AllRows);
+    let mut confirmed = Engine::new(cfg, model());
+    let out = run(&mut confirmed, with_speci(&routine), routine.fees);
+    assert_eq!(trades(&out), trades(&base_out));
+    assert_eq!(confirmed.final_value(&routine.event_slug), Some(18));
+    // Where every report counts, the same SPECI is the day's high.
+    let all = awc(vec![ObservationFilter::AllRows]);
+    let mut every = Engine::new(config(RunMode::Paper), model());
+    run(&mut every, with_speci(&all), all.fees);
+    assert_eq!(every.final_value(&all.event_slug), Some(20));
 }
 
 /// A book wider than the risk check allows: the proposal waits in its

@@ -184,8 +184,19 @@ pub async fn live_settled_before(
                 ts: r.ts,
             })
             .collect();
+        let routine_only =
+            crate::paper_report::routine_only_days(store, ids.location.as_str(), tz, from, to)
+                .await
+                .context("loading the live twin's market rules")?;
         let today = wm_core::time::local_date(now, tz);
-        total += crate::paper_report::settled_total(&fills, &outcomes, &observations, tz, today);
+        total += crate::paper_report::settled_total(
+            &fills,
+            &outcomes,
+            &observations,
+            &routine_only,
+            tz,
+            today,
+        );
     }
     Ok(Usd::from_micros((total * 1e6).round() as i64))
 }

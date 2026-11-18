@@ -222,6 +222,64 @@ async fn get(app: &axum::Router, uri: &str) -> (u16, String, String) {
     (status, ctype, String::from_utf8_lossy(&body).into_owned())
 }
 
+/// Which days count routine reports only is read from each market's stored
+/// rules with the parser the runtime trades on; a stored parse of an older
+/// parser follows the current one when the market is stored again.
+#[tokio::test]
+async fn routine_only_days_come_from_the_stored_rules() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let tz = chrono_tz::Europe::Amsterdam;
+    let location = LocationId::new("amsterdam").unwrap();
+    let market = |date: NaiveDate| {
+        synthetic_temperature_market(
+            &location,
+            &eham(),
+            date,
+            tz,
+            5,
+            15,
+            utc("2026-11-18T20:00:00Z"),
+        )
+    };
+    let noaa_day = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    s.upsert_market(&market(noaa_day), None).await.unwrap();
+    let awc_day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+    let mut awc = market(awc_day);
+    awc.rules = wm_core::resolution::RulesText::new(
+        include_str!("../../wm-polymarket/src/fixtures/rules_eham_awc_metar.txt"),
+        Some(
+            "https://aviationweather.gov/api/data/metar?ids=EHAM&format=raw&date=2026-11-20T02:00:00Z&hours=30"
+                .to_owned(),
+        ),
+    );
+    // Stored first as the previous parser left it.
+    awc.resolution.source = wm_core::resolution::ResolutionSourceKind::Unrecognized {
+        description: "no known resolution source found".into(),
+    };
+    awc.resolution.rules_sha256 = awc.rules.sha256.clone();
+    s.upsert_market(&awc, None).await.unwrap();
+    let days = paper_report::routine_only_days(s, "amsterdam", tz, noaa_day, awc_day)
+        .await
+        .unwrap();
+    assert_eq!(days, std::collections::HashSet::from([awc_day]));
+    let stored_source = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT parsed_spec->'source'->>'kind' FROM market_rules WHERE rules_sha256 = $1",
+        )
+        .bind(&awc.rules.sha256)
+        .fetch_one(s.pool())
+        .await
+        .unwrap()
+    };
+    assert_eq!(stored_source().await, "unrecognized");
+    awc.resolution =
+        wm_polymarket::parse_resolution_spec(&awc.rules, tz, wm_core::market::TempUnit::Celsius);
+    s.upsert_market(&awc, None).await.unwrap();
+    assert_eq!(stored_source().await, "awc_metar");
+    db.drop_db().await;
+}
+
 #[tokio::test]
 async fn paper_report_reads_a_day_back_from_the_database() {
     let Some(db) = fresh().await else { return };

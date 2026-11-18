@@ -54,6 +54,14 @@ pub struct ReportOutcome {
     pub taker_fee_rate_micros: i32,
 }
 
+/// A market's rules as stored, by its local date.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportMarketRules {
+    pub local_date: NaiveDate,
+    pub text: String,
+    pub resolution_source_url: Option<String>,
+}
+
 /// Top of a recorded order book.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReportBookTop {
@@ -297,6 +305,35 @@ impl PgStore {
                     yes_token: r.try_get("yes_token")?,
                     no_token: r.try_get("no_token")?,
                     taker_fee_rate_micros: r.try_get("taker_fee_rate_micros")?,
+                })
+            })
+            .collect()
+    }
+
+    /// The rules of a location's markets of `[from, to]` (local dates).
+    pub async fn report_market_rules(
+        &self,
+        location: &str,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<ReportMarketRules>> {
+        let rows = sqlx::query(
+            "SELECT m.local_date, r.text, r.resolution_source_url
+             FROM markets m JOIN market_rules r ON r.rules_sha256 = m.rules_sha256
+             WHERE m.location_id = $1 AND m.local_date >= $2 AND m.local_date <= $3
+             ORDER BY m.local_date",
+        )
+        .bind(location)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(ReportMarketRules {
+                    local_date: r.try_get("local_date")?,
+                    text: r.try_get("text")?,
+                    resolution_source_url: r.try_get("resolution_source_url")?,
                 })
             })
             .collect()

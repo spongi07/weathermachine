@@ -22,7 +22,11 @@ arrival_window_secs = 720
 event_slug_template = "highest-temperature-in-amsterdam-on-{month}-{day}-{year}"
 unit = "celsius"
 taker_fee_rate = "0.05"           # Polymarket weather category (2026); overridden by API data when available
-expected_resolution_url = "https://www.weather.gov/wrh/timeseries?site=eham"
+# From the market of 23 October 2026 on Polymarket resolves on the AWC
+# METARs (routine reports only); until then on the NOAA WRH timeseries.
+expected_resolution_url = "https://aviationweather.gov/api/data/metar?ids=EHAM"
+# Only for markets on the NOAA WRH rules: the AWC METAR rules state their
+# own filter, and a confirmed one does not replace it.
 # confirmed_filter = "hourly_nws_faa"   # set ONLY after Phase 0 verifies which WRH rows count
 
 [observation_sources]

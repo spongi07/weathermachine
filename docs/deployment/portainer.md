@@ -421,8 +421,9 @@ everything. The report reads it back, day by day:
 * requests, failures and latency per provider, health changes and logged
   events.
 
-Outcomes are judged by the METAR high, as paper settlement does; today is
-provisional. It only reads.
+Outcomes are judged by the METAR high, as paper settlement does (from the
+market of 23 October 2026 on, as its rules say, routine reports only: a
+SPECI does not count); today is provisional. It only reads.
 
 **In the browser (easiest).** Open `http://<host>:<port>/api/v1/report/paper`
 (the dashboard's address; Basic auth applies if you set it). It covers the
@@ -515,6 +516,7 @@ path prefix.
 | Alert "disk nearly full: … GB free" (**DISK** pill amber) | Under `WM_DISK_WARN_FREE_GB` free: free space before it fills, [Disk full](#disk-full). |
 | Alert "disk almost full: … Order books … are not written" (**DISK … BOOKS OFF**) | Under `WM_DISK_BRAKE_FREE_GB` free the journal's book updates and the market history are not written (exact replay and the history have a gap); trading records are. They are written again 0.5 GB above the threshold ("order books are written again"). Free space: [Disk full](#disk-full). |
 | `weather-machine` restarts by itself; `docker stats` shows its memory at the limit | Read the hourly `memory:` part of the `disk:` lines (see *Memory* in [Operations](#5-operations)). A resident size that keeps growing hour after hour is a leak: send those lines. A container at its limit with the app well under it is page cache, not the cause. On the host, `docker inspect --format '{{.RestartCount}} {{.State.OOMKilled}} {{.State.ExitCode}} {{.State.FinishedAt}}' <container>` says how often and how it last stopped (`OOMKilled` `true`: the memory limit stopped it). |
+| No orders at all; the proposals' reasons read `ResolutionSpec: resolution rules not machine-tradable (review required)`; `market discovered/updated … tradable=false` in the log | The day's market has rules the parser does not know, so the risk check refuses every opening order, paper and live. From 23 October 2026 Polymarket's Amsterdam rules read the AWC METARs: an image whose rules parser is older than version 2 (before 19 November 2026) does not know them: four weeks without a trade. Update it. A newer wording than the one the parser knows stops trading the same way until the parser is updated: the stored text is in `market_rules` (`SELECT text FROM market_rules r JOIN markets m USING (rules_sha256) WHERE m.local_date = current_date`). |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
 | Providers *throttled* / *unavailable* | The rate limiter backs off (Retry-After honoured, circuit breaker); trading of that station stays blocked until data is healthy and fresh. Do not lower the polling floors. |

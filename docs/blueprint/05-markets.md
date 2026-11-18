@@ -16,10 +16,10 @@
 ```rust
 pub struct RulesText { text, resolution_source_url, sha256 }        // verbatim + SHA-256
 pub struct ResolutionSpec {
-    source: ResolutionSourceKind,        // NoaaWrhTimeseries{site,url} | WundergroundDaily | Knmi | Unrecognized
+    source: ResolutionSourceKind,        // NoaaWrhTimeseries{site,url} | AwcMetar{station,url} | WundergroundDaily | Knmi | Unrecognized
     fallback: Option<ResolutionSourceKind>,
     extreme: MarketExtreme, unit: TempUnit, whole_degrees: bool, timezone,
-    filters: Vec<ObservationFilter>,     // AllRows | MinuteWindow{start,end}
+    filters: Vec<ObservationFilter>,     // AllRows | MinuteWindow{start,end} | RoutineOnly
     filter_certainty: FilterCertainty,   // Unconfirmed until Phase 0
     revision_policy: RevisionPolicy,     // e.g. until the next day's first datapoint
     unrecognized_clauses: Vec<String>,   // any ⇒ not machine-tradable
@@ -34,6 +34,29 @@ pub struct ResolutionSpec {
   exclusions, averages, METAR/SPECI, sensors, voids/cancellations, 50-50
   outcomes, station changes. Any unrecognised clause makes the market
   non-tradable until a human approves that exact rules hash.
+* **The AWC METAR rules (KNOWN FACT, from Amsterdam's market of 23 October
+  2026 on).** Polymarket replaced the NOAA timeseries with the Aviation
+  Weather Center's METARs (`aviationweather.gov/api/data/metar?ids=EHAM`):
+  the highest temperature of any *routine* report on the station's local
+  day (one off the nominal hour or without a label counts, a SPECI does
+  not), the T-group's tenths where a report carries one, else the body's
+  whole degrees, rounded half up (16.5 → 17, −8.5 → −8); revisions until
+  the next day's first report; Weather Underground if AWC has no report by
+  11:59 PM ET the next day. The parser (version 2) knows this text clause
+  by clause (`AWC_METAR_CLAUSES`): every clause must be there, word for
+  word but for the station, the date and the PDF link, and any other
+  risky sentence is unrecognised, so a change of wording stops trading
+  again until it is reviewed. Its filter `RoutineOnly` leaves the SPECIs
+  out of the day's high for the strategies, the paper settlement, the
+  report and the live twin's loss stop; a `confirmed_filter` in a
+  location's configuration (for the NOAA table's rows) does not replace it. Until the parser knew it, every
+  market from 23 October on was "unrecognized" and the risk check refused
+  every opening order (`ResolutionSpec: resolution rules not
+  machine-tradable`): four weeks without a trade, paper or live. Every
+  day's text names its date, so approving by hash would have taken an
+  approval a day. EHAM's METARs carry no T-group, so the body's whole
+  degrees count, as the METAR parser reads them; one that disagreed with
+  its body would still be read by the body.
 * **Multiple views.** Every candidate filter becomes a *view*. Unless the
   filter is confirmed, the engine requires every view to be evaluable and to
   agree on the day's high. It uses the minimum win probability and the
@@ -47,7 +70,14 @@ prior approval. An unknown source kind means the market is never traded. A
 parser upgrade bumps `RULES_PARSER_VERSION`.
 **TESTING.** Parser tests on verbatim NOAA, Weather Underground and KNMI
 Amsterdam rules, risky-word detection without false positives ("underground",
-"specified"), and approval round-trip in PostgreSQL.
+"specified"), and approval round-trip in PostgreSQL. The AWC METAR rules:
+the stored text of 19 November 2026 (`wm-polymarket/src/fixtures`) parses
+machine-tradable on any date; a changed, missing or added clause, a date
+that hides a clause, or another station does not (`rules.rs`); a SPECI
+warmer than every routine report changes no trade and no settlement
+(`wm-engine/tests/engine_scenarios.rs`), nor the day's high in the state
+engine and the report; the days on these rules are read from the stored
+rules, whose stored parse follows the parser (`wm-app/tests/paper_report.rs`).
 
 ## 19. ForecastProvider and the day-1 forecast feature
 

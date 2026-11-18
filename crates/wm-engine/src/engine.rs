@@ -1086,7 +1086,12 @@ impl Engine {
         market: Option<&DailyTemperatureMarket>,
     ) -> (Vec<ViewEvaluation>, Vec<ViewSnapshot>, bool) {
         let today = local_date(self.now, loc.timezone);
-        let filters: Vec<ObservationFilter> = match (loc.confirmed_filter, market) {
+        // A filter confirmed for the NOAA table's rows; the AWC METAR rules
+        // state their own.
+        let confirmed = loc
+            .confirmed_filter
+            .filter(|_| !market.is_some_and(|m| m.resolution.states_its_filter()));
+        let filters: Vec<ObservationFilter> = match (confirmed, market) {
             (Some(f), _) => vec![f],
             (None, Some(m)) if !m.resolution.filters.is_empty() => m.resolution.filters.clone(),
             _ => vec![ObservationFilter::AllRows],
@@ -2006,6 +2011,7 @@ impl Engine {
             .find(|l| l.location == m.location)?;
         let filter = loc
             .confirmed_filter
+            .filter(|_| !m.resolution.states_its_filter())
             .or_else(|| m.resolution.filters.first().copied())
             .unwrap_or(ObservationFilter::AllRows);
         let (_, end) = wm_core::time::local_day_bounds(m.local_date, m.timezone);

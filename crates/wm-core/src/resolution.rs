@@ -7,6 +7,7 @@
 
 use crate::hash::sha256_hex;
 use crate::market::{MarketExtreme, TempUnit};
+use crate::weather::ReportType;
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,10 @@ impl RulesText {
 pub enum ResolutionSourceKind {
     /// weather.gov/wrh/timeseries?site=<site> — rendered from Synoptic Data API data.
     NoaaWrhTimeseries { site: String, url: String },
+    /// The Aviation Weather Center's METARs of a station
+    /// (aviationweather.gov/api/data/metar?ids=<station>): Polymarket's
+    /// rules from the market of 23 October 2026 on.
+    AwcMetar { station: String, url: String },
     /// Weather Underground daily history page.
     WundergroundDaily { url: String },
     /// KNMI official observations.
@@ -53,6 +58,7 @@ impl ResolutionSourceKind {
     pub fn short_name(&self) -> &'static str {
         match self {
             ResolutionSourceKind::NoaaWrhTimeseries { .. } => "NOAA WRH timeseries",
+            ResolutionSourceKind::AwcMetar { .. } => "AWC METAR",
             ResolutionSourceKind::WundergroundDaily { .. } => "Weather Underground",
             ResolutionSourceKind::Knmi { .. } => "KNMI",
             ResolutionSourceKind::Unrecognized { .. } => "unrecognized",
@@ -70,6 +76,9 @@ pub enum ObservationFilter {
     /// past 59 when `start > end`). WRH "Show Hourly Data" is reported to keep
     /// minutes 51–59 for NWS/FAA platforms and 56–04 for other platforms.
     MinuteWindow { start: u8, end: u8 },
+    /// Every routine report, at any minute (also one without a label); a
+    /// special report (SPECI) does not count. The AWC METAR rules.
+    RoutineOnly,
 }
 
 impl ObservationFilter {
@@ -78,9 +87,19 @@ impl ObservationFilter {
     pub const WRH_HOURLY_OTHER: ObservationFilter =
         ObservationFilter::MinuteWindow { start: 56, end: 4 };
 
+    /// Whether a report of `report_type` at local `minute` (of its hour)
+    /// counts.
+    pub fn admits(&self, minute: u8, report_type: ReportType) -> bool {
+        match *self {
+            ObservationFilter::RoutineOnly => report_type == ReportType::Metar,
+            _ => self.admits_minute(minute),
+        }
+    }
+
+    /// Whether a row at local `minute` counts, whatever its report type.
     pub fn admits_minute(&self, minute: u8) -> bool {
         match *self {
-            ObservationFilter::AllRows => true,
+            ObservationFilter::AllRows | ObservationFilter::RoutineOnly => true,
             ObservationFilter::MinuteWindow { start, end } => {
                 if start <= end {
                     (start..=end).contains(&minute)
@@ -95,6 +114,7 @@ impl ObservationFilter {
         match self {
             ObservationFilter::AllRows => "all".to_owned(),
             ObservationFilter::MinuteWindow { start, end } => format!(":{start:02}-:{end:02}"),
+            ObservationFilter::RoutineOnly => ":routine".to_owned(),
         }
     }
 }
@@ -152,6 +172,13 @@ pub struct ResolutionSpec {
 }
 
 impl ResolutionSpec {
+    /// Whether the rules state which reports count (the AWC METAR rules:
+    /// routine reports only), so that no filter a location's configuration
+    /// confirms for the NOAA table's rows takes their place.
+    pub fn states_its_filter(&self) -> bool {
+        matches!(self.source, ResolutionSourceKind::AwcMetar { .. })
+    }
+
     /// A spec is tradable only if the source is recognized and nothing in the
     /// rules text was left unexplained (or a human approved it).
     pub fn is_machine_tradable(&self) -> bool {
@@ -183,6 +210,24 @@ mod tests {
         assert!(!other.admits_minute(55) && !other.admits_minute(5));
         assert!(ObservationFilter::AllRows.admits_minute(25));
         assert_eq!(nws.label(), ":51-:59");
+    }
+
+    /// The AWC rules count every routine report, at any minute, and no
+    /// special one; the other filters look at the minute alone.
+    #[test]
+    fn routine_only_leaves_out_specials() {
+        let r = ObservationFilter::RoutineOnly;
+        assert!(r.admits(25, ReportType::Metar) && r.admits(55, ReportType::Metar));
+        assert!(r.admits(40, ReportType::Metar), "off the nominal hour");
+        assert!(!r.admits(40, ReportType::Speci));
+        assert!(ObservationFilter::AllRows.admits(40, ReportType::Speci));
+        let nws = ObservationFilter::WRH_HOURLY_NWS_FAA;
+        assert!(nws.admits(55, ReportType::Speci) && !nws.admits(25, ReportType::Metar));
+        assert_eq!(r.label(), ":routine");
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"kind":"routine_only"}"#
+        );
     }
 
     #[test]

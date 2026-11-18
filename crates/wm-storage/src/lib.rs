@@ -25,8 +25,8 @@ pub mod report;
 pub mod restore;
 
 pub use report::{
-    ReportBookTop, ReportDecision, ReportFill, ReportHealthChange, ReportObservation, ReportOrder,
-    ReportOutcome, ReportRequestDay, ReportRun, ReportSystemEvent,
+    ReportBookTop, ReportDecision, ReportFill, ReportHealthChange, ReportMarketRules,
+    ReportObservation, ReportOrder, ReportOutcome, ReportRequestDay, ReportRun, ReportSystemEvent,
 };
 pub use restore::RestoreFillRow;
 
@@ -635,7 +635,9 @@ impl PgStore {
         raw: Option<&[u8]>,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO market_rules (rules_sha256, text, resolution_source_url, parsed_spec) VALUES ($1,$2,$3,$4) ON CONFLICT (rules_sha256) DO NOTHING")
+        // A known text keeps its review; its parse follows the parser
+        // (version 2 recognizes the AWC METAR rules stored as unrecognized).
+        sqlx::query("INSERT INTO market_rules (rules_sha256, text, resolution_source_url, parsed_spec) VALUES ($1,$2,$3,$4) ON CONFLICT (rules_sha256) DO UPDATE SET parsed_spec = EXCLUDED.parsed_spec WHERE market_rules.parsed_spec IS DISTINCT FROM EXCLUDED.parsed_spec")
             .bind(&m.rules.sha256)
             .bind(&m.rules.text)
             .bind(m.rules.resolution_source_url.as_deref())

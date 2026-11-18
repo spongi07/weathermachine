@@ -155,6 +155,7 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
         .confirmed_filters
         .get(&l.station)
         .copied()
+        .filter(|_| !market.is_some_and(|m| m.resolution.states_its_filter()))
         .or_else(|| {
             market.and_then(|m| {
                 m.resolution
@@ -174,7 +175,7 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
             local: local(p.observed_at, tz),
             temp_c: p.temp.as_f64(),
             speci: p.report_type == wm_core::weather::ReportType::Speci,
-            eligible: primary_filter.admits_minute(p.local_minute_of_hour),
+            eligible: primary_filter.admits(p.local_minute_of_hour, p.report_type),
         })
         .collect();
     let views: Vec<ViewDto> = l
@@ -267,7 +268,7 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
                     p.temp.round_half_up_whole()
                 ),
                 knowledge_delay_s: 0,
-                flags: if primary_filter.admits_minute(p.local_minute_of_hour) {
+                flags: if primary_filter.admits(p.local_minute_of_hour, p.report_type) {
                     vec!["ELIGIBLE".into()]
                 } else {
                     vec![]
@@ -394,6 +395,10 @@ fn location_dto(l: &LocationSnapshot, snap: &EngineSnapshot, inp: &DtoInputs<'_>
             ResolutionSourceKind::NoaaWrhTimeseries { site, url } => {
                 (format!("NOAA WRH timeseries ({site})"), Some(url.clone()))
             }
+            ResolutionSourceKind::AwcMetar { station, url } => (
+                format!("AWC METAR ({station}, routine reports)"),
+                Some(url.clone()),
+            ),
             ResolutionSourceKind::WundergroundDaily { url } => {
                 ("Weather Underground".to_owned(), Some(url.clone()))
             }

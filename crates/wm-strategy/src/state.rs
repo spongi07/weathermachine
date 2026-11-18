@@ -5,7 +5,8 @@
 //!
 //! * `All` — every METAR/SPECI.
 //! * `Filtered(filter)` — only rows the market's resolution source counts
-//!   (e.g. WRH "hourly" rows, minutes :51–:59).
+//!   (e.g. WRH "hourly" rows, minutes :51–:59; the AWC METAR rules' routine
+//!   reports, no SPECI).
 //!
 //! Replay and live use exactly this code. State is always derived from the
 //! set of observations known *so far*, so a backtest that feeds events in
@@ -41,7 +42,7 @@ impl ViewKind {
     fn admits(&self, p: &ObsPoint) -> bool {
         match self {
             ViewKind::All => true,
-            ViewKind::Filtered { filter } => filter.admits_minute(p.local_minute_of_hour),
+            ViewKind::Filtered { filter } => filter.admits(p.local_minute_of_hour, p.report_type),
         }
     }
 }
@@ -395,6 +396,31 @@ mod tests {
         assert_eq!(s.lower_since_high, 5);
         assert!(s.slope_c_per_hour.unwrap() < -0.5, "declining trajectory");
         assert_eq!(s.observation_count, 7);
+    }
+
+    /// Under the AWC METAR rules a special report does not count: a SPECI
+    /// warmer than every routine report leaves the day's high where the
+    /// routine ones put it; every routine report counts, off the hour too.
+    #[test]
+    fn a_special_report_does_not_count_where_the_rules_count_routine_ones() {
+        let mut e = engine();
+        e.apply_observation(&obs("2026-07-01T11:25:00Z", 170, 1));
+        e.apply_observation(&obs("2026-07-01T11:55:00Z", 180, 1));
+        let mut speci = obs("2026-07-01T12:10:00Z", 190, 1);
+        speci.key.report_type = ReportType::Speci;
+        e.apply_observation(&speci);
+        e.apply_observation(&obs("2026-07-01T12:25:00Z", 175, 1));
+        let at = utc("2026-07-01T12:30:00Z");
+        let routine = ViewKind::Filtered {
+            filter: ObservationFilter::RoutineOnly,
+        };
+        let s = e.day_state(&eham(), d(), routine, at).unwrap();
+        assert_eq!(s.high.unwrap().value, TempC::from_whole(18));
+        assert_eq!(s.observation_count, 3);
+        assert_eq!(s.current.unwrap().observed_at, utc("2026-07-01T12:25:00Z"));
+        let all = e.day_state(&eham(), d(), ViewKind::All, at).unwrap();
+        assert_eq!(all.high.unwrap().value, TempC::from_whole(19));
+        assert_eq!(routine.label(), "filtered:routine");
     }
 
     #[test]

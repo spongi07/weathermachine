@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use wm_core::event::ForecastEvent;
 use wm_core::market::{TempUnit, TemperatureBucket};
+use wm_core::resolution::{ObservationFilter, RulesText};
 use wm_core::time::{Clock, local_date, local_day_bounds};
 use wm_core::units::TempC;
 use wm_storage::{
@@ -257,6 +258,33 @@ pub struct ReportInputs {
     pub requests: Vec<ReportRequestDay>,
     pub health: Vec<ReportHealthChange>,
     pub system: Vec<ReportSystemEvent>,
+    /// The days whose market counts routine reports only (the AWC METAR
+    /// rules, Amsterdam's from the market of 23 October 2026 on): their high
+    /// leaves out the special reports (SPECI), as the market does.
+    pub routine_only: HashSet<NaiveDate>,
+}
+
+/// [`ReportInputs::routine_only`] of a location's markets of `[from, to]`:
+/// their stored rules read by the parser the runtime trades on.
+pub async fn routine_only_days(
+    store: &PgStore,
+    location: &str,
+    tz: Tz,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<HashSet<NaiveDate>> {
+    Ok(store
+        .report_market_rules(location, from, to)
+        .await?
+        .into_iter()
+        .filter(|r| {
+            let rules = RulesText::new(r.text.clone(), r.resolution_source_url.clone());
+            wm_polymarket::parse_resolution_spec(&rules, tz, TempUnit::Celsius)
+                .filters
+                .contains(&ObservationFilter::RoutineOnly)
+        })
+        .map(|r| r.local_date)
+        .collect())
 }
 
 /// Fills and orders are read from this many days before the first day: a
@@ -285,8 +313,10 @@ async fn collect_shared(store: &PgStore, plan: &PaperReportPlan) -> Result<Repor
     let outcomes = store
         .report_outcomes(&plan.location, plan.from, plan.to)
         .await?;
+    let routine_only =
+        routine_only_days(store, &plan.location, plan.tz, plan.from, plan.to).await?;
     let mut books = HashMap::new();
-    for (date, high) in daily_highs(&observations, plan.tz) {
+    for (date, high) in daily_highs(&observations, plan.tz, &routine_only) {
         if let Some(w) = winner(&outcomes, date, high) {
             let (s, e) = local_day_bounds(date, plan.tz);
             let tops = store.report_book_tops(&w.yes_token, s, e).await?;
@@ -312,6 +342,7 @@ async fn collect_shared(store: &PgStore, plan: &PaperReportPlan) -> Result<Repor
         requests: store.report_requests(plan.tz.name(), start, end).await?,
         health: store.report_health_changes(start, end).await?,
         system: store.report_system_events(start, end).await?,
+        routine_only,
     })
 }
 
@@ -656,9 +687,10 @@ struct Settled {
 fn settled(inputs: &ReportInputs, plan: &PaperReportPlan, now: DateTime<Utc>) -> Settled {
     let today = local_date(now, plan.tz);
     let tokens = token_index(&inputs.outcomes);
-    let highs: HashMap<NaiveDate, i32> = daily_highs(&inputs.observations, plan.tz)
-        .into_iter()
-        .collect();
+    let highs: HashMap<NaiveDate, i32> =
+        daily_highs(&inputs.observations, plan.tz, &inputs.routine_only)
+            .into_iter()
+            .collect();
     // The main book's total leaves out the lab's fills and the live twin's:
     // each trades a book of its own (its P&L is listed apart).
     let strategy_of: HashMap<&str, &str> = inputs
@@ -766,13 +798,27 @@ fn current_versions(obs: &[ReportObservation]) -> Vec<&ReportObservation> {
     latest.into_values().collect()
 }
 
-/// METAR high (whole °C, rounded half up) per local date.
-fn daily_highs(obs: &[ReportObservation], tz: Tz) -> Vec<(NaiveDate, i32)> {
+/// Whether a report counts towards its day's high: on a day whose market
+/// counts routine reports only, a special one (SPECI) does not.
+fn counts_for_high(o: &ReportObservation, routine_only: bool) -> bool {
+    !(routine_only && o.report_type == "SPECI")
+}
+
+/// METAR high (whole °C, rounded half up) per local date; on the
+/// `routine_only` days without the special reports.
+fn daily_highs(
+    obs: &[ReportObservation],
+    tz: Tz,
+    routine_only: &HashSet<NaiveDate>,
+) -> Vec<(NaiveDate, i32)> {
     let mut highs: BTreeMap<NaiveDate, i32> = BTreeMap::new();
     for o in current_versions(obs) {
-        if let Some(dc) = o.temperature_dc {
+        let date = local_date(o.observed_at, tz);
+        if let Some(dc) = o.temperature_dc
+            && counts_for_high(o, routine_only.contains(&date))
+        {
             let whole = TempC::from_tenths(dc).round_half_up_whole();
-            let e = highs.entry(local_date(o.observed_at, tz)).or_insert(whole);
+            let e = highs.entry(date).or_insert(whole);
             *e = (*e).max(whole);
         }
     }
@@ -858,11 +904,14 @@ pub(crate) fn settled_total(
     fills: &[ReportFill],
     outcomes: &[ReportOutcome],
     observations: &[ReportObservation],
+    routine_only: &HashSet<NaiveDate>,
     tz: Tz,
     today: NaiveDate,
 ) -> f64 {
     let tokens = token_index(outcomes);
-    let highs: HashMap<NaiveDate, i32> = daily_highs(observations, tz).into_iter().collect();
+    let highs: HashMap<NaiveDate, i32> = daily_highs(observations, tz, routine_only)
+        .into_iter()
+        .collect();
     settle(fills, &tokens, &highs, today).values().sum()
 }
 
@@ -915,7 +964,7 @@ fn build_day(
         .filter(|o| within(o.observed_at))
         .cloned()
         .collect();
-    let weather = day_weather(&obs, tz);
+    let weather = day_weather(&obs, tz, inputs.routine_only.contains(&date));
     let high = weather.high_c;
     let forecast = day_forecast(&inputs.forecasts, plan, date, high);
     let latency = latency(&obs, tz);
@@ -1085,7 +1134,7 @@ fn build_day(
     }
 }
 
-fn day_weather(obs: &[ReportObservation], tz: Tz) -> DayWeather {
+fn day_weather(obs: &[ReportObservation], tz: Tz, routine_only: bool) -> DayWeather {
     let current = current_versions(obs);
     let mut w = DayWeather {
         reports: current.len(),
@@ -1101,6 +1150,7 @@ fn day_weather(obs: &[ReportObservation], tz: Tz) -> DayWeather {
     };
     let whole = |o: &ReportObservation| {
         o.temperature_dc
+            .filter(|_| counts_for_high(o, routine_only))
             .map(|dc| TempC::from_tenths(dc).round_half_up_whole())
     };
     w.high_c = current.iter().filter_map(|o| whole(o)).max();
@@ -2747,6 +2797,40 @@ mod tests {
             md.contains("**L44**: 3 bucket evaluations, 2 signal(s)."),
             "{md}"
         );
+    }
+
+    /// On a day whose market counts routine reports only, a special report
+    /// makes no high: the report judges and settles that day as the market
+    /// does. On the other days it counts, as before.
+    #[test]
+    fn a_special_report_makes_no_high_on_a_routine_only_day() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let o = |at: &str, kind: &str, dc: i32| ReportObservation {
+            observed_at: t(at),
+            report_type: kind.into(),
+            version: 1,
+            temperature_dc: Some(dc),
+            provider: "awc".into(),
+            fetched_at: t(at),
+            from_failover: false,
+        };
+        let obs = vec![
+            o("2026-11-19T11:25:00Z", "METAR", 120),
+            o("2026-11-19T11:40:00Z", "SPECI", 140),
+            o("2026-11-19T11:55:00Z", "METAR", 130),
+        ];
+        let tz = chrono_tz::Europe::Amsterdam;
+        let day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        let w = day_weather(&obs, tz, true);
+        assert_eq!(w.high_c, Some(13));
+        assert_eq!(w.high_first_at.as_deref(), Some("12:55"));
+        assert_eq!((w.reports, w.specis), (3, 1), "still a report");
+        assert_eq!(day_weather(&obs, tz, false).high_c, Some(14));
+        assert_eq!(
+            daily_highs(&obs, tz, &HashSet::from([day])),
+            vec![(day, 13)]
+        );
+        assert_eq!(daily_highs(&obs, tz, &HashSet::new()), vec![(day, 14)]);
     }
 
     #[test]
