@@ -229,8 +229,8 @@ impl HttpFetcher {
         &self.gate
     }
 
-    /// Latest cached successful response for `url` — lets internal consumers
-    /// reuse data without a new external request.
+    /// Latest cached successful response for `url`, asked conditionally —
+    /// lets internal consumers reuse data without a new external request.
     pub fn cached(&self, url: &str) -> Option<CachedResponse> {
         self.cache.get(url)
     }
@@ -471,16 +471,23 @@ impl HttpFetcher {
         record.bytes = body.len() as u64;
         record.payload_sha256 = Some(sha256_hex(&body));
         self.observe_latency(latency);
-        self.cache.put(
-            &req.url,
-            CachedResponse {
-                body: body.clone(),
-                etag,
-                last_modified,
-                content_type: content_type.clone(),
-                fetched_at: record.completed_at,
-            },
-        );
+        // Kept for the next conditional request of this URL only: an
+        // unconditional one (a book, a page of trades, a time window) never
+        // reads it back, and its URLs are new each time (18 November 2026:
+        // the cache held every one of them, and the app sat at its memory
+        // limit).
+        if req.conditional {
+            self.cache.put(
+                &req.url,
+                CachedResponse {
+                    body: body.clone(),
+                    etag,
+                    last_modified,
+                    content_type: content_type.clone(),
+                    fetched_at: record.completed_at,
+                },
+            );
+        }
         Ok(FetchResponse {
             status,
             body,

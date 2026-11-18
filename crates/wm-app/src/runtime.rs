@@ -18,6 +18,7 @@ use crate::config::AppConfig;
 use crate::disk;
 use crate::dto::{self, DtoInputs};
 use crate::http::Publisher;
+use crate::memory;
 use crate::notify;
 use crate::setup::{self, ModelLoad, Providers};
 use crate::training::{self, Progress, TrainPlan};
@@ -1726,9 +1727,23 @@ async fn disk_watch_loop(mut w: DiskWatch) {
                     metrics::gauge!("wm_database_bytes").set(db as f64);
                 }
                 if minute % 60 == 0 {
+                    // The app's memory beside it: whether it stays put, and
+                    // whether a full container is the app or page cache.
+                    let mem = memory::read();
+                    let text = match memory::summary(&mem) {
+                        Some(m) => format!("{}; {m}", disk::summary(&r, database)),
+                        None => disk::summary(&r, database),
+                    };
                     // (not `level`: the JSON log's events are flattened, and
                     // a field of that name took the place of INFO)
-                    tracing::info!(path = %path.display(), state = level.as_str(), "disk: {}", disk::summary(&r, database));
+                    tracing::info!(
+                        path = %path.display(),
+                        state = level.as_str(),
+                        rss_mb = memory::whole_mb(mem.resident),
+                        container_mb = memory::whole_mb(mem.container),
+                        limit_mb = memory::whole_mb(mem.limit),
+                        "disk: {text}"
+                    );
                 }
                 *w.status
                     .lock()

@@ -376,6 +376,12 @@ pub struct Engine {
     hints: HashMap<StationId, StationHint>,
     stats: EngineStats,
     recent_rejections: HashMap<String, DateTime<Utc>>,
+    /// Per market, the signals (strategy, token) on record since its last
+    /// report: in that report's record, or recorded between reports. A
+    /// signal between reports is recorded once, when it is not on record
+    /// yet, not at every evaluation while it stands (18 November 2026: L44,
+    /// L52 and L64 wrote 66,000 records a day, one per evaluation).
+    signals_on_record: HashMap<EventSlug, HashSet<(StrategyId, TokenId)>>,
     forecasts: HashMap<ForecastKey, StoredForecast>,
     /// The latest ten-minute reading per station (predictive input only).
     nowcasts: HashMap<StationId, TenMinuteObservation>,
@@ -470,6 +476,7 @@ impl Engine {
             hints: HashMap::new(),
             stats: EngineStats::default(),
             recent_rejections: HashMap::new(),
+            signals_on_record: HashMap::new(),
             forecasts: HashMap::new(),
             nowcasts: HashMap::new(),
             cfg,
@@ -1537,21 +1544,35 @@ impl Engine {
         // at that moment: the reports' records show it only quoting or
         // holding (16 October 2026: G_live's history read 0 signals beside
         // 22 proposals).
+        // Once: a signal standing at the next evaluation, or back within the
+        // same report interval, is on record already.
         let recorded = |e: &BucketEvaluation| match record {
             Record::Report => true,
             Record::KnmiCheckpoint { .. } => nowcast_readers.contains(&e.strategy),
             Record::None => false,
         };
-        let fired: Vec<String> = evaluations
-            .iter()
-            .filter(|e| e.signal && !recorded(e))
-            .filter(|e| {
-                proposals
-                    .iter()
-                    .any(|p| p.strategy == e.strategy && p.token == e.token)
-            })
-            .map(evaluation_line)
-            .collect();
+        let on_record = self
+            .signals_on_record
+            .entry(market.event_slug.clone())
+            .or_default();
+        if record == Record::Report {
+            on_record.clear();
+        }
+        let fired = signals_to_record(
+            on_record,
+            evaluations
+                .iter()
+                .filter(|e| {
+                    e.signal
+                        && proposals
+                            .iter()
+                            .any(|p| p.strategy == e.strategy && p.token == e.token)
+                })
+                .map(|e| ((e.strategy.clone(), e.token.clone()), recorded(e), e)),
+        )
+        .into_iter()
+        .map(evaluation_line)
+        .collect::<Vec<_>>();
         if !fired.is_empty() {
             let id = self.alloc_decision();
             let rec = DecisionRecord {
@@ -1859,6 +1880,7 @@ impl Engine {
                 }
             }
             self.evaluations.remove(slug);
+            self.signals_on_record.remove(slug);
             self.lab.takers.remove(slug);
             self.lab.ladder.remove(slug);
         }
@@ -2271,6 +2293,24 @@ fn strategy_tag(s: &StrategyId) -> &str {
     s.as_str().split('_').next().unwrap_or(s.as_str())
 }
 
+/// The signals to record between reports: of those standing now (each
+/// with a proposal behind it; `true` where this evaluation's own record
+/// holds it), the ones not on record since the market's last report. All
+/// standing ones are on record after: a signal is recorded once, not at
+/// every evaluation while it stands or each time it comes back within the
+/// report's interval.
+fn signals_to_record<T>(
+    on_record: &mut HashSet<(StrategyId, TokenId)>,
+    standing: impl IntoIterator<Item = ((StrategyId, TokenId), bool, T)>,
+) -> Vec<T> {
+    standing
+        .into_iter()
+        .filter_map(|(key, in_this_record, line)| {
+            (on_record.insert(key) && !in_this_record).then_some(line)
+        })
+        .collect()
+}
+
 /// Which evaluation record an evaluation leaves in the decision log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Record {
@@ -2484,6 +2524,83 @@ mod tests {
             evaluation_line(&eval(None)),
             "G 20°C NO · ask 0.26 · p 0.248 · EV +0.0078 — YES offered at 0.76 outside [0.01, 0.08]"
         );
+    }
+
+    fn key(strategy: &'static str, token: &str) -> (StrategyId, TokenId) {
+        (
+            StrategyId::from_static(strategy),
+            TokenId::new(token).unwrap(),
+        )
+    }
+
+    /// One evaluation's standing signals: (strategy, token, in this
+    /// evaluation's own record), each line named after its key.
+    fn standing(
+        signals: &[(&'static str, &'static str, bool)],
+    ) -> Vec<((StrategyId, TokenId), bool, String)> {
+        signals
+            .iter()
+            .map(|&(s, t, in_record)| (key(s, t), in_record, format!("{s} {t}")))
+            .collect()
+    }
+
+    /// A signal between reports is recorded when it arises, not again at
+    /// each evaluation while it stands (18 November 2026: L44, L52 and L64
+    /// wrote a record per evaluation, 66,000 a day).
+    #[test]
+    fn a_signal_between_reports_is_recorded_once_while_it_stands() {
+        let mut on_record = HashSet::new();
+        let first = signals_to_record(&mut on_record, standing(&[("L44_a", "y20", false)]));
+        assert_eq!(first, vec!["L44_a y20"]);
+        for _ in 0..3 {
+            let again = signals_to_record(&mut on_record, standing(&[("L44_a", "y20", false)]));
+            assert!(again.is_empty(), "{again:?}");
+        }
+        // A new signal beside the standing one is recorded, alone.
+        let next = signals_to_record(
+            &mut on_record,
+            standing(&[("L44_a", "y20", false), ("L52_b", "n21", false)]),
+        );
+        assert_eq!(next, vec!["L52_b n21"]);
+        // The same strategy on another token is another signal.
+        let other = signals_to_record(&mut on_record, standing(&[("L44_a", "n21", false)]));
+        assert_eq!(other, vec!["L44_a n21"]);
+        // Gone for an evaluation and back within the interval: on record.
+        assert!(signals_to_record(&mut on_record, standing(&[])).is_empty());
+        let back = signals_to_record(&mut on_record, standing(&[("L44_a", "y20", false)]));
+        assert!(back.is_empty(), "{back:?}");
+    }
+
+    /// A signal the evaluation's own record holds (the report's, or a
+    /// checkpoint's for the strategies that read it) gets no record of its
+    /// own, then or while it stands after; the next report starts afresh.
+    #[test]
+    fn a_signal_in_a_reports_record_is_not_recorded_again_until_the_next_report() {
+        let mut on_record = HashSet::new();
+        // The report: the caller clears, the report's record holds it.
+        on_record.clear();
+        let at_report = signals_to_record(&mut on_record, standing(&[("G_x", "n20", true)]));
+        assert!(at_report.is_empty(), "{at_report:?}");
+        let after = signals_to_record(&mut on_record, standing(&[("G_x", "n20", false)]));
+        assert!(after.is_empty(), "{after:?}");
+        // Recorded between reports, then standing at the next report: the
+        // report's record holds it, and after that it is on record still.
+        let fresh = signals_to_record(&mut on_record, standing(&[("L64_c", "y19", false)]));
+        assert_eq!(fresh, vec!["L64_c y19"]);
+        on_record.clear();
+        let next_report = signals_to_record(
+            &mut on_record,
+            standing(&[("G_x", "n20", true), ("L64_c", "y19", true)]),
+        );
+        assert!(next_report.is_empty(), "{next_report:?}");
+        let standing_on = signals_to_record(&mut on_record, standing(&[("L64_c", "y19", false)]));
+        assert!(standing_on.is_empty(), "{standing_on:?}");
+        // A signal that went before the report and comes back after it is
+        // new in the new interval.
+        on_record.clear();
+        assert!(signals_to_record(&mut on_record, standing(&[])).is_empty());
+        let returned = signals_to_record(&mut on_record, standing(&[("G_x", "n20", false)]));
+        assert_eq!(returned, vec!["G_x n20"]);
     }
 
     /// G's live twin runs G's rule: its lines must not read as G's, or its

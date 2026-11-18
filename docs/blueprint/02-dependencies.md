@@ -59,5 +59,5 @@ browsers require to instantiate WebAssembly. The remaining JS
 | `rayon` | **Not yet.** A backtest day is sequential by design (knowledge-time order). Parameter sweeps are embarrassingly parallel and will use `rayon` over independent runs when Phase 7–10 sweeps exist; adding it now would be unused code. |
 | `governor` (GCRA rate limiter) | **Not used.** It limits rate only. Providers here also need `Retry-After`, escalating politeness after throttling, a circuit breaker, a daily budget, concurrency caps, per-class hard floors and an auditable state snapshot. `wm-net::GateCore` is a small pure state machine with property tests, so every rule is visible and testable. |
 | `tower::limit` / `backoff` crates | Same reason: partial features. The gate composes all of them. |
-| `moka` (cache) | Not needed: conditional GET plus one in-memory `ResponseCache` per fetcher; persistent caching is PostgreSQL. |
+| `moka` (cache) | Not needed: conditional GET plus one in-memory `ResponseCache` per fetcher (the conditional requests' responses only, at most 64, the one used longest ago going first); persistent caching is PostgreSQL. |
 | Scraping crates (`scraper`, headless browsers) | Not used: HTML scraping is the last-resort tier and no scraper is required (see §7–8). |

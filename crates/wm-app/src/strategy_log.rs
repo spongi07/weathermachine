@@ -551,7 +551,7 @@ fn history_section(s: &mut String, r: &PaperReport, days: usize, strategy: &Stra
         .iter()
         .flat_map(|d| d.strategies.iter())
         .filter(|x| x.strategy == strategy.letter)
-        .map(|x| x.signals.len())
+        .map(|x| x.signal_count)
         .sum();
     let proposals: Vec<_> = shown
         .iter()
@@ -615,9 +615,10 @@ fn day(s: &mut String, d: &DayReport, strategy: &StrategyDto) {
         Some(x) => {
             let _ = writeln!(
                 s,
-                "- Evaluated {} bucket line(s); {} signal(s).",
+                "- Evaluated {} bucket line(s); {} signal(s){}.",
                 x.lines,
-                x.signals.len()
+                x.signal_count,
+                paper_report::signals_listed(x)
             );
             for c in &x.signals {
                 let _ = writeln!(s, "  - signal: {}", paper_report::call_text(c));

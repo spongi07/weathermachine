@@ -53,6 +53,42 @@ async fn http_200_is_audited_and_cached() {
     assert!(f.cached(&format!("{}/obs", server.uri())).is_some());
 }
 
+/// An unconditional request's response is not kept: nothing reads it back,
+/// and its URLs (a book, a page of trades, a time window) are new each time
+/// (18 November 2026: the cache held them all, at the app's memory limit).
+#[tokio::test]
+async fn an_unconditional_response_is_not_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/book"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("book")
+                .insert_header("etag", "\"b1\""),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let f = fetcher(RateLimitPolicy::local_test());
+    let url = format!("{}/book", server.uri());
+    let r = f.get(&req(&server, "/book").unconditional()).await.unwrap();
+    assert_eq!(&r.body[..], b"book");
+    assert!(f.cached(&url).is_none());
+    // Asked conditionally after it: a full request, without If-None-Match,
+    // whose response is kept.
+    let r = f.get(&req(&server, "/book")).await.unwrap();
+    assert_eq!(r.cache, CacheOutcome::Miss);
+    assert!(f.cached(&url).is_some());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.headers.contains_key("if-none-match")),
+        "{requests:?}"
+    );
+}
+
 #[tokio::test]
 async fn conditional_get_uses_etag_and_304_reuses_cached_body() {
     let server = MockServer::start().await;
@@ -386,9 +422,14 @@ async fn client_errors_carry_the_reason_but_never_the_url() {
     assert!(!text.contains("SECRET-KEY-123"), "{text}");
     assert_eq!(err.record().unwrap().endpoint, "/v1/forecast");
 
-    // Transport errors: reqwest would name the URL; it is stripped.
-    let dead = MockServer::start().await;
-    let dead_url = format!("{}/v1/forecast?apikey=SECRET-KEY-123", dead.uri());
+    // Transport errors: reqwest would name the URL; it is stripped. (Not a
+    // dropped MockServer: wiremock pools its servers, and a dropped one still
+    // listens, for the next test that starts one.)
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_url = format!(
+        "http://127.0.0.1:{}/v1/forecast?apikey=SECRET-KEY-123",
+        dead.local_addr().unwrap().port()
+    );
     drop(dead);
     let f = fetcher(RateLimitPolicy::local_test());
     let err = f

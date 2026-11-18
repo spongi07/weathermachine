@@ -47,6 +47,10 @@ const LOG_LOSS_FLOOR: f64 = 0.01;
 const CLOSEST_PER_STRATEGY: usize = 3;
 /// Blocker patterns listed per strategy and day.
 const BLOCKERS_PER_STRATEGY: usize = 4;
+/// Signals listed per strategy and day, the day's first; all are counted
+/// (18 November 2026: L44's 37,841 signals a day made each day's report
+/// tens of megabytes).
+pub const SIGNALS_PER_STRATEGY: usize = 50;
 /// Rows listed per day for proposals, health changes and events.
 const LIST_CAP: usize = 12;
 
@@ -444,6 +448,9 @@ pub struct StrategyDay {
     pub strategy: String,
     /// Bucket evaluations (lines) over the day.
     pub lines: usize,
+    /// Signals over the day.
+    pub signal_count: usize,
+    /// The day's first signals, at most [`SIGNALS_PER_STRATEGY`].
     pub signals: Vec<Call>,
     pub blockers: Vec<BlockerCount>,
     pub closest: Vec<Call>,
@@ -1407,6 +1414,7 @@ fn strategy_days(
     #[derive(Default)]
     struct Acc {
         lines: usize,
+        signal_count: usize,
         signals: Vec<Call>,
         blockers: BTreeMap<String, (usize, String)>,
         best: BTreeMap<(String, String), (Closeness, DateTime<Utc>, EvalLine)>,
@@ -1435,8 +1443,11 @@ fn strategy_days(
             let acc = by_tag.entry(l.tag.clone()).or_default();
             acc.lines += 1;
             if l.signal {
-                acc.signals
-                    .push(call(d.at, &l, buckets, high, fee_rate, tz));
+                acc.signal_count += 1;
+                if acc.signals.len() < SIGNALS_PER_STRATEGY {
+                    acc.signals
+                        .push(call(d.at, &l, buckets, high, fee_rate, tz));
+                }
             } else {
                 for b in l.verdict.split("; ").filter(|b| !b.is_empty()) {
                     let e = acc
@@ -1484,6 +1495,7 @@ fn strategy_days(
             StrategyDay {
                 strategy: tag,
                 lines: acc.lines,
+                signal_count: acc.signal_count,
                 signals: acc.signals,
                 blockers,
                 closest,
@@ -1641,7 +1653,7 @@ fn totals(days: &[DayReport], inputs: &ReportInputs, plan: &PaperReportPlan) -> 
     for d in days {
         t.evaluations += d.evaluations;
         for s in d.strategies.iter().chain(&d.knmi) {
-            *t.signals.entry(s.strategy.clone()).or_default() += s.signals.len();
+            *t.signals.entry(s.strategy.clone()).or_default() += s.signal_count;
         }
         t.proposals += d.proposals.len();
         t.approved += d.proposals.iter().filter(|p| p.approved).count();
@@ -1937,8 +1949,8 @@ pub fn markdown(r: &PaperReport) -> String {
         let sig: Vec<String> = d
             .strategies
             .iter()
-            .filter(|x| !x.signals.is_empty())
-            .map(|x| format!("{} {}", x.strategy, x.signals.len()))
+            .filter(|x| x.signal_count > 0)
+            .map(|x| format!("{} {}", x.strategy, x.signal_count))
             .collect();
         let mvm = d.model_vs_market.as_ref().map_or_else(
             || "–".to_owned(),
@@ -1979,16 +1991,27 @@ pub fn markdown(r: &PaperReport) -> String {
     s
 }
 
+/// `", the first N listed"` where a strategy's day had more signals than
+/// its list holds.
+pub fn signals_listed(st: &StrategyDay) -> String {
+    if st.signal_count > st.signals.len() {
+        format!(", the first {} listed", st.signals.len())
+    } else {
+        String::new()
+    }
+}
+
 /// Each strategy's lines in a set of evaluation records: how often each
 /// blocker stopped it, its signals and its closest calls.
 fn strategies_markdown(s: &mut String, list: &[StrategyDay]) {
     for st in list {
         let _ = writeln!(
             s,
-            "  - **{}**: {} bucket evaluations, {} signal(s).",
+            "  - **{}**: {} bucket evaluations, {} signal(s){}.",
             st.strategy,
             st.lines,
-            st.signals.len()
+            st.signal_count,
+            signals_listed(st)
         );
         if !st.blockers.is_empty() {
             let b: Vec<String> = st
@@ -2637,6 +2660,93 @@ mod tests {
         let r = build(&without, &plan, t("2026-10-08T08:00:00Z"));
         assert_eq!(r.days[0].knmi_checkpoints, 0);
         assert!(!markdown(&r).contains("At KNMI's last reading"));
+    }
+
+    /// A strategy that signals all day lists its day's first signals and
+    /// counts them all, in the day, the totals and the text (18 November
+    /// 2026: L44's 37,841 signals a day made a day's report tens of MB).
+    #[test]
+    fn a_days_signals_are_listed_up_to_a_cap_and_counted_in_full() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let record = |at: DateTime<Utc>, inputs: serde_json::Value, line: &str| ReportDecision {
+            at,
+            strategy: "evaluation".into(),
+            event_slug: Some("eham-oct-7".into()),
+            summary: String::new(),
+            inputs,
+            outputs: serde_json::json!({ "evaluations": [line] }),
+            approved: false,
+            reasons: vec![],
+        };
+        let start = t("2026-10-07T09:00:00Z");
+        let mut decisions = vec![record(
+            start - Duration::minutes(5),
+            serde_json::json!({ "views": [] }),
+            "L44 22°C YES · ask 0.62 · p 0.500 · EV -0.1500 — EV -0.1500 < 0.0200",
+        )];
+        let signals = SIGNALS_PER_STRATEGY + 10;
+        decisions.extend((0..signals).map(|i| {
+            record(
+                start + Duration::minutes(i64::try_from(i).unwrap()),
+                serde_json::json!({ "signal": true }),
+                "L44 22°C YES · ask 0.30 · p 0.500 · EV +0.1500 — SIGNAL",
+            )
+        }));
+        let outcome = ReportOutcome {
+            event_slug: "eham-oct-7".into(),
+            local_date: date,
+            label: "22°C".into(),
+            lower: Some(22),
+            upper: Some(22),
+            yes_token: "y22".into(),
+            no_token: "n22".into(),
+            taker_fee_rate_micros: 50_000,
+        };
+        let inputs = ReportInputs {
+            outcomes: vec![outcome],
+            decisions,
+            ..ReportInputs::default()
+        };
+        let plan = PaperReportPlan {
+            location: "amsterdam".into(),
+            station: "EHAM".into(),
+            tz: chrono_tz::Europe::Amsterdam,
+            from: date,
+            to: date,
+        };
+        let r = build(&inputs, &plan, t("2026-10-08T08:00:00Z"));
+        let l44 = r.days[0]
+            .strategies
+            .iter()
+            .find(|s| s.strategy == "L44")
+            .unwrap();
+        assert_eq!(l44.lines, signals + 1);
+        assert_eq!(l44.signal_count, signals);
+        assert_eq!(l44.signals.len(), SIGNALS_PER_STRATEGY);
+        assert_eq!(l44.signals[0].at, "11:00", "the day's first, local time");
+        assert_eq!(l44.signals[SIGNALS_PER_STRATEGY - 1].at, "11:49");
+        assert_eq!(r.totals.signals.get("L44"), Some(&signals));
+        let md = markdown(&r);
+        assert!(
+            md.contains(&format!(
+                "**L44**: {} bucket evaluations, {signals} signal(s), the first {SIGNALS_PER_STRATEGY} listed.",
+                signals + 1
+            )),
+            "{md}"
+        );
+        assert!(md.contains(&format!("signals: L44 {signals};")), "{md}");
+        assert_eq!(md.matches("    - Signal: ").count(), SIGNALS_PER_STRATEGY);
+        // Under the cap, the count stands alone.
+        let few = ReportInputs {
+            decisions: inputs.decisions[..3].to_vec(),
+            ..inputs.clone()
+        };
+        let md = markdown(&build(&few, &plan, t("2026-10-08T08:00:00Z")));
+        assert!(
+            md.contains("**L44**: 3 bucket evaluations, 2 signal(s)."),
+            "{md}"
+        );
     }
 
     #[test]

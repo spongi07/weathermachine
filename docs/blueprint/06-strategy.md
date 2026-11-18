@@ -826,10 +826,17 @@ lab rule once its minute's hold is over — has its signal lines recorded as
 it fires, in an `evaluation` record of their own ("signal between
 reports", `inputs.signal`, no views): the reports' records show such a
 strategy only quoting or holding (16 October 2026: G_live's history read
-0 signals beside 22 proposals). `report paper` counts them among the
-strategy's lines and signals, not as an evaluation, and scores the model
-on the routine records only; a strategy's page marks them ("signal
-between reports").
+0 signals beside 22 proposals). A signal is recorded once until the
+market's next report: not again while it stands, nor when it comes back
+within that half hour, and not at all when the evaluation's own record
+holds it (the report's; a checkpoint's for the strategies that read it).
+Until 18 November 2026 one was recorded at every evaluation while it
+stood: L44, L52 and L64 wrote 66,000 records a day. `report paper` counts
+them among the strategy's lines and signals, not as an evaluation, and
+scores the model on the routine records only; it lists a strategy's first
+50 signals of a day (`SIGNALS_PER_STRATEGY`) and counts them all ("…, the
+first 50 listed"). A strategy's page marks them ("signal between
+reports").
 
 **TESTING (G–K).**
 * `wm-strategy/tests/new_strategies.rs`: each strategy's signal, the order

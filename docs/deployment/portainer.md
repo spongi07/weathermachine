@@ -401,13 +401,13 @@ everything. The report reads it back, day by day:
 * the METAR high and when it was first reached; how long each report took
   to reach the bot, and which source (AWC or TGFTP) delivered it first;
 * the day-1 forecast's maximum and its error against the METAR high;
-* per strategy: how often each blocker stopped it, any signals, and the
-  three closest calls with how they would have ended if bought at the ask
-  (a maker, G or J, at the bid it would rest). They are ranked by model EV
-  for A, B, D and I; for E and F, which trade on a price, by fewest
-  blockers and then the highest ask; for the other rules (G–K, the lab) by
-  fewest blockers and then the EV, since a rule's probability only holds
-  once its trigger fires;
+* per strategy: how often each blocker stopped it, its signals (the day's
+  first 50 listed, all counted), and the three closest calls with how they
+  would have ended if bought at the ask (a maker, G or J, at the bid it
+  would rest). They are ranked by model EV for A, B, D and I; for E and F,
+  which trade on a price, by fewest blockers and then the highest ask; for
+  the other rules (G–K, the lab) by fewest blockers and then the EV, since
+  a rule's probability only holds once its trigger fires;
 * for K and the lab's KNMI rules also the same at KNMI's last reading before
   each report ("At KNMI's last reading before each report"): their decisive
   moment, which the evaluation after the report cannot show (a reading that
@@ -473,6 +473,7 @@ docker run --rm -e WM_CONTACT=you@example.org ghcr.io/spongi07/weathermachine:la
 | Restart safety | Crash-only design: the process state is rebuilt from PostgreSQL (observations, journal) on start. A second instance cannot poll the same station (PostgreSQL advisory lease). |
 | Backups | Volume `backups`. Restore (stop `weather-machine` first): `docker run --rm -it --network weather-machine_default -e PGPASSWORD=… -v weather-machine_backups:/b postgres:18-alpine pg_restore -h postgres -U wm -d weather_machine --clean --if-exists /b/<file>.dump` |
 | Logs | JSON lines (Portainer → container → Logs): besides the providers and the restore, every paper fill, settlement and engine alert. Change verbosity with `RUST_LOG`. |
+| Memory | Every hour the line `disk: … free of …, the database …; memory: the app … MB resident, the container … MB of … MB` (fields `rss_mb`, `container_mb`, `limit_mb`). The container's use is what `docker stats` shows against the stack's limit (768 MB); it counts the files the container read or wrote (page cache), which the kernel takes back before it would stop the app. The app's own memory is the resident part: it should level off within a day of a start, well under the limit. Until November 2026 the app kept every HTTP response it fetched, and a lab rule's standing signal was recorded at every evaluation (66,000 records a day, each day's report tens of MB); on 18 November the container sat at 764.6 of 768 MiB, with 24 restarts since its deploy on 7 November. |
 | Metrics | Scrape `/metrics` (Basic auth applies if configured). Key series: `nws_requests_total`, `nws_429_total`, `nws_failures_total`, `nws_cache_hits`, `nws_new_observations_total`, `wm_engine_events_total`, `wm_global_exposure_usd`, `wm_kill_switch`, `wm_storage_ok`, `wm_persist_backlog_episodes_total`, `wm_journal_shed_total`, `wm_disk_free_bytes`, `wm_disk_total_bytes`, `wm_database_bytes`, `wm_books_unrecorded_total`. |
 | Disk | On a default install the database, the dumps and the images share one disk. The market stream delivers 1.4–1.9 million order-book updates a day (9–16 October 2026). The replay journal keeps them `WM_JOURNAL_RETENTION_DAYS` (7) days: 11 GB, most of the database (17 October 2026; a day of retention is about 1.5 GB of it). The recorded market history (a token's book when it changed, ≤ 1 per 10 s) grows about 75 MB a day (1.6 GB after three weeks) and is kept `WM_BOOK_HISTORY_DAYS` (14) days, about 1 GB. Until 17 October 2026 it was kept for ever and every nightly dump held all of it; that day the disk was full and PostgreSQL stopped. With the dumps (tens of MB each now) and a few images, plan 25 GB free for the stack. The dashboard's **DISK** pill shows the use (hover: free space, the database's size); under `WM_DISK_WARN_FREE_GB` (5) free an alert and a Pushover message say the disk is filling, and under `WM_DISK_BRAKE_FREE_GB` (2) order books are not written until there is room (decisions, orders and fills always are). Every deploy leaves the previous image behind: `docker image prune -af` now and then (or Portainer → *Images* → *Remove unused*). |
 
@@ -513,6 +514,7 @@ path prefix.
 | `postgres` restarts every minute: `could not write lock file "postmaster.pid": No space left on device` | The disk is full: free space as in [Disk full](#disk-full). PostgreSQL starts by itself within a minute of there being room. |
 | Alert "disk nearly full: … GB free" (**DISK** pill amber) | Under `WM_DISK_WARN_FREE_GB` free: free space before it fills, [Disk full](#disk-full). |
 | Alert "disk almost full: … Order books … are not written" (**DISK … BOOKS OFF**) | Under `WM_DISK_BRAKE_FREE_GB` free the journal's book updates and the market history are not written (exact replay and the history have a gap); trading records are. They are written again 0.5 GB above the threshold ("order books are written again"). Free space: [Disk full](#disk-full). |
+| `weather-machine` restarts by itself; `docker stats` shows its memory at the limit | Read the hourly `memory:` part of the `disk:` lines (see *Memory* in [Operations](#5-operations)). A resident size that keeps growing hour after hour is a leak: send those lines. A container at its limit with the app well under it is page cache, not the cause. On the host, `docker inspect --format '{{.RestartCount}} {{.State.OOMKilled}} {{.State.ExitCode}} {{.State.FinishedAt}}' <container>` says how often and how it last stopped (`OOMKilled` `true`: the memory limit stopped it). |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |
 | Providers *throttled* / *unavailable* | The rate limiter backs off (Retry-After honoured, circuit breaker); trading of that station stays blocked until data is healthy and fresh. Do not lower the polling floors. |
