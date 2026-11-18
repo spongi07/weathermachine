@@ -301,7 +301,7 @@ impl OrderSigner {
     }
 
     pub fn from_key(key: SigningKey) -> Self {
-        let pubkey = key.verifying_key().to_encoded_point(false);
+        let pubkey = key.verifying_key().to_sec1_point(false);
         let hash = keccak(&pubkey.as_bytes()[1..]);
         let address = eip55(&hash[12..]);
         let address_word = hex_to_b32(&address).unwrap_or([0; 32]);
@@ -320,12 +320,10 @@ impl OrderSigner {
         Self::new(v.trim()).map_err(|e| format!("{var}: {e}"))
     }
 
-    /// Sign a 32-byte digest: r || s || v (v = 27 + recovery id).
+    /// Sign a 32-byte digest: r || s || v (v = 27 + recovery id). RFC 6979:
+    /// the same key and digest give the same signature (the golden tests).
     pub fn sign_digest_bytes(&self, digest: &[u8; 32]) -> Result<[u8; 65], String> {
-        let (sig, recid): (Signature, RecoveryId) = self
-            .key
-            .sign_prehash_recoverable(digest)
-            .map_err(|e| format!("sign failed: {e}"))?;
+        let (sig, recid): (Signature, RecoveryId) = self.key.sign_prehash_recoverable(digest);
         let mut out = [0u8; 65];
         out[..64].copy_from_slice(&sig.to_bytes());
         out[64] = 27 + recid.to_byte();
