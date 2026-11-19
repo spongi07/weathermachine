@@ -25,8 +25,9 @@ pub mod report;
 pub mod restore;
 
 pub use report::{
-    ReportBookTop, ReportDecision, ReportFill, ReportHealthChange, ReportMarketRules,
-    ReportObservation, ReportOrder, ReportOutcome, ReportRequestDay, ReportRun, ReportSystemEvent,
+    ReportBookTop, ReportDayDecisions, ReportDecision, ReportFill, ReportHealthChange,
+    ReportMarketRules, ReportObservation, ReportOrder, ReportOutcome, ReportRequestDay, ReportRun,
+    ReportSystemEvent,
 };
 pub use restore::RestoreFillRow;
 

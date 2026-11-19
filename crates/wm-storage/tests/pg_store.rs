@@ -829,3 +829,113 @@ async fn book_history_retention_deletes_old_books_in_chunks() {
     assert!(s.database_size().await.unwrap() > 0);
     db.drop_db().await;
 }
+
+/// The report reads a day's "signal between reports" records only up to a
+/// cap, the earliest, in order; the signal lines of the others are counted
+/// per strategy tag (every record of the engine's: one or more lines joined
+/// by "; "). Until 18 November 2026 a day held up to 3.1 million of them,
+/// and a strategy page that read them took the app past its memory limit.
+#[tokio::test]
+async fn a_days_signal_records_are_read_up_to_a_cap_and_the_rest_counted() {
+    let Some(db) = fresh().await else { return };
+    let s = &db.store;
+    let run = RunId::deterministic(41);
+    let record = |id: u64, at: &str, strategy: &'static str, summary: &str| DecisionRecord {
+        decision_id: DecisionId(id),
+        strategy: StrategyId::from_static(strategy),
+        at: utc(at),
+        location: LocationId::new("amsterdam").unwrap(),
+        event_slug: None,
+        summary: summary.to_owned(),
+        inputs: serde_json::json!({}),
+        outputs: serde_json::json!({}),
+        approved: false,
+        reasons: vec![],
+    };
+    // As the engine writes one: its lines, joined in the summary.
+    let signal = |id: u64, at: &str, lines: &[&str]| DecisionRecord {
+        inputs: serde_json::json!({ "signal": true }),
+        outputs: serde_json::json!({ "evaluations": lines }),
+        ..record(
+            id,
+            at,
+            "evaluation",
+            &format!("signal between reports: {}", lines.join("; ")),
+        )
+    };
+    let l44 = "L44 22°C YES · ask 0.30 · p 0.500 · EV +0.1500 — SIGNAL";
+    let l52 = "L52 21°C NO · ask 0.62 · p 0.700 · EV +0.0800 — SIGNAL";
+    let gl = "GL 20°C NO · ask 0.26 · bid 0.24 (maker) · p 0.248 · EV +0.0078 — SIGNAL";
+    let mut records = vec![
+        record(
+            1,
+            "2026-11-15T08:00:00Z",
+            "evaluation",
+            "evaluated 11 bucket(s)",
+        ),
+        record(
+            2,
+            "2026-11-15T08:05:00Z",
+            "L44_x",
+            "L44_x BUY YES 22°C — REJECTED",
+        ),
+        // The next day's: never read or counted.
+        signal(90, "2026-11-16T00:00:00Z", &[l44]),
+    ];
+    for i in 0..5_u64 {
+        records.push(signal(10 + i, &format!("2026-11-15T09:0{i}:00Z"), &[l44]));
+    }
+    // Two lines in one record; one at the same time as another (in id order).
+    records.push(signal(16, "2026-11-15T09:05:00Z", &[l44, l52]));
+    records.push(signal(15, "2026-11-15T09:05:00Z", &[gl]));
+    s.record_decisions(&run, &records).await.unwrap();
+
+    let (from, to) = (utc("2026-11-15T00:00:00Z"), utc("2026-11-16T00:00:00Z"));
+    let day = |cap| s.report_decisions_capped("amsterdam", from, to, cap);
+    let read = day(3).await.unwrap();
+    let ats: Vec<String> = read
+        .decisions
+        .iter()
+        .map(|d| d.at.format("%H:%M").to_string())
+        .collect();
+    assert_eq!(ats, ["08:00", "08:05", "09:00", "09:01", "09:02"]);
+    assert_eq!(read.decisions[2].outputs["evaluations"][0], l44);
+    assert_eq!(
+        read.decisions[1].outputs,
+        serde_json::Value::Null,
+        "a proposal's"
+    );
+    let counts = |pairs: &[(&str, usize)]| {
+        pairs
+            .iter()
+            .map(|(t, n)| ((*t).to_owned(), *n))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        read.unread_signal_lines,
+        counts(&[("L44", 3), ("L52", 1), ("GL", 1)])
+    );
+    // The cap falls between the two records of 09:05: the lower id is read.
+    let read = day(6).await.unwrap();
+    assert_eq!(read.decisions.last().unwrap().outputs["evaluations"][0], gl);
+    assert_eq!(read.unread_signal_lines, counts(&[("L44", 1), ("L52", 1)]));
+    // Under the cap: everything read, nothing counted.
+    let read = day(100).await.unwrap();
+    assert_eq!(read.decisions.len(), 9);
+    assert!(read.unread_signal_lines.is_empty());
+    assert_eq!(
+        read.decisions.len(),
+        s.report_decisions("amsterdam", from, to)
+            .await
+            .unwrap()
+            .len()
+    );
+    // None read: all counted.
+    let read = day(0).await.unwrap();
+    assert_eq!(read.decisions.len(), 2);
+    assert_eq!(
+        read.unread_signal_lines,
+        counts(&[("L44", 6), ("L52", 1), ("GL", 1)])
+    );
+    db.drop_db().await;
+}

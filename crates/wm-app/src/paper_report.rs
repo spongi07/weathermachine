@@ -52,6 +52,14 @@ const BLOCKERS_PER_STRATEGY: usize = 4;
 /// (18 November 2026: L44's 37,841 signals a day made each day's report
 /// tens of megabytes).
 pub const SIGNALS_PER_STRATEGY: usize = 50;
+/// "Signal between reports" records a day read into memory, the earliest;
+/// the signal lines of the others are counted per strategy in the
+/// database. Until 18 November 2026 the engine recorded a standing signal
+/// at every evaluation: up to 3.1 million records a day (31 October), and a
+/// strategy page, which reads seven days every minute, took the app past
+/// its memory limit until it restarted (11 times in 15 minutes on 19
+/// November). The engine now records some tens a day.
+pub const SIGNAL_RECORDS_PER_DAY: i64 = 5_000;
 /// Rows listed per day for proposals, health changes and events.
 const LIST_CAP: usize = 12;
 
@@ -262,6 +270,10 @@ pub struct ReportInputs {
     /// rules, Amsterdam's from the market of 23 October 2026 on): their high
     /// leaves out the special reports (SPECI), as the market does.
     pub routine_only: HashSet<NaiveDate>,
+    /// Per local day, signal lines between reports per strategy tag in its
+    /// records past the first [`SIGNAL_RECORDS_PER_DAY`], counted in the
+    /// database, not read ([`build_from_store`]).
+    pub unread_signal_lines: BTreeMap<NaiveDate, BTreeMap<String, usize>>,
 }
 
 /// [`ReportInputs::routine_only`] of a location's markets of `[from, to]`:
@@ -343,6 +355,7 @@ async fn collect_shared(store: &PgStore, plan: &PaperReportPlan) -> Result<Repor
         health: store.report_health_changes(start, end).await?,
         system: store.report_system_events(start, end).await?,
         routine_only,
+        unread_signal_lines: BTreeMap::new(),
     })
 }
 
@@ -375,6 +388,10 @@ pub struct DayReport {
     /// Evaluation records (one per weather report while a market was open).
     pub evaluations: usize,
     pub strategies: Vec<StrategyDay>,
+    /// Signal lines between reports past the day's first
+    /// [`SIGNAL_RECORDS_PER_DAY`] records: in the strategies' counts, not
+    /// listed.
+    pub unread_signal_lines: usize,
     /// KNMI checkpoints: records of the last ten-minute reading before each
     /// routine report, with the lines of the strategies that read KNMI (K
     /// and the lab's KNMI rules). That is their decisive moment; the routine
@@ -660,9 +677,16 @@ pub async fn build_from_store(
             continue;
         }
         let (start, end) = local_day_bounds(date, plan.tz);
-        inputs.decisions = store.report_decisions(&plan.location, start, end).await?;
+        let read = store
+            .report_decisions_capped(&plan.location, start, end, SIGNAL_RECORDS_PER_DAY)
+            .await?;
+        inputs.decisions = read.decisions;
+        inputs
+            .unread_signal_lines
+            .insert(date, read.unread_signal_lines);
         let day = day_report(&inputs, plan, date, &settled);
         inputs.decisions = Vec::new();
+        inputs.unread_signal_lines.clear();
         cache.put(&day, settled.today);
         days.push(day);
     }
@@ -1006,7 +1030,11 @@ fn build_day(
         .filter(|d| d.inputs.get("signal").is_none())
         .copied()
         .collect();
+    let unread = inputs.unread_signal_lines.get(&date);
     let mut strategies = strategy_days(&evaluations, &buckets, high, fee_rate, tz);
+    if let Some(u) = unread {
+        add_unread_signals(&mut strategies, u);
+    }
     let mut knmi = strategy_days(&checkpoints, &buckets, high, fee_rate, tz);
     if in_progress {
         for c in strategies
@@ -1118,6 +1146,7 @@ fn build_day(
         market,
         evaluations: routine.len(),
         strategies,
+        unread_signal_lines: unread.map_or(0, |u| u.values().sum()),
         knmi_checkpoints: checkpoints.len(),
         knmi,
         model_vs_market,
@@ -1552,6 +1581,28 @@ fn strategy_days(
             }
         })
         .collect()
+}
+
+/// The signal lines counted in the database, not read, in their strategies'
+/// lines and signals (a strategy with none read gets a day of its own).
+fn add_unread_signals(days: &mut Vec<StrategyDay>, unread: &BTreeMap<String, usize>) {
+    for (tag, &n) in unread {
+        match days.iter_mut().find(|d| d.strategy == *tag) {
+            Some(d) => {
+                d.lines += n;
+                d.signal_count += n;
+            }
+            None => days.push(StrategyDay {
+                strategy: tag.clone(),
+                lines: n,
+                signal_count: n,
+                signals: Vec::new(),
+                blockers: Vec::new(),
+                closest: Vec::new(),
+            }),
+        }
+    }
+    days.sort_by(|a, b| a.strategy.cmp(&b.strategy));
 }
 
 /// The model's view in an evaluation record: `(high_whole, probabilities)`
@@ -2042,12 +2093,14 @@ pub fn markdown(r: &PaperReport) -> String {
 }
 
 /// `", the first N listed"` where a strategy's day had more signals than
-/// its list holds.
+/// its list holds (`", none listed"`: all past the records read).
 pub fn signals_listed(st: &StrategyDay) -> String {
-    if st.signal_count > st.signals.len() {
-        format!(", the first {} listed", st.signals.len())
-    } else {
+    if st.signal_count <= st.signals.len() {
         String::new()
+    } else if st.signals.is_empty() {
+        ", none listed".to_owned()
+    } else {
+        format!(", the first {} listed", st.signals.len())
     }
 }
 
@@ -2241,6 +2294,13 @@ fn day_markdown(s: &mut String, d: &DayReport) {
         );
     }
     let _ = writeln!(s, "- **Evaluations:** {}", d.evaluations);
+    if d.unread_signal_lines > 0 {
+        let _ = writeln!(
+            s,
+            "- **Signals between reports:** {} line(s) past the day's first {SIGNAL_RECORDS_PER_DAY} records counted per strategy, not listed.",
+            d.unread_signal_lines
+        );
+    }
     strategies_markdown(s, &d.strategies);
     if d.knmi_checkpoints > 0 {
         let _ = writeln!(
@@ -2797,6 +2857,73 @@ mod tests {
             md.contains("**L44**: 3 bucket evaluations, 2 signal(s)."),
             "{md}"
         );
+    }
+
+    /// The signal lines counted in the database past a day's first
+    /// SIGNAL_RECORDS_PER_DAY records join their strategies' counts (one
+    /// with none read gets a day of its own, "none listed"); the day says
+    /// how many were counted, not listed, and no other day gets them.
+    #[test]
+    fn signal_lines_counted_in_the_database_join_their_strategies() {
+        let date = NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+        let next = date.succ_opt().unwrap();
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let l44 = "L44 22°C YES · ask 0.30 · p 0.500 · EV +0.1500 — SIGNAL";
+        let signal = |at: &str| ReportDecision {
+            at: t(at),
+            strategy: "evaluation".into(),
+            event_slug: Some("eham-nov-15".into()),
+            summary: format!("signal between reports: {l44}"),
+            inputs: serde_json::json!({ "signal": true }),
+            outputs: serde_json::json!({ "evaluations": [l44] }),
+            approved: false,
+            reasons: vec![],
+        };
+        let outcome = ReportOutcome {
+            event_slug: "eham-nov-15".into(),
+            local_date: date,
+            label: "22°C".into(),
+            lower: Some(22),
+            upper: Some(22),
+            yes_token: "y22".into(),
+            no_token: "n22".into(),
+            taker_fee_rate_micros: 50_000,
+        };
+        let counted = BTreeMap::from([("L44".to_owned(), 100), ("L52".to_owned(), 7)]);
+        let inputs = ReportInputs {
+            outcomes: vec![outcome],
+            decisions: vec![
+                signal("2026-11-15T09:00:00Z"),
+                signal("2026-11-15T09:01:00Z"),
+            ],
+            unread_signal_lines: BTreeMap::from([(date, counted)]),
+            ..ReportInputs::default()
+        };
+        let plan = PaperReportPlan {
+            location: "amsterdam".into(),
+            station: "EHAM".into(),
+            tz: chrono_tz::Europe::Amsterdam,
+            from: date,
+            to: next,
+        };
+        let r = build(&inputs, &plan, t("2026-11-17T08:00:00Z"));
+        let d = &r.days[0];
+        assert_eq!(d.unread_signal_lines, 107);
+        let of = |tag: &str| d.strategies.iter().find(|s| s.strategy == tag).unwrap();
+        let shape = |s: &StrategyDay| (s.lines, s.signal_count, s.signals.len());
+        assert_eq!(shape(of("L44")), (102, 102, 2));
+        assert_eq!(shape(of("L52")), (7, 7, 0));
+        assert_eq!(r.totals.signals.get("L52"), Some(&7));
+        assert_eq!(r.days[1].unread_signal_lines, 0, "the next day's own");
+        assert!(r.days[1].strategies.is_empty());
+        let md = markdown(&r);
+        for line in [
+            "**Signals between reports:** 107 line(s) past the day's first 5000 records counted per strategy, not listed.",
+            "**L44**: 102 bucket evaluations, 102 signal(s), the first 2 listed.",
+            "**L52**: 7 bucket evaluations, 7 signal(s), none listed.",
+        ] {
+            assert!(md.contains(line), "{line}\n{md}");
+        }
     }
 
     /// On a day whose market counts routine reports only, a special report

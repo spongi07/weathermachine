@@ -429,12 +429,18 @@ SPECI does not count); today is provisional. It only reads.
 (the dashboard's address; Basic auth applies if you set it). It covers the
 days since the service first ran, at most the last 31. Choose days with
 `?from=2026-09-26&to=2026-09-29`; add `&format=json` for JSON. Select all,
-copy, paste. The decisions are nearly all of what it reads (1.9 million
-in 31 days in November 2026, most of them the lab's), a day at a time: the
-first report of many days after a start can take a minute (the route waits
-up to two, the others ten seconds). A day two days old can no longer change
-and is kept, so later reports, and the strategy pages' history, read only
-the newest days again.
+copy, paste. The decisions are nearly all of what it reads, a day at a
+time: the first report of many days after a start can take a minute (the
+route waits up to two, the others ten seconds). Of a day's "signal between
+reports" records it reads the first 5,000; the signal lines of the others
+are counted per strategy in the database ("… line(s) past the day's first
+5000 records counted per strategy, not listed"). From 22 October to 18
+November 2026 the engine recorded a standing signal at every evaluation, up
+to 3.1 million records a day: read whole, such a day took the app past its
+memory limit, and a strategy page, which reads seven days every minute, kept
+restarting it (11 times in 15 minutes on 19 November). A day two days old
+can no longer change and is kept, so later reports, and the strategy pages'
+history, read only the newest days again.
 
 **As a one-off container** (any range; the report is also saved as
 `/data/reports/amsterdam-paper.md` and `.json` when the data volume is
@@ -515,7 +521,7 @@ path prefix.
 | `postgres` restarts every minute: `could not write lock file "postmaster.pid": No space left on device` | The disk is full: free space as in [Disk full](#disk-full). PostgreSQL starts by itself within a minute of there being room. |
 | Alert "disk nearly full: … GB free" (**DISK** pill amber) | Under `WM_DISK_WARN_FREE_GB` free: free space before it fills, [Disk full](#disk-full). |
 | Alert "disk almost full: … Order books … are not written" (**DISK … BOOKS OFF**) | Under `WM_DISK_BRAKE_FREE_GB` free the journal's book updates and the market history are not written (exact replay and the history have a gap); trading records are. They are written again 0.5 GB above the threshold ("order books are written again"). Free space: [Disk full](#disk-full). |
-| `weather-machine` restarts by itself; `docker stats` shows its memory at the limit | Read the hourly `memory:` part of the `disk:` lines (see *Memory* in [Operations](#5-operations)). A resident size that keeps growing hour after hour is a leak: send those lines. A container at its limit with the app well under it is page cache, not the cause. On the host, `docker inspect --format '{{.RestartCount}} {{.State.OOMKilled}} {{.State.ExitCode}} {{.State.FinishedAt}}' <container>` says how often and how it last stopped (`OOMKilled` `true`: the memory limit stopped it). |
+| `weather-machine` restarts by itself; `docker stats` shows its memory at the limit | Read the hourly `memory:` part of the `disk:` lines (see *Memory* in [Operations](#5-operations)). A resident size that keeps growing hour after hour is a leak: send those lines. A container at its limit with the app well under it is page cache, not the cause. Up to build 5b2b9cb an open strategy page or the paper report could do it (a day of up to 3.1 million decision records read whole): update the image. On the host, `docker inspect --format '{{.RestartCount}} {{.State.OOMKilled}} {{.State.ExitCode}} {{.State.FinishedAt}}' <container>` says how often and how it last stopped (`OOMKilled` `true`: the memory limit stopped it). |
 | No orders at all; the proposals' reasons read `ResolutionSpec: resolution rules not machine-tradable (review required)`; `market discovered/updated … tradable=false` in the log | The day's market has rules the parser does not know, so the risk check refuses every opening order, paper and live. From 23 October 2026 Polymarket's Amsterdam rules read the AWC METARs: an image whose rules parser is older than version 2 (before 19 November 2026) does not know them: four weeks without a trade. Update it. A newer wording than the one the parser knows stops trading the same way until the parser is updated: the stored text is in `market_rules` (`SELECT text FROM market_rules r JOIN markets m USING (rules_sha256) WHERE m.local_date = current_date`). |
 | Alert "persistence backlog — new positions blocked" | The database was slow for a moment (e.g. a backup or vacuum). Records are held and retried, nothing is lost; trading resumes with "persistence caught up". If it persists, check disk space and the `postgres` logs. |
 | Dashboard says *storage DOWN*, no trades | Audit storage failing ⇒ fail closed by design; check database health/disk. |

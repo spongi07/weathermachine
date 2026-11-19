@@ -5,7 +5,25 @@
 use crate::{PgStore, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::Row;
+use sqlx::postgres::PgRow;
+use std::collections::BTreeMap;
 use wm_core::event::{ForecastEvent, WeatherMachineEvent};
+
+/// The summary an engine's "signal between reports" record starts with
+/// (`wm_engine`'s evaluation record of a signal that fires between two
+/// weather reports).
+const SIGNAL_BETWEEN_REPORTS: &str = "signal between reports";
+
+/// A day's decisions as the report reads them: every record but the
+/// "signal between reports" ones past the first few, whose signal lines are
+/// counted instead.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReportDayDecisions {
+    pub decisions: Vec<ReportDecision>,
+    /// Signal lines between reports per strategy tag (`L44`, `GL`, …) in
+    /// the records that were counted, not read.
+    pub unread_signal_lines: BTreeMap<String, usize>,
+}
 
 /// One stored version of a METAR/SPECI.
 #[derive(Debug, Clone, PartialEq)]
@@ -255,24 +273,94 @@ impl PgStore {
         .bind(to)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|r| {
-                let json = |c: &str| -> Result<serde_json::Value> {
-                    let v: Option<sqlx::types::Json<serde_json::Value>> = r.try_get(c)?;
-                    Ok(v.map_or(serde_json::Value::Null, |j| j.0))
-                };
-                Ok(ReportDecision {
-                    at: r.try_get("at")?,
-                    strategy: r.try_get("strategy")?,
-                    event_slug: r.try_get("event_slug")?,
-                    summary: r.try_get("summary")?,
-                    inputs: json("inputs")?,
-                    outputs: json("outputs")?,
-                    approved: r.try_get("approved")?,
-                    reasons: r.try_get("reasons")?,
-                })
-            })
-            .collect()
+        rows.iter().map(report_decision).collect()
+    }
+
+    /// The decisions of `[from, to)` with at most `max_signal_records` of
+    /// the "signal between reports" records read, the earliest; the signal
+    /// lines of the others are counted per strategy tag in the database.
+    /// Until 18 November 2026 the engine recorded a standing signal at every
+    /// evaluation: a day holds up to 3.1 million such records, and read
+    /// whole, one took the app past its memory limit (the strategy pages
+    /// read seven days every minute).
+    pub async fn report_decisions_capped(
+        &self,
+        location: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        max_signal_records: i64,
+    ) -> Result<ReportDayDecisions> {
+        let rows = sqlx::query(
+            "SELECT * FROM (
+                 SELECT at, strategy, event_slug, summary,
+                        CASE WHEN strategy = 'evaluation' THEN inputs END AS inputs,
+                        CASE WHEN strategy = 'evaluation' THEN outputs END AS outputs,
+                        approved, reasons, decision_id, run_id, false AS between_reports
+                 FROM decision_snapshots
+                 WHERE location_id = $1 AND at >= $2 AND at < $3
+                   AND NOT (strategy = 'evaluation' AND starts_with(summary, $4))
+                 UNION ALL
+                 (SELECT at, strategy, event_slug, summary, inputs, outputs,
+                         approved, reasons, decision_id, run_id, true
+                  FROM decision_snapshots
+                  WHERE location_id = $1 AND at >= $2 AND at < $3
+                    AND strategy = 'evaluation' AND starts_with(summary, $4)
+                  ORDER BY at, decision_id, run_id
+                  LIMIT $5)
+             ) d
+             ORDER BY at, decision_id, run_id",
+        )
+        .bind(location)
+        .bind(from)
+        .bind(to)
+        .bind(SIGNAL_BETWEEN_REPORTS)
+        .bind(max_signal_records.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let read: Vec<&PgRow> = rows
+            .iter()
+            .filter(|r| r.try_get::<bool, _>("between_reports").unwrap_or(false))
+            .collect();
+        let mut unread_signal_lines = BTreeMap::new();
+        if i64::try_from(read.len()).unwrap_or(i64::MAX) >= max_signal_records.max(0) {
+            // Past the last record read, in the same order.
+            let last = read.last();
+            let (at, id, run) = match last {
+                Some(r) => (
+                    r.try_get::<DateTime<Utc>, _>("at")?,
+                    r.try_get::<i64, _>("decision_id")?,
+                    r.try_get::<sqlx::types::Uuid, _>("run_id")?,
+                ),
+                None => (from, i64::MIN, sqlx::types::Uuid::nil()),
+            };
+            let counts = sqlx::query(
+                "SELECT tag, count(*) AS lines FROM (
+                     SELECT (regexp_matches(summary, '(?:^signal between reports: |; )([^ ;]+) ', 'g'))[1] AS tag
+                     FROM decision_snapshots
+                     WHERE location_id = $1 AND at >= $2 AND at < $3
+                       AND strategy = 'evaluation' AND starts_with(summary, $4)
+                       AND (at, decision_id, run_id) > ($5, $6, $7)
+                 ) t
+                 GROUP BY tag",
+            )
+            .bind(location)
+            .bind(from)
+            .bind(to)
+            .bind(SIGNAL_BETWEEN_REPORTS)
+            .bind(at)
+            .bind(id)
+            .bind(run)
+            .fetch_all(&self.pool)
+            .await?;
+            for c in counts {
+                let n: i64 = c.try_get("lines")?;
+                unread_signal_lines.insert(c.try_get("tag")?, usize::try_from(n).unwrap_or(0));
+            }
+        }
+        Ok(ReportDayDecisions {
+            decisions: rows.iter().map(report_decision).collect::<Result<_>>()?,
+            unread_signal_lines,
+        })
     }
 
     /// Buckets of the location's markets for local dates `[from, to]`.
@@ -538,4 +626,22 @@ impl PgStore {
             })
             .collect()
     }
+}
+
+/// A `decision_snapshots` row as the report reads it.
+fn report_decision(r: &PgRow) -> Result<ReportDecision> {
+    let json = |c: &str| -> Result<serde_json::Value> {
+        let v: Option<sqlx::types::Json<serde_json::Value>> = r.try_get(c)?;
+        Ok(v.map_or(serde_json::Value::Null, |j| j.0))
+    };
+    Ok(ReportDecision {
+        at: r.try_get("at")?,
+        strategy: r.try_get("strategy")?,
+        event_slug: r.try_get("event_slug")?,
+        summary: r.try_get("summary")?,
+        inputs: json("inputs")?,
+        outputs: json("outputs")?,
+        approved: r.try_get("approved")?,
+        reasons: r.try_get("reasons")?,
+    })
 }
